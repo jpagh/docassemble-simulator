@@ -12,7 +12,12 @@ import json
 import sys
 from pathlib import Path
 
-from docassemble_simulator.bootstrap import bootstrap, prepare_environment
+from docassemble_simulator.bootstrap import (
+    bootstrap,
+    deep_merge,
+    dyld_fallback_value,
+    prepare_environment,
+)
 from docassemble_simulator.detect import (
     ensure_importable,
     find_package_root,
@@ -42,7 +47,7 @@ def _render(data, indent: int = 0) -> str:
     if isinstance(data, dict):
         lines = []
         for key, val in data.items():
-            if isinstance(val, (dict, list)) and not isinstance(val, str):
+            if isinstance(val, (dict, list)):
                 lines.append(f"{pad}{key}:")
                 lines.append(_render(val, indent + 1))
             else:
@@ -241,9 +246,9 @@ def cmd_index(args, root: Path) -> int:
         mapping[var] = screens or None
     if not mapping:
         print(
-            f"no question index entries"
+            "no question index entries"
             + (f" matching '{args.var}'" if args.var else "")
-            + f"; such variables are defined only by code/objects blocks or are missing",
+            + "; such variables are defined only by code/objects blocks or are missing",
             file=sys.stderr,
         )
         return 1
@@ -275,14 +280,14 @@ def cmd_start(args, root: Path) -> int:
     data = {"interview": interview_path, "session": str(session.state_file)}
     data.update(screen)
     _emit(data, args.json)
-    return 0 if screen.get("kind") != "error" else 2
+    return _screen_exit_code(screen)
 
 
 def cmd_status(args, root: Path) -> int:
     ensure_importable(root)
     bootstrap(stub_define_defined=args.stub_defined)
     interview_path, _ = resolve_interview(root, args.interview)
-    from docassemble_simulator.session import Session, SessionError, variable_names
+    from docassemble_simulator.session import Session, variable_names
 
     session = Session(interview_path, root)
     user_dict, saved_screen, origin, sought_variable = session.load_state_full()
@@ -304,7 +309,7 @@ def cmd_status(args, root: Path) -> int:
         _emit(data, True)
     else:
         _render_screen_or_error(screen, saved_screen)
-    return 0
+    return _screen_exit_code(screen)
 
 
 def cmd_seek(args, root: Path) -> int:
@@ -335,7 +340,7 @@ def cmd_seek(args, root: Path) -> int:
     data = {"interview": interview_path}
     data.update(screen)
     _emit(data, args.json)
-    return 0
+    return _screen_exit_code(screen)
 
 
 def cmd_set(args, root: Path) -> int:
@@ -413,7 +418,7 @@ def cmd_set(args, root: Path) -> int:
         for w in validation["warnings"]:
             print(f"warning: {w}")
         _render_screen_or_error(screen, None)
-    return 0 if screen.get("kind") != "error" else 2
+    return _screen_exit_code(screen)
 
 
 def cmd_get(args, root: Path) -> int:
@@ -491,7 +496,7 @@ def cmd_vars(args, root: Path) -> int:
         if args.filter and args.filter.lower() not in name.lower():
             continue
         try:
-            value = session.eval_in_session(session.load_interview(), user_dict, name)
+            value = session.eval_in_session(interview, user_dict, name)
             data[name] = _safe_repr(value)
         except Exception as err:
             data[name] = f"<{type(err).__name__}: {str(err)[:80]}>"
@@ -567,6 +572,11 @@ def _safe_repr(value) -> str:
     except Exception as err:
         return f"<unrepr-able: {err}>"
     return r if len(r) <= 2000 else r[:2000] + "..."
+
+
+def _screen_exit_code(screen: dict) -> int:
+    """Error screens are exit-distinguishable (2) in every flow command."""
+    return 0 if screen.get("kind") != "error" else 2
 
 
 def _render_screen_or_error(screen: dict, saved_screen: dict | None) -> None:
@@ -681,7 +691,6 @@ def build_parser() -> argparse.ArgumentParser:
             " report YAML/structure errors. Static analysis only: no session, no logic run."
         ),
     )
-    p.add_argument("--all", action="store_true", help="check every interview in the package (the default when no --interview is given)")
     p.set_defaults(func=cmd_check)
 
     p = add_sub(
@@ -717,7 +726,16 @@ def build_parser() -> argparse.ArgumentParser:
             " Run this before 'set', 'status', 'get', 'exec', or 'vars'."
         ),
     )
-    p.add_argument("--set", nargs="*", default=[], metavar="VAR=VALUE", help="initial values to apply right after starting (same grammar as the 'set' command)")
+    p.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        metavar="VAR=VALUE",
+        help=(
+            "initial values to apply right after starting (same grammar as the"
+            " 'set' command; unlike 'set', submit-time validation is not replayed)"
+        ),
+    )
     p.add_argument("--code", action="store_true", help="treat --set values as Python expressions evaluated in the session instead of literals")
     p.set_defaults(func=cmd_start)
 
@@ -808,18 +826,17 @@ def _reexec_with_dyld_path() -> None:
     import os
     import sys
 
-    if sys.platform != "darwin":
-        return
-    if os.environ.get("DYLD_FALLBACK_LIBRARY_PATH"):
-        return
-    if os.environ.get("DASIMULATOR_REEXEC"):  # loop guard
+    value = dyld_fallback_value()
+    if value == os.environ.get("DYLD_FALLBACK_LIBRARY_PATH"):
         return
     os.environ["DASIMULATOR_REEXEC"] = "1"
-    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = "/opt/homebrew/lib"
+    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = value
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def main(argv: list[str] | None = None) -> int:
+    from docassemble_simulator.session import SessionError
+
     _reexec_with_dyld_path()
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -829,8 +846,6 @@ def main(argv: list[str] | None = None) -> int:
     config_sources = []
     if getattr(args, "config", None):
         config_sources.append(Path(args.config))
-    # per-package overrides, committed next to the session state
-    config_sources.append(root / ".dasimulator" / "config.yml")
     for source in config_sources:
         if source.exists():
             import yaml
@@ -838,19 +853,19 @@ def main(argv: list[str] | None = None) -> int:
             loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
             if not isinstance(loaded, dict):
                 raise SystemExit(f"error: config {source} must be a YAML mapping")
-            extra_config = extra_config or {}
-            _deep_merge(extra_config, loaded)
+            deep_merge(extra_config, loaded)
 
-    prepare_environment(extra_config=extra_config)
-    return args.func(args, root)
-
-
-def _deep_merge(base: dict, override: dict) -> None:
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value
+    # Root-scoped effective config: merged overrides must never land in the
+    # shared home config, where they would leak into unrelated packages.
+    effective_config = (
+        root / ".dasimulator" / "config-effective.yml" if extra_config else None
+    )
+    prepare_environment(config_path=effective_config, extra_config=extra_config)
+    try:
+        return args.func(args, root)
+    except SessionError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

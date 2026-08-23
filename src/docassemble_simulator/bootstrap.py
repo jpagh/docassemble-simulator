@@ -119,9 +119,20 @@ def prepare_environment(
     config_path: Path | None = None,
     extra_config: dict | None = None,
 ) -> None:
-    """Set native-library and config-file env vars. Must run before docassemble imports."""
-    if sys.platform == "darwin" and not os.environ.get("DYLD_FALLBACK_LIBRARY_PATH"):
-        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = "/opt/homebrew/lib"
+    """Set native-library and config-file env vars. Must run before docassemble imports.
+
+    Idempotent: the first call wins. The CLI prepares the environment once in
+    main() (with a root-scoped effective-config path when per-package
+    overrides exist); bootstrap()'s later call must not clobber DA_CONFIG_FILE
+    back to the shared home config.
+    """
+    global _PREPARED
+    if _PREPARED:
+        return
+    _PREPARED = True
+
+    if sys.platform == "darwin":
+        _append_dyld_fallback()
 
     if config_path is None:
         config_dir = Path.home() / ".config" / "docassemble-simulator"
@@ -133,9 +144,10 @@ def prepare_environment(
         import yaml
 
         merged = yaml.safe_load(text) or {}
-        _deep_merge(merged, extra_config)
+        deep_merge(merged, extra_config)
         text = yaml.safe_dump(merged, sort_keys=False)
 
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists() or extra_config:
         config_path.write_text(text, encoding="utf-8")
     elif not config_path.read_text(encoding="utf-8").strip():
@@ -144,10 +156,29 @@ def prepare_environment(
     os.environ["DA_CONFIG_FILE"] = str(config_path)
 
 
-def _deep_merge(base: dict, override: dict) -> None:
+# Homebrew installs native libs under /opt/homebrew on Apple Silicon and
+# /usr/local on Intel; other prefixes only work when the user set the var
+# themselves (we never override an existing DYLD_FALLBACK_LIBRARY_PATH).
+_DYLD_CANDIDATES = ("/opt/homebrew/lib", "/usr/local/lib")
+
+
+def dyld_fallback_value() -> str:
+    """Existing user paths plus our candidates, deduplicated, in order."""
+    existing = [
+        p for p in os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "").split(":") if p
+    ]
+    seen = dict.fromkeys(existing + list(_DYLD_CANDIDATES))
+    return ":".join(seen)
+
+
+def _append_dyld_fallback() -> None:
+    os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = dyld_fallback_value()
+
+
+def deep_merge(base: dict, override: dict) -> None:
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], value)
+            deep_merge(base[key], value)
         else:
             base[key] = value
 
@@ -244,6 +275,33 @@ def register_hooks() -> None:
 
 
 _STUBBED = False
+_PREPARED = False
+
+
+def _current_dict():
+    """The thread-context user_dict docassemble evaluation expects, or None."""
+    from docassemble.base.functions import this_thread
+
+    return getattr(this_thread, "current_dict", None)
+
+
+def _fake_define(name, value):
+    """DB-free define(): write into the thread-context user_dict when one is active."""
+    current = _current_dict()
+    if current is not None:
+        current[name] = value
+
+
+def _fake_defined(name) -> bool:
+    """DB-free defined(): evaluate the name against the thread-context user_dict."""
+    current = _current_dict()
+    if current is None:
+        return False
+    try:
+        eval(name, current)
+    except Exception:
+        return False
+    return True
 
 
 def apply_session_stubs(*, stub_define_defined: bool = False) -> None:
@@ -280,6 +338,12 @@ def apply_session_stubs(*, stub_define_defined: bool = False) -> None:
 
     dbf.url_of = _fake_url_of
     dbu.url_of = _fake_url_of
+
+    if stub_define_defined:
+        dbf.define = _fake_define
+        dbf.defined = _fake_defined
+        dbu.define = _fake_define
+        dbu.defined = _fake_defined
 
 
 def neutralize_argv() -> None:

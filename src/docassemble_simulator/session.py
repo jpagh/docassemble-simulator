@@ -15,6 +15,7 @@ This mirrors what the docassemble server does on every request:
 from __future__ import annotations
 
 import json
+import os
 import pickle
 import traceback
 from contextlib import contextmanager
@@ -137,8 +138,14 @@ class Session:
             "origin": origin,
             "sought_variable": sought_variable,
         }
-        with open(self.state_file, "wb") as fh:
-            pickle.dump(payload, fh)
+        tmp = self.state_file.with_name(self.state_file.name + ".tmp")
+        try:
+            with open(tmp, "wb") as fh:
+                pickle.dump(payload, fh)
+            os.replace(tmp, self.state_file)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def load_state(self) -> tuple[dict, dict | None]:
         user_dict, screen, _origin, _sought = self.load_state_full()
@@ -411,6 +418,8 @@ class Session:
             # No live question (e.g. synthesized screen): fall back to the
             # pickled description.
             for f in (screen or {}).get("fields") or []:
+                if f.get("visible") is False or f.get("required") is False:
+                    continue  # [hidden]/[optional] fields need no answer
                 self._check_required_field(
                     user_dict, f.get("variable"), f.get("type"), warnings
                 )

@@ -57,14 +57,18 @@ def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]
         # show_if_sign_code == 0 marks a "hide if" condition.
         return ((not result) if sign0 else result), None
 
-    if "show_if_var" in extras and "show_if_val" in extras:
+    if "show_if_var" in extras:
         hide = extras.get("show_if_sign") == 0
         try:
             actual = eval(from_safeid_safe(extras["show_if_var"]), user_dict)
         except Exception as err:
             return None, f"show-if not evaluable ({type(err).__name__}: {err})"
-        target = _text_of(extras["show_if_val"], user_dict)
-        equal = str(actual) == str(target).strip()
+        if "show_if_val" in extras:
+            target = _text_of(extras["show_if_val"], user_dict)
+            equal = str(actual) == str(target).strip()
+        else:
+            # Bare `show if: variable` targets True, like docassemble's ask().
+            equal = bool(actual)
         return ((not equal) if hide else equal), None
 
     return True, None
