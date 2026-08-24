@@ -6,6 +6,7 @@ import re
 import tempfile
 import traceback
 from pathlib import Path
+from typing import Any
 
 
 class TemplateNotFoundError(Exception):
@@ -117,16 +118,67 @@ def prepare_docx_template(path: str | Path):
         raise RenderError.from_exception(err) from err
 
 
-def render_template(docx_template, context: dict) -> None:
-    """Evaluate a prepared template with docassemble's strict Jinja environment."""
+def render_template(docx_template, context: dict) -> Any:
+    """Evaluate a template in docassemble's real document-render context.
+
+    ``include_docx_template`` relies on the same thread context used by the
+    server's ``assemble_docx`` path.  Includes can add subdocuments whose Jinja
+    needs a second render pass, so return the final ``DocxTemplate`` object.
+    """
+    reset_context = None
     try:
+        from docassemble.base.functions import (
+            reset_context as reset_docx_context,
+            set_context,
+            this_thread,
+        )
         from docassemble.base.jinja import custom_jinja_env
 
-        docx_template.render(context, jinja_env=custom_jinja_env())
+        reset_context = reset_docx_context
+        misc = this_thread.misc
+        misc.pop("docx_subdocs", None)
+        current = docx_template
+        paragraphs = paragraph_count(docx_template)
+
+        for pass_number in range(11):
+            set_context("docx", template=current)
+            old_count = misc.get("docx_include_count", 0)
+            current.render(context, jinja_env=custom_jinja_env())
+            new_count = misc.get("docx_include_count", 0)
+            if new_count <= old_count:
+                break
+            if pass_number == 10:
+                raise RenderError("docx template includes exceeded the render pass limit")
+
+            from docxtpl import DocxTemplate
+
+            fd, temporary_name = tempfile.mkstemp(suffix=".docx")
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                current.save(str(temporary))
+                current = DocxTemplate(str(temporary))
+                current.render_init()
+                current._dasimulator_paragraphs = paragraphs
+            finally:
+                temporary.unlink(missing_ok=True)
+        else:
+            raise RenderError("docx template did not complete rendering")
+
+        subdocs = misc.get("docx_subdocs", [])
+        if subdocs:
+            from docassemble.base.file_docx import fix_subdoc
+
+            for subdoc in subdocs:
+                fix_subdoc(current.docx, subdoc)
+        return current
     except RenderError:
         raise
     except Exception as err:
         raise RenderError.from_exception(err) from err
+    finally:
+        if reset_context is not None:
+            reset_context()
 
 
 def assert_missing(context: dict, var: str) -> None:

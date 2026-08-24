@@ -123,15 +123,34 @@ def describe_choices(field: Any, user_dict: dict) -> list[dict]:
     if not choices:
         return []
     out = []
+    reference = getattr(choices, "instanceName", None)
     for item in choices:
         try:
             if isinstance(item, dict):
-                for key, val in item.items():
+                if "label" in item and "key" in item:
                     out.append(
-                        {"value": _choice_value(key), "label": _text_of(val, user_dict)}
+                        {
+                            "value": _choice_value(_text_of(item["key"], user_dict)),
+                            "label": _text_of(item["label"], user_dict),
+                        }
                     )
+                else:
+                    for key, val in item.items():
+                        out.append(
+                            {"value": _choice_value(key), "label": _text_of(val, user_dict)}
+                        )
             elif isinstance(item, (list, tuple)) and len(item) == 2:
                 out.append({"value": _choice_value(item[0]), "label": _text_of(item[1], user_dict)})
+            elif getattr(item, "instanceName", None):
+                out.append(
+                    {
+                        "value": item.instanceName,
+                        "label": _text_of(item, user_dict),
+                    }
+                )
+            elif reference:
+                out.append({"reference_to": reference})
+                break
             else:
                 out.append({"value": _choice_value(item), "label": None})
         except Exception as err:

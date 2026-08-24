@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from docassemble_simulator.describe import field_visible
+from docassemble_simulator.describe import describe_choices, field_visible
 from docassemble_simulator.session import parse_value
 
 
@@ -37,6 +37,52 @@ class TestParseValue:
 
 def _field(*, extras=None, **kw):
     return SimpleNamespace(extras=extras or {}, **kw)
+
+
+class TestDescribeChoices:
+    class TextObject:
+        def __init__(self, value):
+            self.value = value
+
+        def text(self, user_dict):
+            return self.value
+
+    def test_multiple_choice_button_dict_uses_key_as_value(self):
+        field = _field(
+            choices=[
+                {
+                    "label": self.TextObject("Continue"),
+                    "key": self.TextObject("there_is_another"),
+                }
+            ]
+        )
+
+        assert describe_choices(field, {}) == [
+            {"value": "there_is_another", "label": "Continue"}
+        ]
+
+    def test_object_choice_uses_instance_name(self):
+        class Choice:
+            instanceName = "M.options[0]"
+
+            def __str__(self):
+                return "First option"
+
+        field = _field(choices=[Choice()])
+
+        assert describe_choices(field, {}) == [
+            {"value": "M.options[0]", "label": "First option"}
+        ]
+
+    def test_reference_list_falls_back_to_reference_to(self):
+        class Choices(list):
+            instanceName = "visitation_time_options"
+
+        field = _field(choices=Choices([object()]))
+
+        assert describe_choices(field, {}) == [
+            {"reference_to": "visitation_time_options"}
+        ]
 
 
 class TestFieldVisibleCodeForm:

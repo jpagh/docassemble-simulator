@@ -35,6 +35,9 @@ class SessionError(Exception):
     pass
 
 
+_MISSING = object()
+
+
 class Session:
     def __init__(self, interview_path: str, root: str | Path):
         self.interview_path = interview_path
@@ -147,6 +150,33 @@ class Session:
             tmp.unlink(missing_ok=True)
             raise
 
+    def save_snapshot(self, path: str | Path, user_dict: dict) -> Path:
+        """Save the picklable interview namespace for a later render replay."""
+        snapshot = Path(path).expanduser().resolve()
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        temporary = snapshot.with_name(snapshot.name + ".tmp")
+        try:
+            with open(temporary, "wb") as fh:
+                pickle.dump(_picklable_view(user_dict), fh)
+            os.replace(temporary, snapshot)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return snapshot
+
+    @staticmethod
+    def load_snapshot(path: str | Path) -> dict:
+        """Load a pickled namespace snapshot, reporting user-facing failures."""
+        snapshot = Path(path).expanduser().resolve()
+        try:
+            with open(snapshot, "rb") as fh:
+                user_dict = pickle.load(fh)
+        except Exception as err:
+            raise SessionError(f"could not load snapshot {snapshot}: {err}") from err
+        if not isinstance(user_dict, dict):
+            raise SessionError(f"snapshot {snapshot} does not contain an interview namespace")
+        return user_dict
+
     def load_state(self) -> tuple[dict, dict | None]:
         user_dict, screen, _origin, _sought = self.load_state_full()
         return user_dict, screen
@@ -196,12 +226,19 @@ class Session:
         )
         status = InterviewStatus(current_info=Session.build_status().current_info)
         # url_action()/action_menu_item() read this; keep it present.
-        status.current_info["yaml_filename"] = interview.source.path
+        source = getattr(interview, "source", None)
+        if source is not None:
+            status.current_info["yaml_filename"] = getattr(source, "path", None)
+            package = getattr(source, "package", None)
+        else:
+            package = None
         status.current_info.setdefault("url", None)
         with global_context(empty_globals()), user_dict_context(user_dict):
             this_thread.current_info = status.current_info
             this_thread.interview = interview
             this_thread.interview_status = status
+            if package is not None:
+                this_thread.current_package = package
             this_thread.internal = user_dict.get("_internal", {})
             yield status
 
@@ -325,28 +362,55 @@ class Session:
     # ---------------------------------------------------------------- answers
 
     def apply_assignments(
-        self, interview, user_dict: dict, assignments: list[tuple[str, str]], *, use_code: bool
+        self,
+        interview,
+        user_dict: dict,
+        assignments: list[tuple[str, str]],
+        *,
+        use_code: bool,
+        screen: dict | None = None,
     ) -> list[str]:
         """Apply VAR=VALUE pairs inside the interview namespace.
 
         Values are parsed as JSON when possible (true/false/null/numbers/
         quoted strings/lists/objects); anything else is kept as a literal
         string. With use_code=True each value is evaluated as a Python
-        expression in the session namespace instead.
+        expression in the session namespace instead. Plain dict values for a
+        ``checkboxes`` field are wrapped in docassemble's ``DADict`` to match
+        the object created by browser form processing.
         """
         errors: list[str] = []
+        checkbox_vars = {
+            field.get("variable")
+            for field in (screen or {}).get("fields") or []
+            if str(field.get("type", "")).lower() == "checkboxes"
+        }
         with self._in_interview(interview, user_dict):
             for var, raw_value in assignments:
+                temporary_name = "__dasimulator_checkbox_value"
+                temporary_previous = user_dict.get(temporary_name, _MISSING)
                 try:
                     if use_code:
                         command = f"{var} = {raw_value}"
                     else:
-                        # repr(), not json.dumps(): the assignment is exec'd as
-                        # Python, where booleans are True/False not true/false.
-                        command = f"{var} = {parse_value(raw_value)!r}"
+                        value = parse_value(raw_value)
+                        if var in checkbox_vars and isinstance(value, dict):
+                            from docassemble.base.util import DADict
+
+                            user_dict[temporary_name] = DADict(elements=value)
+                            command = f"{var} = {temporary_name}"
+                        else:
+                            # repr(), not json.dumps(): the assignment is exec'd as
+                            # Python, where booleans are True/False not true/false.
+                            command = f"{var} = {value!r}"
                     exec(command, user_dict)
                 except Exception as err:
                     errors.append(f"{var}: {type(err).__name__}: {err}")
+                finally:
+                    if temporary_previous is _MISSING:
+                        user_dict.pop(temporary_name, None)
+                    else:
+                        user_dict[temporary_name] = temporary_previous
         return errors
 
     def mark_answered(self, interview, user_dict: dict, question_name: str | None) -> None:

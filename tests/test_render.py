@@ -16,6 +16,7 @@ from docassemble_simulator.render import (
     find_template,
     missing_error_matches,
     prepare_docx_template,
+    render_template,
     write_artifact,
 )
 
@@ -143,6 +144,100 @@ class TestAssertMissing:
             assert_missing({"M": Exploding()}, "M.x")
 
 
+class TestRenderContext:
+    def test_render_enters_docx_context_and_returns_template(self, monkeypatch):
+        calls = []
+        thread = SimpleNamespace(misc={})
+
+        functions = types.ModuleType("docassemble.base.functions")
+
+        def set_context(kind, template=None):
+            calls.append(("set", kind, template))
+            thread.evaluation_context = kind
+            thread.misc["docx_include_count"] = 0
+            thread.misc["docx_template"] = template
+
+        def reset_context():
+            calls.append(("reset",))
+            thread.evaluation_context = None
+            thread.misc.pop("docx_include_count", None)
+            thread.misc.pop("docx_template", None)
+
+        functions.set_context = set_context
+        functions.reset_context = reset_context
+        functions.this_thread = thread
+        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
+        monkeypatch.setitem(
+            sys.modules,
+            "docassemble.base.jinja",
+            types.SimpleNamespace(custom_jinja_env=lambda: object()),
+        )
+
+        class FakeTemplate:
+            def render(self, context, jinja_env):
+                assert thread.evaluation_context == "docx"
+                assert thread.misc["docx_template"] is self
+                assert context == {"name": "Alice"}
+
+        template = FakeTemplate()
+
+        assert render_template(template, {"name": "Alice"}) is template
+        assert calls[0] == ("set", "docx", template)
+        assert calls[-1] == ("reset",)
+        assert thread.evaluation_context is None
+
+    def test_include_requests_a_second_docx_render_pass(self, monkeypatch):
+        thread = SimpleNamespace(misc={})
+        functions = types.ModuleType("docassemble.base.functions")
+
+        def set_context(kind, template=None):
+            thread.evaluation_context = kind
+            thread.misc["docx_include_count"] = 0
+            thread.misc["docx_template"] = template
+
+        def reset_context():
+            thread.evaluation_context = None
+            thread.misc.pop("docx_include_count", None)
+            thread.misc.pop("docx_template", None)
+
+        functions.set_context = set_context
+        functions.reset_context = reset_context
+        functions.this_thread = thread
+        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
+        monkeypatch.setitem(
+            sys.modules,
+            "docassemble.base.jinja",
+            types.SimpleNamespace(custom_jinja_env=lambda: object()),
+        )
+
+        class FakeTemplate:
+            def __init__(self, path=None):
+                self.render_count = 0
+                self.include_once = path is None
+                self._dasimulator_paragraphs = 3
+
+            def render_init(self):
+                pass
+
+            def render(self, context, jinja_env):
+                self.render_count += 1
+                if self.include_once and self.render_count == 1:
+                    thread.misc["docx_include_count"] += 1
+
+            def save(self, path):
+                Path(path).write_bytes(b"docx")
+
+        monkeypatch.setitem(sys.modules, "docxtpl", types.SimpleNamespace(DocxTemplate=FakeTemplate))
+        template = FakeTemplate()
+
+        result = render_template(template, {})
+
+        assert result is not template
+        assert result.render_count == 1
+        assert result._dasimulator_paragraphs == 3
+        assert thread.evaluation_context is None
+
+
 class TestArtifact:
     def test_writes_rendered_docx_atomically(self, tmp_path):
         class FakeTemplate:
@@ -169,6 +264,10 @@ class TestRenderParser:
                 "M.x",
                 "--output",
                 "out",
+                "--snapshot",
+                "state.pkl",
+                "--from-snapshot",
+                "saved.pkl",
             ]
         )
 
@@ -179,6 +278,8 @@ class TestRenderParser:
         assert args.fixture == "fixture.py"
         assert args.expect_missing == "M.x"
         assert args.output == "out"
+        assert args.snapshot == "state.pkl"
+        assert args.from_snapshot == "saved.pkl"
 
 
 class TestRenderCommand:

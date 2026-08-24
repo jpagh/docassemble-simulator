@@ -55,9 +55,13 @@ After answering enough screens, `render TEMPLATE.docx` runs the real docxtpl +
 docassemble Jinja pipeline against the saved namespace. Use `--fresh` to run a
 new flow, `--no-flow` to render saved values without assembling, `--output DIR`
 to save a rendered artifact, or `--fixture build.py` for template-only checks.
-Missing variables report their template paragraph and exit 2. Fixture mode is
-also available automatically from `.dasimulator/render-fixture.py`; use it for
-server-only attachment context that v1 does not assemble.
+Use `--snapshot PATH` to save the assembled namespace and
+`--from-snapshot PATH` to replay it after one assemble pass. Snapshots make a
+completed real-mode render reproducible without hand-answering the interview
+again. Missing variables report their template paragraph and exit 2. Real
+`include_docx_template()` calls run in docassemble's document context, including
+subdocument render passes; fixture mode remains available for server-only
+attachment context that v1 does not assemble.
 
 ### Value parsing
 

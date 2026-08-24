@@ -110,7 +110,12 @@ def _screen_lines(screen: dict) -> list[str]:
             choices = field.get("choices")
             if choices:
                 rendered = ", ".join(
-                    f"{c.get('value')!r}" + (f" ({c.get('label')})" if c.get("label") else "")
+                    (
+                        f"reference to {c['reference_to']}"
+                        if c.get("reference_to")
+                        else f"{c.get('value')!r}"
+                        + (f" ({c.get('label')})" if c.get("label") else "")
+                    )
                     for c in choices
                 )
                 out.append(f"       choices: {rendered}")
@@ -269,7 +274,11 @@ def cmd_start(args, root: Path) -> int:
 
     if args.set:
         errors = session.apply_assignments(
-            interview, user_dict, _parse_assignments(args.set), use_code=args.code
+            interview,
+            user_dict,
+            _parse_assignments(args.set),
+            use_code=args.code,
+            screen=screen,
         )
         if errors:
             _emit({"kind": "assignment_errors", "errors": errors}, args.json)
@@ -361,7 +370,11 @@ def cmd_set(args, root: Path) -> int:
     # Prelude first so stubbed dependencies are in place for validation.
     session.run_prelude(user_dict, interview_probe)
     errors = session.apply_assignments(
-        interview_probe, user_dict, assignments, use_code=args.code
+        interview_probe,
+        user_dict,
+        assignments,
+        use_code=args.code,
+        screen=saved_screen,
     )
     if errors:
         _emit({"kind": "assignment_errors", "errors": errors}, args.json)
@@ -521,8 +534,12 @@ def cmd_render(args, root: Path) -> int:
     )
     from docassemble_simulator.session import Session, SessionError
 
-    if args.fresh and args.no_flow:
-        raise SessionError("--fresh and --no-flow cannot be used together")
+    if args.fresh and (args.no_flow or args.from_snapshot):
+        raise SessionError("--fresh cannot be combined with --no-flow or --from-snapshot")
+    if args.no_flow and args.from_snapshot:
+        raise SessionError("--no-flow and --from-snapshot cannot be used together")
+    if args.fixture and args.from_snapshot:
+        raise SessionError("--fixture and --from-snapshot cannot be used together")
 
     try:
         template_path = find_template(root, args.template)
@@ -539,7 +556,9 @@ def cmd_render(args, root: Path) -> int:
 
     session = Session(resolve_interview(root, args.interview)[0], root)
     interview = session.load_interview()
-    if fixture_path is not None:
+    if args.from_snapshot:
+        user_dict = session.load_snapshot(args.from_snapshot)
+    elif fixture_path is not None:
         user_dict = session.fresh_user_dict()
     elif args.no_flow:
         user_dict, _saved_screen = session.load_state()
@@ -569,9 +588,15 @@ def cmd_render(args, root: Path) -> int:
                     if not isinstance(err, DAErrorNoEndpoint):
                         raise RenderError.from_exception(err) from err
 
+            if args.snapshot:
+                try:
+                    session.save_snapshot(args.snapshot, user_dict)
+                except OSError as err:
+                    raise SessionError(f"could not write snapshot: {err}") from err
+
             docx_template = prepare_docx_template(template_path)
             try:
-                render_template(docx_template, user_dict)
+                docx_template = render_template(docx_template, user_dict)
             except RenderError as err:
                 if args.expect_missing and missing_error_matches(err, args.expect_missing):
                     result = {
@@ -835,11 +860,13 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Render TEMPLATE.docx from a package's data/templates directory. By default "
             "the saved session is assembled once before rendering; use --fresh for a new "
-            "flow, --no-flow to use saved state without assembling, or --fixture for a "
-            "Python namespace fixture. Missing values are strict failures and report the "
-            "template paragraph line. Templates that depend on attachment assembly "
-            "(current_context().attachment, merged attachments, or fillable PDFs) may "
-            "need a fixture in this v1 command."
+            "flow, --no-flow to use saved state without assembling, --from-snapshot to "
+            "replay a captured namespace, or --fixture for a Python namespace fixture. "
+            "Use --snapshot to capture the namespace after assembly. Missing values are "
+            "strict failures and report the template paragraph line. Real "
+            "include_docx_template() calls run with docassemble's document context; "
+            "templates that depend on attachment assembly (current_context().attachment, "
+            "merged attachments, or fillable PDFs) may still need a fixture."
         ),
     )
     p.add_argument("template", metavar="TEMPLATE.docx", help="template filename under data/templates")
@@ -848,6 +875,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fixture", default=None, help="execute this Python script as a render namespace fixture")
     p.add_argument("--expect-missing", default=None, metavar="VAR", help="expect VAR to remain undefined through rendering")
     p.add_argument("--output", default=None, metavar="DIR", help="write the rendered .docx atomically into DIR")
+    p.add_argument("--snapshot", default=None, metavar="PATH", help="save the assembled namespace snapshot before rendering")
+    p.add_argument("--from-snapshot", default=None, metavar="PATH", help="load a namespace snapshot, assemble once, then render")
     p.set_defaults(func=cmd_render)
 
     p = add_sub(

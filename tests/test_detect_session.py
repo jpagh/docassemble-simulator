@@ -1,4 +1,6 @@
 import pickle
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -122,12 +124,81 @@ class TestSaveRoundTrip:
         session.reset()
         assert not session.state_file.exists()
 
+    def test_snapshot_round_trip_drops_unpicklable_entries(self, tmp_path):
+        session = Session("docassemble.pkg:main.yml", tmp_path)
+        snapshot = tmp_path / "state.pkl"
+
+        session.save_snapshot(snapshot, {"answer": 42, "callback": lambda: None})
+
+        assert session.load_snapshot(snapshot) == {"answer": 42}
+
 
 def _fake_interview(question=None):
     return SimpleNamespace(
         source=SimpleNamespace(path="/tmp/main.yml"),
         questions_by_name={} if question is None else {question.name: question},
     )
+
+
+class TestCheckboxAssignments:
+    def test_json_dict_is_coerced_to_dadict_for_checkbox_field(self, tmp_path, da_stubs, monkeypatch):
+        class FakeDADict:
+            def __init__(self, *, elements):
+                self.elements = elements
+
+        util = types.ModuleType("docassemble.base.util")
+        util.DADict = FakeDADict
+        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+
+        session = Session("docassemble.pkg:main.yml", tmp_path)
+        user_dict = {"documents": SimpleNamespace()}
+        screen = {
+            "fields": [
+                {"variable": "documents.selected_documents", "type": "checkboxes"}
+            ]
+        }
+
+        errors = session.apply_assignments(
+            _fake_interview(),
+            user_dict,
+            [("documents.selected_documents", '{"family_parenting_plan": true}')],
+            use_code=False,
+            screen=screen,
+        )
+
+        assert errors == []
+        assert isinstance(user_dict["documents"].selected_documents, FakeDADict)
+        assert user_dict["documents"].selected_documents.elements == {
+            "family_parenting_plan": True
+        }
+
+    def test_code_assignments_bypass_checkbox_coercion(self, tmp_path, da_stubs, monkeypatch):
+        class FakeDADict:
+            def __init__(self, *, elements):
+                self.elements = elements
+
+        util = types.ModuleType("docassemble.base.util")
+        util.DADict = FakeDADict
+        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+
+        session = Session("docassemble.pkg:main.yml", tmp_path)
+        user_dict = {"documents": SimpleNamespace(), "DADict": FakeDADict}
+        screen = {
+            "fields": [
+                {"variable": "documents.selected_documents", "type": "checkboxes"}
+            ]
+        }
+
+        errors = session.apply_assignments(
+            _fake_interview(),
+            user_dict,
+            [("documents.selected_documents", "DADict(elements={})")],
+            use_code=True,
+            screen=screen,
+        )
+
+        assert errors == []
+        assert isinstance(user_dict["documents"].selected_documents, FakeDADict)
 
 
 class TestValidateScreenFallback:
