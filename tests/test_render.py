@@ -14,6 +14,7 @@ from docassemble_simulator.render import (
     TemplateNotFoundError,
     assert_missing,
     find_template,
+    missing_error_matches,
     prepare_docx_template,
     write_artifact,
 )
@@ -40,6 +41,16 @@ class TestFindTemplate:
             template.write_bytes(b"docx")
 
         with pytest.raises(TemplateNotFoundError, match="ambiguous"):
+            find_template(tmp_path, "form.docx")
+
+    def test_rejects_template_symlink_outside_templates_directory(self, tmp_path):
+        templates = tmp_path / "docassemble" / "pkg" / "data" / "templates"
+        templates.mkdir(parents=True)
+        outside = tmp_path / "outside.docx"
+        outside.write_bytes(b"docx")
+        (templates / "form.docx").symlink_to(outside)
+
+        with pytest.raises(TemplateNotFoundError, match="form.docx"):
             find_template(tmp_path, "form.docx")
 
 
@@ -95,6 +106,14 @@ class TestPrepareDocxTemplate:
 
 
 class TestRenderErrors:
+    def test_missing_error_matches_exact_variable_name(self):
+        assert missing_error_matches(
+            RenderError("'M.x' is undefined", error_type="UndefinedError"), "M.x"
+        )
+        assert not missing_error_matches(
+            RenderError("'M.xyz' is undefined", error_type="UndefinedError"), "M.x"
+        )
+
     def test_extracts_template_line_as_paragraph(self):
         source_error = RuntimeError("bad value")
         source_error.lineno = 31

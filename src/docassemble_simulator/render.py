@@ -71,9 +71,14 @@ def find_template(root: str | Path, filename: str) -> Path:
     candidates: list[Path] = []
     if da_dir.is_dir():
         for package in sorted(da_dir.iterdir()):
-            template = package / "data" / "templates" / requested
+            templates_dir = (package / "data" / "templates").resolve()
+            template = (templates_dir / requested).resolve()
+            try:
+                template.relative_to(templates_dir)
+            except ValueError:
+                continue
             if template.is_file():
-                candidates.append(template.resolve())
+                candidates.append(template)
 
     if not candidates:
         raise TemplateNotFoundError(
@@ -137,7 +142,7 @@ def missing_error_matches(error: RenderError, var: str) -> bool:
     """Whether a render failure is the expected strict-undefined failure."""
     message = str(error)
     return "undefined" in message and (
-        f"'{var}'" in message or f'"{var}"' in message or var in message
+        f"'{var}'" in message or f'"{var}"' in message
     )
 
 
