@@ -1,6 +1,7 @@
 """Turn docassemble question objects into plain dicts for CLI/agent consumption."""
 from __future__ import annotations
 
+import ast
 import base64
 import re
 from typing import Any
@@ -127,6 +128,9 @@ def describe_choices(field: Any, user_dict: dict) -> list[dict]:
     for item in choices:
         try:
             if isinstance(item, dict):
+                if "compute" in item and "label" not in item and "key" not in item:
+                    out.append({"reference_to": _selection_reference(field) or reference or "<dynamic choices>"})
+                    break
                 if "label" in item and "key" in item:
                     out.append(
                         {
@@ -151,11 +155,28 @@ def describe_choices(field: Any, user_dict: dict) -> list[dict]:
             elif reference:
                 out.append({"reference_to": reference})
                 break
-            else:
+            elif isinstance(item, (str, int, float, bool)) or item is None:
                 out.append({"value": _choice_value(item), "label": None})
+            else:
+                out.append({"reference_to": "<dynamic choices>"})
+                break
         except Exception as err:
             out.append({"value": f"<unrenderable choice: {err}>", "label": None})
     return out
+
+
+def _selection_reference(field: Any) -> str | None:
+    selections = getattr(field, "selections", None)
+    source = selections.get("sourcecode") if isinstance(selections, dict) else None
+    if not isinstance(source, str):
+        return None
+    try:
+        expression = ast.parse(source, mode="eval").body
+        if isinstance(expression, ast.Call) and expression.args:
+            return ast.unparse(expression.args[0])
+    except (SyntaxError, ValueError):
+        pass
+    return None
 
 
 def _choice_value(key: Any) -> Any:

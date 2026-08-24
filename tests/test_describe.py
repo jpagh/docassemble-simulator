@@ -84,6 +84,18 @@ class TestDescribeChoices:
             {"reference_to": "visitation_time_options"}
         ]
 
+    def test_dynamic_selection_reports_source_reference(self):
+        field = _field(
+            choices=[{"compute": compile("visitation_time_options", "<test>", "eval")}],
+            selections={
+                "sourcecode": "docassemble_base_util_selections(visitation_time_options)"
+            },
+        )
+
+        assert describe_choices(field, {}) == [
+            {"reference_to": "visitation_time_options"}
+        ]
+
 
 class TestFieldVisibleCodeForm:
     def test_show_if_code_true(self):
