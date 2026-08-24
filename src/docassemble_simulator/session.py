@@ -225,8 +225,7 @@ class Session:
             # any assemble pass has set up this_thread.
             if interview is None:
                 interview = self.load_interview()
-            with self._in_interview(interview, user_dict):
-                exec(code, user_dict)
+            self.exec_in_namespace(code, user_dict, interview)
         except SessionError:
             raise
         except Exception as err:
@@ -469,9 +468,14 @@ class Session:
         with self._in_interview(interview, user_dict):
             return eval(expression, user_dict)
 
-    def exec_in_session(self, interview, user_dict: dict, code: str) -> None:
+    def exec_in_namespace(self, code: str, user_dict: dict, interview) -> None:
+        """Execute code with the same thread context as an interview pass."""
         with self._in_interview(interview, user_dict):
             exec(code, user_dict)
+
+    def exec_in_session(self, interview, user_dict: dict, code: str) -> None:
+        """Backward-compatible name for the session ``exec`` command."""
+        self.exec_in_namespace(code, user_dict, interview)
 
 
 def _first_line(err: BaseException) -> str:

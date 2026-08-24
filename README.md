@@ -31,6 +31,7 @@ docassemble-simulator info                 # what did we find here?
 docassemble-simulator check                # compile-parse every interview; report errors
 docassemble-simulator questions            # compiled blocks/screens in order (--var to filter)
 docassemble-simulator index --var M.family # variable -> defining screen mapping
+docassemble-simulator render family_parenting_plan.docx # render a template against session state
 ```
 
 ## The agent loop
@@ -49,6 +50,14 @@ screen's question answered (as the server does after a POST), re-runs the
 mandatory chain, prints the next screen, and saves state to
 `.dasimulator/session.pkl`. Add `--json` to any command for machine-readable
 output.
+
+After answering enough screens, `render TEMPLATE.docx` runs the real docxtpl +
+docassemble Jinja pipeline against the saved namespace. Use `--fresh` to run a
+new flow, `--no-flow` to render saved values without assembling, `--output DIR`
+to save a rendered artifact, or `--fixture build.py` for template-only checks.
+Missing variables report their template paragraph and exit 2. Fixture mode is
+also available automatically from `.dasimulator/render-fixture.py`; use it for
+server-only attachment context that v1 does not assemble.
 
 ### Value parsing
 

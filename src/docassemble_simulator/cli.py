@@ -504,6 +504,141 @@ def cmd_vars(args, root: Path) -> int:
     return 0
 
 
+def cmd_render(args, root: Path) -> int:
+    """Render one template against live interview state or a fixture namespace."""
+    ensure_importable(root)
+    bootstrap(stub_define_defined=args.stub_defined)
+    from docassemble_simulator.render import (
+        RenderError,
+        RenderExpectationError,
+        TemplateNotFoundError,
+        find_template,
+        missing_error_matches,
+        paragraph_count,
+        prepare_docx_template,
+        render_template,
+        write_artifact,
+    )
+    from docassemble_simulator.session import Session, SessionError
+
+    if args.fresh and args.no_flow:
+        raise SessionError("--fresh and --no-flow cannot be used together")
+
+    try:
+        template_path = find_template(root, args.template)
+    except TemplateNotFoundError as err:
+        raise SessionError(str(err)) from err
+
+    fixture_path = Path(args.fixture) if args.fixture else root / ".dasimulator" / "render-fixture.py"
+    if not fixture_path.is_absolute() and args.fixture:
+        fixture_path = Path.cwd() / fixture_path
+    if args.fixture and not fixture_path.exists():
+        raise SessionError(f"fixture script not found: {fixture_path}")
+    if not args.fixture and not fixture_path.exists():
+        fixture_path = None
+
+    session = Session(resolve_interview(root, args.interview)[0], root)
+    interview = session.load_interview()
+    if fixture_path is not None:
+        user_dict = session.fresh_user_dict()
+    elif args.no_flow:
+        user_dict, _saved_screen = session.load_state()
+    elif args.fresh:
+        session.reset()
+        user_dict = session.fresh_user_dict()
+    elif session.state_file.exists():
+        user_dict, _saved_screen = session.load_state()
+    else:
+        user_dict = session.fresh_user_dict()
+
+    result = {"template": args.template, "ok": False}
+    try:
+        with session._in_interview(interview, user_dict) as status:
+            if fixture_path is not None:
+                session.exec_in_namespace(
+                    fixture_path.read_text(encoding="utf-8"), user_dict, interview
+                )
+            elif not args.no_flow:
+                interview.load_util(user_dict)
+                session.run_prelude(user_dict, interview)
+                try:
+                    interview.assemble(user_dict, interview_status=status)
+                except Exception as err:
+                    from docassemble.base.error import DAErrorNoEndpoint
+
+                    if not isinstance(err, DAErrorNoEndpoint):
+                        raise RenderError.from_exception(err) from err
+
+            docx_template = prepare_docx_template(template_path)
+            try:
+                render_template(docx_template, user_dict)
+            except RenderError as err:
+                if args.expect_missing and missing_error_matches(err, args.expect_missing):
+                    result = {
+                        "template": args.template,
+                        "ok": True,
+                        "paragraphs": paragraph_count(docx_template),
+                    }
+                else:
+                    raise
+            else:
+                if args.expect_missing:
+                    raise RenderExpectationError(
+                        f"expected missing variable {args.expect_missing!r}, but render succeeded"
+                    )
+                result = {
+                    "template": args.template,
+                    "ok": True,
+                    "paragraphs": paragraph_count(docx_template),
+                }
+                if args.output:
+                    try:
+                        artifact = write_artifact(
+                            docx_template, args.output, template_path.name
+                        )
+                    except OSError as err:
+                        raise SessionError(
+                            f"could not write rendered artifact: {err}"
+                        ) from err
+                    result["artifact"] = str(artifact)
+    except RenderError as err:
+        result = {
+            "template": args.template,
+            "ok": False,
+            "error_type": err.error_type,
+            "message": str(err),
+            "paragraph": err.paragraph,
+        }
+        _emit(result, args.json)
+        return 2
+    except RenderExpectationError as err:
+        result = {
+            "template": args.template,
+            "ok": False,
+            "error_type": type(err).__name__,
+            "message": str(err),
+            "paragraph": None,
+        }
+        _emit(result, args.json)
+        return 2
+    except SessionError:
+        raise
+    except Exception as err:
+        render_error = RenderError.from_exception(err)
+        result = {
+            "template": args.template,
+            "ok": False,
+            "error_type": render_error.error_type,
+            "message": str(render_error),
+            "paragraph": render_error.paragraph,
+        }
+        _emit(result, args.json)
+        return 2
+
+    _emit(result, args.json)
+    return 0
+
+
 def cmd_check(args, root: Path) -> int:
     ensure_importable(root)
     bootstrap(stub_define_defined=args.stub_defined)
@@ -633,6 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  docassemble-simulator vars                 # dump all session variables\n"
             "  docassemble-simulator index --var M.x      # which screen defines M.x?\n"
             "  docassemble-simulator seek M.x --trace     # why does M.x fail to resolve?\n"
+            "  docassemble-simulator render template.docx # render against the saved session\n"
         ),
     )
     parser.add_argument(
@@ -692,6 +828,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=cmd_check)
+
+    p = add_sub(
+        "render",
+        help="render a docx template through docassemble's real Jinja pipeline",
+        description=(
+            "Render TEMPLATE.docx from a package's data/templates directory. By default "
+            "the saved session is assembled once before rendering; use --fresh for a new "
+            "flow, --no-flow to use saved state without assembling, or --fixture for a "
+            "Python namespace fixture. Missing values are strict failures and report the "
+            "template paragraph line. Templates that depend on attachment assembly "
+            "(current_context().attachment, merged attachments, or fillable PDFs) may "
+            "need a fixture in this v1 command."
+        ),
+    )
+    p.add_argument("template", metavar="TEMPLATE.docx", help="template filename under data/templates")
+    p.add_argument("--fresh", action="store_true", help="discard the saved session and run a fresh flow before rendering")
+    p.add_argument("--no-flow", action="store_true", help="skip assembly and render only the saved session state")
+    p.add_argument("--fixture", default=None, help="execute this Python script as a render namespace fixture")
+    p.add_argument("--expect-missing", default=None, metavar="VAR", help="expect VAR to remain undefined through rendering")
+    p.add_argument("--output", default=None, metavar="DIR", help="write the rendered .docx atomically into DIR")
+    p.set_defaults(func=cmd_render)
 
     p = add_sub(
         "questions",
