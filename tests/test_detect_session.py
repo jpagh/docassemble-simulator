@@ -102,6 +102,36 @@ class TestResolveInterview:
         assert "--interview" in str(exc.value)
 
 
+class TestFreshNamespace:
+    def test_internal_keys_match_docassemble_initial_dict(self, tmp_path, monkeypatch):
+        initial = {
+            "_internal": {
+                "answers": {},
+                "misc": {},
+                "informed": {},
+                "objselections": {},
+                "server_only": {},
+            },
+            "url_args": {},
+            "nav": SimpleNamespace(instanceName="nav"),
+        }
+        parse = types.ModuleType("docassemble.base.parse")
+        parse.get_initial_dict = lambda: initial.copy() | {
+            "_internal": dict(initial["_internal"])
+        }
+        util = types.ModuleType("docassemble.base.util")
+        util.DAObject = SimpleNamespace
+        monkeypatch.setitem(sys.modules, "docassemble.base.parse", parse)
+        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+
+        user_dict = Session("docassemble.pkg:main.yml", tmp_path).fresh_user_dict()
+
+        assert set(user_dict["_internal"]) == set(initial["_internal"])
+        assert {"answers", "misc", "informed", "objselections"} <= set(
+            user_dict["_internal"]
+        )
+
+
 class TestSaveRoundTrip:
     def test_save_is_atomic_and_round_trips(self, tmp_path):
         session = Session("docassemble.pkg:main.yml", tmp_path)
@@ -138,6 +168,59 @@ def _fake_interview(question=None):
         source=SimpleNamespace(path="/tmp/main.yml"),
         questions_by_name={} if question is None else {question.name: question},
     )
+
+
+class TestObjectAssignments:
+    def test_reference_checkbox_keys_are_resolved_through_objselections(
+        self, tmp_path, da_stubs
+    ):
+        key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
+        attorney = object()
+
+        class SelectionList(list):
+            gathered = False
+
+        target = SelectionList()
+        user_dict = {
+            "M": SimpleNamespace(attorneys=target),
+            "_internal": {"objselections": {"M.attorneys": {key: attorney}}},
+        }
+        screen = {
+            "fields": [
+                {"variable": "M.attorneys", "type": "object_checkboxes"}
+            ]
+        }
+
+        errors = Session("docassemble.pkg:main.yml", tmp_path).apply_assignments(
+            _fake_interview(),
+            user_dict,
+            [("M.attorneys", f'{{"{key}": true}}')],
+            use_code=False,
+            screen=screen,
+        )
+
+        assert errors == []
+        assert target == [attorney]
+        assert target.gathered is True
+
+    def test_reference_radio_key_resolves_to_object(self, tmp_path, da_stubs):
+        key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
+        attorney = object()
+        user_dict = {
+            "M": SimpleNamespace(attorney=None),
+            "_internal": {"objselections": {"M.attorney": {key: attorney}}},
+        }
+
+        errors = Session("docassemble.pkg:main.yml", tmp_path).apply_assignments(
+            _fake_interview(),
+            user_dict,
+            [("M.attorney", key)],
+            use_code=False,
+            screen={"fields": [{"variable": "M.attorney", "type": "object_radio"}]},
+        )
+
+        assert errors == []
+        assert user_dict["M"].attorney is attorney
 
 
 class TestCheckboxAssignments:

@@ -135,12 +135,10 @@ def prepare_environment(
         _append_dyld_fallback()
 
     if config_path is None:
-        config_dir = Path.home() / ".config" / "docassemble-simulator"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / "config.yml"
+        config_path = Path.cwd() / ".simulator" / "config-effective.yml"
 
     text = DEFAULT_CONFIG_TEXT
-    if extra_config:
+    if extra_config is not None:
         import yaml
 
         merged = yaml.safe_load(text) or {}
@@ -148,7 +146,7 @@ def prepare_environment(
         text = yaml.safe_dump(merged, sort_keys=False)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    if not config_path.exists() or extra_config:
+    if not config_path.exists() or extra_config is not None:
         config_path.write_text(text, encoding="utf-8")
     elif not config_path.read_text(encoding="utf-8").strip():
         config_path.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
@@ -190,6 +188,23 @@ def install_fake_redis() -> None:
     fake.r_user = FakeRedis()
     fake.get_redis_connection = lambda *a, **k: FakeRedis()
     sys.modules["docassemble.webapp.daredis"] = fake
+
+
+def _configured_timezone() -> str:
+    try:
+        import docassemble.base.config as da_config
+
+        configured = getattr(da_config, "daconfig", {}).get("timezone")
+        if configured:
+            return str(configured)
+    except Exception:
+        pass
+    try:
+        from tzlocal import get_localzone_name
+
+        return get_localzone_name()
+    except Exception:
+        return "America/New_York"
 
 
 def register_hooks() -> None:
@@ -238,7 +253,7 @@ def register_hooks() -> None:
 
         @hookimpl
         def get_default_timezone(self):
-            return ""
+            return _configured_timezone()
 
         @hookimpl
         def get_default_country(self):

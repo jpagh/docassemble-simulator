@@ -48,7 +48,7 @@ docassemble-simulator vars                  # dump session variables
 Every `set` applies values in the interview namespace, marks the current
 screen's question answered (as the server does after a POST), re-runs the
 mandatory chain, prints the next screen, and saves state to
-`.dasimulator/session.pkl`. Add `--json` to any command for machine-readable
+`.simulator/session.pkl`. Add `--json` to any command for machine-readable
 output.
 
 After answering enough screens, `render TEMPLATE.docx` runs the real docxtpl +
@@ -82,21 +82,38 @@ use `exec`:
 docassemble-simulator exec "M.parties.append_object('Individual')" --show
 ```
 
-## Stubbing server-only dependencies: the prelude
+## Workspace configuration
 
-Interviews that read the firm DB, PMS OAuth state, or other server-only
-services can be unblocked with `.dasimulator/prelude.py`. It runs in the
-session namespace after util imports but before every mandatory-chain pass,
-so it can patch module attributes or seed variables:
+Runtime state is entirely under `.simulator/` and is gitignored. Authored
+package configuration lives under `.config/simulator/`:
+
+- `config.toml` is merged with discovered parent/global TOML and handed to
+  docassemble as `.simulator/config-effective.yml`.
+- `config.py` is optional seed code executed before flow passes, useful for
+  stubbing server-only dependencies such as firm databases or OAuth.
+- `fixture.py` is an optional render-only namespace fixture.
+
+The recommended layout is:
+
+```text
+.config/simulator/config.toml
+.config/simulator/config.py
+.config/simulator/fixture.py
+.simulator/session.pkl
+```
+
+The simulator discovers root-style and directory-grouped TOML candidates while
+walking upward from the package root. `config.local.toml` is gitignored and
+wins over its committed sibling. A global file may be supplied with
+`DOCASSEMBLE_SIMULATOR_CONFIG` or is read from the XDG config directory.
+
+Example seed script:
 
 ```python
-# .dasimulator/prelude.py
+"""Seed the session before every simulator flow pass."""
 import docassemble.automatedpleading.dw_pms as _pms
 _pms.DWClioAuth.get_credentials = lambda self: type("C", (), {"apply": lambda s, h: None})()
 ```
-
-The prelude re-executes on every `start`/`set`/`status`/`seek --continue`,
-because each CLI invocation is a fresh process.
 
 
 ## Debugging variable-resolution failures

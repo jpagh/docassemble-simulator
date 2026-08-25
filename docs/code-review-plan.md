@@ -19,11 +19,11 @@ Reviewer: code review (1 reviewer agent), verdict **REQUEST_CHANGES**
 ### 2. Per-package config overrides leak into the global home config
 
 - Where: `src/docassemble_simulator/bootstrap.py:128-144`
-- `prepare_environment` writes the merged config (`--config` plus `<root>/.dasimulator/config.yml`)
+- `prepare_environment` writes the merged config (`--config` plus discovered TOML)
   into `~/.config/docassemble-simulator/config.yml`, which persists after exit. Package A's
   overrides then silently apply to unrelated package B on later runs.
 - Fix: write the effective config to a root-scoped location (e.g.
-  `<root>/.dasimulator/config-effective.yml`, or a temp dir keyed by resolved-root hash)
+  `<root>/.simulator/config-effective.yml`, or a temp dir keyed by resolved-root hash)
   and point `DA_CONFIG_FILE` there.
 
 ### 3. `SessionError` escapes every command as an unhandled traceback

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import base64
 import re
+from contextlib import contextmanager
 from typing import Any
 
 
@@ -86,7 +87,9 @@ def field_required(field: Any, user_dict: dict) -> bool:
     return bool(required)
 
 
-def describe_field(field: Any, user_dict: dict) -> dict:
+def describe_field(
+    field: Any, user_dict: dict, choices: list[dict] | None = None
+) -> dict:
     out: dict[str, Any] = {}
     saveas = getattr(field, "saveas", None)
     if saveas is not None:
@@ -110,7 +113,7 @@ def describe_field(field: Any, user_dict: dict) -> dict:
     else:
         out["required"] = field_required(field, user_dict)
 
-    choices = describe_choices(field, user_dict)
+    choices = describe_choices(field, user_dict, choices=choices)
     if choices:
         out["choices"] = choices
     default = getattr(field, "default", None)
@@ -119,8 +122,11 @@ def describe_field(field: Any, user_dict: dict) -> dict:
     return out
 
 
-def describe_choices(field: Any, user_dict: dict) -> list[dict]:
-    choices = getattr(field, "choices", None)
+def describe_choices(
+    field: Any, user_dict: dict, *, choices: list[dict] | None = None
+) -> list[dict]:
+    if choices is None:
+        choices = getattr(field, "choices", None)
     if not choices:
         return []
     out = []
@@ -195,6 +201,37 @@ YESNO_TYPES = {
 }
 
 
+@contextmanager
+def _screen_variable_context(variable: str | None):
+    """Expose the sought variable while dynamic field text is evaluated."""
+    if not variable:
+        yield
+        return
+    try:
+        from docassemble.base.functions import this_thread
+
+        info = getattr(this_thread, "current_info", None)
+        old_info_value = info.get("variable") if isinstance(info, dict) else None
+        had_info_value = isinstance(info, dict) and "variable" in info
+        current_variables = getattr(this_thread, "current_variable", None)
+        if isinstance(current_variables, list):
+            current_variables.append(variable)
+        if isinstance(info, dict):
+            info["variable"] = variable
+        try:
+            yield
+        finally:
+            if isinstance(current_variables, list) and current_variables:
+                current_variables.pop()
+            if isinstance(info, dict):
+                if had_info_value:
+                    info["variable"] = old_info_value
+                else:
+                    info.pop("variable", None)
+    except ImportError:
+        yield
+
+
 def describe_question_result(result: dict, user_dict: dict) -> dict:
     """Flatten an askfor()/assemble() result dict into a screen description."""
     question = result.get("question")
@@ -235,7 +272,10 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
             f["type"] = "signature"
         out["fields"] = fields
         return out
-    out["fields"] = _describe_all_fields(question, user_dict)
+    with _screen_variable_context(result.get("sought") or result.get("orig_sought")):
+        out["fields"] = _describe_all_fields(
+            question, user_dict, result.get("selectcompute") or {}
+        )
     return out
 
 
@@ -243,11 +283,17 @@ def _raw_fields(question: Any) -> list[Any]:
     return list(getattr(question, "fields", None) or [])
 
 
-def _describe_all_fields(question: Any, user_dict: dict) -> list[dict]:
+def _describe_all_fields(
+    question: Any, user_dict: dict, selectcompute: dict | None = None
+) -> list[dict]:
     fields = []
+    selectcompute = selectcompute or {}
     for field in _raw_fields(question):
         try:
-            described = describe_field(field, user_dict)
+            choices = selectcompute.get(getattr(field, "number", None))
+            if choices is None:
+                choices = selectcompute.get(str(getattr(field, "number", "")))
+            described = describe_field(field, user_dict, choices=choices)
         except Exception as err:
             described = {"error": f"could not describe field: {err}"}
         fields.append(described)

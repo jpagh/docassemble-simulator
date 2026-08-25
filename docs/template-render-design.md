@@ -126,7 +126,7 @@ The default mode renders against the real interview namespace:
 1. `Session(root)` + `load_interview()` (same as every command).
 2. Load `session.pkl` if present, else a fresh `user_dict` (`fresh_user_dict()`).
 3. Run one assemble pass inside `Session._in_interview(interview, user_dict)` —
-   `interview.load_util()`, `run_prelude()`, `assemble()` — tolerating `DAErrorNoEndpoint`
+   `interview.load_util()`, `run_config()`, `assemble()` — tolerating `DAErrorNoEndpoint`
    exactly like `current_screen()`. This repopulates the namespace the same way a server
    request does: imported modules (`modules:`) land as callables in `user_dict`, `M` and
    the package objects are live. This is the crucial difference from the harness: no fake
@@ -166,8 +166,8 @@ docassemble dependencies need the thread context the server sets up:
 `render TEMPLATE.docx --fixture build.py`:
 
 1. Fresh `user_dict`; `M` is a plain `DAObject` (or whatever the fixture builds).
-2. Exec `build.py` inside `_in_interview` (reuse the `run_prelude` exec pattern — extract
-   a small `exec_in_namespace(code, user_dict, interview)` helper so prelude, fixture, and
+2. Exec `build.py` inside `_in_interview` (reuse the `run_config` exec pattern — extract
+   a small `exec_in_namespace(code, user_dict, interview)` helper so config, fixture, and
    `exec` share one path), then render.
 
 The fixture script author builds the object tree exactly like the harness's
@@ -176,9 +176,8 @@ the migration path: the old `build_namespace()` body becomes a fixture script, s
 template-only checks carry over unchanged. Document that mode B is for template-only
 checks where the flow cannot reach the needed data; mode A is the default and better.
 
-Implementation simplification: fixture mode can reuse the existing
-`.dasimulator/` conventions — for example `render` also honors a
-`<root>/.dasimulator/render-fixture.py` if present (mirroring `prelude.py`). Default when
+Implementation simplification: fixture mode follows the workspace convention —
+`render` also honors a `<root>/.config/simulator/fixture.py` if present. Default when
 no session and no fixture: a fresh flow (mode A).
 
 ### 4.5 Where it wires in
@@ -203,7 +202,8 @@ the documented install contract: run inside the target package's virtualenv.
 ## 5. Conventions this must respect
 
 - Agent-friendly: human-readable text by default, `--json` for machines, no interactive
-  prompts, small stateless commands, sessions persist under `<root>/.dasimulator/`.
+  prompts, small stateless commands, sessions persist under `<root>/.simulator/`
+  and authored seed code lives under `<root>/.config/simulator/`.
 - Exit-code discipline: `0` success, `1` usage/session errors (via the central
   `SessionError` catch), `2` render failure — consistent with `start`/`set`/`seek`.
 - The formula `os.replace()` for atomic writes (code-review item 7) applies to writing the

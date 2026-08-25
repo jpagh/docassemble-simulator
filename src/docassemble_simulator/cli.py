@@ -2,7 +2,7 @@
 
 Agent-friendly: every command prints either human-readable text or, with
 --json, a machine-readable document. Sessions persist under
-<package-root>/.dasimulator/session.pkl so an agent can drive the interview
+<package-root>/.simulator/session.pkl so an agent can drive the interview
 across many small invocations.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from docassemble_simulator.bootstrap import (
     dyld_fallback_value,
     prepare_environment,
 )
+from docassemble_simulator.config import load_config
 from docassemble_simulator.detect import (
     ensure_importable,
     find_package_root,
@@ -170,8 +171,8 @@ def cmd_info(args, root: Path) -> int:
         "packages": list_packages(root),
         "interview_count": len(interviews),
         "interviews": interviews,
-        "session_file": str(root / ".dasimulator" / "session.pkl"),
-        "session_exists": (root / ".dasimulator" / "session.pkl").exists(),
+        "session_file": str(root / ".simulator" / "session.pkl"),
+        "session_exists": (root / ".simulator" / "session.pkl").exists(),
     }
     try:
         import docassemble.base
@@ -367,8 +368,8 @@ def cmd_set(args, root: Path) -> int:
 
     # Apply without advancing: the values belong to the *current* screen.
     interview_probe = session.load_interview()
-    # Prelude first so stubbed dependencies are in place for validation.
-    session.run_prelude(user_dict, interview_probe)
+    # Authored seed code first so stubbed dependencies are in place for validation.
+    session.run_config(user_dict, interview_probe)
     errors = session.apply_assignments(
         interview_probe,
         user_dict,
@@ -443,7 +444,7 @@ def cmd_get(args, root: Path) -> int:
     session = Session(interview_path, root)
     user_dict, _saved = session.load_state()
     interview = session.load_interview()
-    session.run_prelude(user_dict, interview)
+    session.run_config(user_dict, interview)
     try:
         value = session.eval_in_session(interview, user_dict, args.expression)
     except Exception as err:
@@ -468,7 +469,7 @@ def cmd_exec(args, root: Path) -> int:
     session = Session(interview_path, root)
     user_dict, saved_screen = session.load_state()
     interview = session.load_interview()
-    session.run_prelude(user_dict, interview)
+    session.run_config(user_dict, interview)
     code = args.code
     if args.file:
         code = Path(args.file).read_text(encoding="utf-8")
@@ -502,7 +503,7 @@ def cmd_vars(args, root: Path) -> int:
     session = Session(interview_path, root)
     user_dict, _saved = session.load_state()
     interview = session.load_interview()
-    session.run_prelude(user_dict, interview)
+    session.run_config(user_dict, interview)
     names = variable_names(user_dict, limit=100000)
     data = {}
     for name in names:
@@ -546,7 +547,7 @@ def cmd_render(args, root: Path) -> int:
     except TemplateNotFoundError as err:
         raise SessionError(str(err)) from err
 
-    fixture_path = Path(args.fixture) if args.fixture else root / ".dasimulator" / "render-fixture.py"
+    fixture_path = Path(args.fixture) if args.fixture else root / ".config" / "simulator" / "fixture.py"
     if not fixture_path.is_absolute() and args.fixture:
         fixture_path = Path.cwd() / fixture_path
     if args.fixture and not fixture_path.exists():
@@ -574,12 +575,14 @@ def cmd_render(args, root: Path) -> int:
     try:
         with session._in_interview(interview, user_dict) as status:
             if fixture_path is not None:
+                if hasattr(session, "run_config"):
+                    session.run_config(user_dict, interview)
                 session.exec_in_namespace(
                     fixture_path.read_text(encoding="utf-8"), user_dict, interview
                 )
             elif not args.no_flow:
                 interview.load_util(user_dict)
-                session.run_prelude(user_dict, interview)
+                session.run_config(user_dict, interview)
                 try:
                     interview.assemble(user_dict, interview_status=status)
                 except Exception as err:
@@ -760,7 +763,7 @@ def build_parser() -> argparse.ArgumentParser:
             "driven through the real seek/assemble machinery, so variable-resolution\n"
             "failures, broken conditions, and bad screens reproduce exactly.\n"
             "\n"
-            "State is a single session file (.dasimulator/session.pkl inside the\n"
+            "State is a single session file (.simulator/session.pkl inside the\n"
             "package directory): 'start' creates it, 'set' advances it, and\n"
             "'status', 'get', and 'vars' inspect it. Every command accepts --json\n"
             "for machine-readable output. Commands that need a session say so;\n"
@@ -816,7 +819,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default=None,
-        help="extra docassemble server config YAML (merged over the simulator default; .dasimulator/config.yml is loaded automatically)",
+        help="extra docassemble server config YAML (merged over discovered simulator TOML config)",
     )
     common.add_argument("--root", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     common.add_argument(
@@ -1028,25 +1031,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = find_package_root(args.root)
 
-    extra_config = None
-    config_sources = []
-    if getattr(args, "config", None):
-        config_sources.append(Path(args.config))
-    for source in config_sources:
-        if source.exists():
-            import yaml
+    try:
+        effective_config_data = load_config(root)
+    except ValueError as err:
+        raise SystemExit(f"error: {err}") from err
 
-            loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
-            if not isinstance(loaded, dict):
-                raise SystemExit(f"error: config {source} must be a YAML mapping")
-            deep_merge(extra_config, loaded)
+    if getattr(args, "config", None):
+        source = Path(args.config).expanduser()
+        if not source.exists():
+            raise SystemExit(f"error: config {source} does not exist")
+        import yaml
+
+        loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        if not isinstance(loaded, dict):
+            raise SystemExit(f"error: config {source} must be a YAML mapping")
+        deep_merge(effective_config_data, loaded)
 
     # Root-scoped effective config: merged overrides must never land in the
     # shared home config, where they would leak into unrelated packages.
-    effective_config = (
-        root / ".dasimulator" / "config-effective.yml" if extra_config else None
+    effective_config = root / ".simulator" / "config-effective.yml"
+    prepare_environment(
+        config_path=effective_config,
+        extra_config=effective_config_data,
     )
-    prepare_environment(config_path=effective_config, extra_config=extra_config)
     try:
         return args.func(args, root)
     except SessionError as err:

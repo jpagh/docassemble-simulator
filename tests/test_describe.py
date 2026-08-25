@@ -1,6 +1,12 @@
+import sys
+import types
 from types import SimpleNamespace
 
-from docassemble_simulator.describe import describe_choices, field_visible
+from docassemble_simulator.describe import (
+    describe_choices,
+    describe_question_result,
+    field_visible,
+)
 from docassemble_simulator.session import parse_value
 
 
@@ -94,6 +100,89 @@ class TestDescribeChoices:
 
         assert describe_choices(field, {}) == [
             {"reference_to": "visitation_time_options"}
+        ]
+
+    def test_dynamic_button_uses_sought_variable(self, monkeypatch):
+        thread = SimpleNamespace(current_info={}, current_variable=[])
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.this_thread = thread
+        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
+
+        class DynamicText:
+            def __init__(self, value):
+                self.value = value
+
+            def text(self, _user_dict):
+                if self.value == "variable-tail":
+                    return thread.current_info["variable"].split(".")[-1]
+                return self.value
+
+        field = _field(
+            number=1,
+            saveas=safeid("x.button"),
+            choices=[
+                {
+                    "key": DynamicText("variable-tail"),
+                    "label": DynamicText("Continue"),
+                }
+            ],
+        )
+        question = SimpleNamespace(
+            question_type="question",
+            name="gather",
+            fields=[field],
+            validation_code=None,
+        )
+
+        result = describe_question_result(
+            {
+                "question": question,
+                "question_text": "Gather",
+                "subquestion_text": None,
+                "continue_label": None,
+                "sought": "M.attorneys.there_is_another",
+                "orig_sought": "M.attorneys.there_is_another",
+            },
+            {},
+        )
+
+        assert result["fields"][0]["choices"] == [
+            {"value": "there_is_another", "label": "Continue"}
+        ]
+        assert thread.current_info == {}
+        assert thread.current_variable == []
+
+    def test_object_field_uses_live_selection_keys(self):
+        field = _field(
+            number=3,
+            saveas=safeid("M.attorneys"),
+            datatype="object_checkboxes",
+            choices=[],
+        )
+        question = SimpleNamespace(
+            question_type="question",
+            name="attorneys",
+            fields=[field],
+            validation_code=None,
+        )
+
+        result = describe_question_result(
+            {
+                "question": question,
+                "question_text": "Pick attorneys",
+                "subquestion_text": None,
+                "continue_label": None,
+                "sought": "M.attorneys",
+                "orig_sought": "M.attorneys",
+                "selectcompute": {
+                    3: [{"key": safeid("firmdata.attorneys[0]"), "label": "Alice"}]
+                },
+            },
+            {},
+        )
+
+        assert result["fields"][0]["choices"] == [
+            {"value": safeid("firmdata.attorneys[0]"), "label": "Alice"}
         ]
 
 

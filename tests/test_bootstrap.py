@@ -1,4 +1,45 @@
-from docassemble_simulator.bootstrap import deep_merge
+import sys
+import types
+
+from docassemble_simulator.bootstrap import _configured_timezone, deep_merge, prepare_environment
+
+
+class TestBootstrapConfig:
+    def test_configured_timezone_uses_docassemble_config(self, monkeypatch):
+        da = types.ModuleType("docassemble")
+        base = types.ModuleType("docassemble.base")
+        config = types.ModuleType("docassemble.base.config")
+        config.daconfig = {"timezone": "America/Chicago"}
+        base.__path__ = []
+        da.base = base
+        base.config = config
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.config": config,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+
+        assert _configured_timezone() == "America/Chicago"
+
+    def test_prepare_environment_writes_effective_yaml(self, tmp_path, monkeypatch):
+        import docassemble_simulator.bootstrap as bootstrap
+
+        monkeypatch.setattr(bootstrap, "_PREPARED", False)
+        target = tmp_path / ".simulator" / "config-effective.yml"
+        prepare_environment(
+            config_path=target,
+            extra_config={
+                "timezone": "America/Chicago",
+                "jinja data": {"category": {"family": "Family"}},
+            },
+        )
+
+        import yaml
+
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert loaded["timezone"] == "America/Chicago"
+        assert loaded["jinja data"]["category"]["family"] == "Family"
 
 
 class TestDeepMerge:

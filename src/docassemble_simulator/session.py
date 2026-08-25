@@ -42,7 +42,7 @@ class Session:
     def __init__(self, interview_path: str, root: str | Path):
         self.interview_path = interview_path
         self.root = Path(root).resolve()
-        self.state_dir = self.root / ".dasimulator"
+        self.state_dir = self.root / ".simulator"
         self.state_file = self.state_dir / "session.pkl"
 
     # ------------------------------------------------------------------ setup
@@ -66,36 +66,42 @@ class Session:
     def fresh_user_dict(self) -> dict:
         import datetime
 
+        from docassemble.base.parse import get_initial_dict
         from docassemble.base.util import DAObject
 
-        try:
-            from docassemble.base.functions import DANav
-
-            nav = DANav()
-        except Exception:
+        initial = get_initial_dict()
+        internal = initial["_internal"]
+        # Keep the simulator's request-local defaults while inheriting every
+        # server bookkeeping key, including answers and objselections.
+        simulator_defaults = {
+            "gather": [],
+            "modtime": datetime.datetime.now(tz=datetime.timezone.utc),
+            "tracker": 0,
+            "steps": [],
+            "question_queue": [],
+            "step_order": 0,
+            "action": None,
+            "args": {},
+            "answered": set(),
+            "event_stack": {},
+            "tasks": {},
+            "informed": {},
+            "dirty": {},
+        }
+        internal.update(
+            {key: value for key, value in simulator_defaults.items() if key in internal}
+        )
+        nav = initial.get("nav")
+        if nav is None:
             nav = DAObject(instanceName="nav", sections=None)
 
         return {
-            "_internal": {
-                "gather": [],
-                "modtime": datetime.datetime.now(tz=datetime.timezone.utc),
-                "tracker": 0,
-                "steps": [],
-                "question_queue": [],
-                "step_order": 0,
-                "action": None,
-                "args": {},
-                "answered": set(),
-                "event_stack": {},
-                "tasks": {},
-                "informed": {},
-                "dirty": {},
-            },
+            "_internal": internal,
             "user": {"is_authenticated": True, "roles": ["user"]},
             "session": DAObject(instanceName="session"),
             "M": DAObject(instanceName="M"),
             "nav": nav,
-            "url_args": {},
+            "url_args": initial.get("url_args", {}),
         }
 
     @staticmethod
@@ -243,23 +249,13 @@ class Session:
             yield status
 
 
-    def run_prelude(self, user_dict: dict, interview=None) -> None:
-        """Execute .dasimulator/prelude.py in the session namespace, if present.
-
-        Use it to stub server-only dependencies (firm DB, PMS OAuth, matter
-        lookups) by patching module attributes or seeding variables. Runs
-        before the mandatory chain on every flow pass; also callable
-        standalone (set/get/exec/vars) so patches apply before validation and
-        expression evaluation.
-        """
-        prelude = self.state_dir / "prelude.py"
-        if not prelude.exists():
+    def run_config(self, user_dict: dict, interview=None) -> None:
+        """Execute the authored simulator seed script, if present."""
+        config_script = self.root / ".config" / "simulator" / "config.py"
+        if not config_script.exists():
             return
-        code = prelude.read_text(encoding="utf-8")
+        code = config_script.read_text(encoding="utf-8")
         try:
-            # Own context: safe to nest inside an active one (contextvar
-            # tokens restore outer state), and required when called before
-            # any assemble pass has set up this_thread.
             if interview is None:
                 interview = self.load_interview()
             self.exec_in_namespace(code, user_dict, interview)
@@ -267,7 +263,7 @@ class Session:
             raise
         except Exception as err:
             raise SessionError(
-                f"prelude script {prelude} failed: {type(err).__name__}: {err}"
+                f"simulator config script {config_script} failed: {type(err).__name__}: {err}"
             ) from err
 
     # -------------------------------------------------------------- the flow
@@ -277,7 +273,7 @@ class Session:
         interview = self.load_interview()
         with self._in_interview(interview, user_dict) as status:
             interview.load_util(user_dict)
-            self.run_prelude(user_dict)
+            self.run_config(user_dict)
             try:
                 interview.assemble(user_dict, interview_status=status)
             except Exception as err:
@@ -309,6 +305,7 @@ class Session:
                     "sought": status.sought,
                     "orig_sought": status.orig_sought,
                     "question": status.question,
+                    "selectcompute": getattr(status, "selectcompute", {}),
                 }
                 return describe_question_result(result, user_dict), interview
             return {
@@ -326,7 +323,7 @@ class Session:
         interview = self.load_interview()
         with self._in_interview(interview, user_dict) as status:
             interview.load_util(user_dict)
-            self.run_prelude(user_dict)
+            self.run_config(user_dict)
             try:
                 interview.assemble(user_dict, interview_status=status)
             except Exception:
@@ -385,6 +382,12 @@ class Session:
             for field in (screen or {}).get("fields") or []
             if str(field.get("type", "")).lower() == "checkboxes"
         }
+        object_fields = {
+            field.get("variable"): str(field.get("type", "")).lower()
+            for field in (screen or {}).get("fields") or []
+            if str(field.get("type", "")).lower()
+            in {"object", "object_radio", "object_multiselect", "object_checkboxes"}
+        }
         with self._in_interview(interview, user_dict):
             for var, raw_value in assignments:
                 temporary_name = "__dasimulator_checkbox_value"
@@ -394,6 +397,11 @@ class Session:
                         command = f"{var} = {raw_value}"
                     else:
                         value = parse_value(raw_value)
+                        if var in object_fields:
+                            _apply_object_assignment(
+                                user_dict, var, object_fields[var], value
+                            )
+                            continue
                         if var in checkbox_vars and isinstance(value, dict):
                             from docassemble.base.util import DADict
 
@@ -569,6 +577,54 @@ def _picklable_view(user_dict: dict) -> dict:
             continue
         kept[key] = value
     return kept
+
+
+def _apply_object_assignment(
+    user_dict: dict, var: str, datatype: str, value: Any
+) -> None:
+    """Apply browser-shaped object selection answers via objselections."""
+    selections = user_dict.get("_internal", {}).get("objselections", {}).get(var, {})
+    if not isinstance(selections, dict):
+        raise ValueError(f"no object selections are available for {var}")
+
+    if datatype in {"object", "object_radio"}:
+        if value in (None, ""):
+            assignment = None
+        else:
+            key = next(iter(value), None) if isinstance(value, dict) else value
+            if key not in selections:
+                raise ValueError(f"unknown object choice {key!r} for {var}")
+            assignment = selections[key]
+        user_dict["__dasimulator_object_value"] = assignment
+        try:
+            exec(f"{var} = __dasimulator_object_value", user_dict)
+        finally:
+            user_dict.pop("__dasimulator_object_value", None)
+        return
+
+    selected = value.keys() if isinstance(value, dict) else value
+    if selected is None or isinstance(selected, (str, bytes)):
+        raise ValueError(f"object checkbox answer for {var} must be a mapping or list")
+    selected_keys = [
+        key for key in selected
+        if not isinstance(value, dict) or bool(value[key])
+    ]
+    unknown = [key for key in selected_keys if key not in selections]
+    if unknown:
+        raise ValueError(f"unknown object choices for {var}: {unknown!r}")
+
+    try:
+        target = eval(var, user_dict)
+    except Exception:
+        from docassemble.base.parse import ensure_object_exists
+
+        ensure_object_exists(var, datatype, user_dict)
+        target = eval(var, user_dict)
+    target.clear()
+    for key in selected_keys:
+        target.append(selections[key])
+    if hasattr(target, "gathered"):
+        target.gathered = True
 
 
 def parse_value(raw: str) -> Any:

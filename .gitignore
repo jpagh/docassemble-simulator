@@ -6,5 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+# Simulator runtime state
+.simulator/
+.config/simulator/config.local.toml
+
 # Virtual environments
 .venv
