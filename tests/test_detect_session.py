@@ -171,6 +171,26 @@ def _fake_interview(question=None):
 
 
 class TestObjectAssignments:
+    def test_registers_top_level_daobject_roots(self, monkeypatch, da_stubs):
+        class FakeDAObject:
+            pass
+
+        roots = {}
+        da_functions = sys.modules["docassemble.base.functions"]
+        monkeypatch.setattr(
+            da_functions, "set_info", lambda **values: roots.update(values), raising=False
+        )
+        util = types.ModuleType("docassemble.base.util")
+        util.DAObject = FakeDAObject
+        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+
+        root = FakeDAObject()
+        Session._register_global_roots(
+            {"M": root, "plain": object(), "_internal": {}, "not-valid": root}
+        )
+
+        assert roots == {"M": root}
+
     def test_reference_checkbox_keys_are_resolved_through_objselections(
         self, tmp_path, da_stubs
     ):
@@ -202,6 +222,25 @@ class TestObjectAssignments:
         assert errors == []
         assert target == [attorney]
         assert target.gathered is True
+
+    def test_single_quoted_json_object_gets_helpful_error(self, tmp_path, da_stubs):
+        key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
+        user_dict = {
+            "M": SimpleNamespace(attorneys=[]),
+            "_internal": {"objselections": {"M.attorneys": {key: object()}}},
+        }
+
+        errors = Session("docassemble.pkg:main.yml", tmp_path).apply_assignments(
+            _fake_interview(),
+            user_dict,
+            [("M.attorneys", f"{{'{key}': true}}")],
+            use_code=False,
+            screen={"fields": [{"variable": "M.attorneys", "type": "object_checkboxes"}]},
+        )
+
+        assert len(errors) == 1
+        assert "object answers must be JSON" in errors[0]
+        assert '"<choice-key>": true' in errors[0]
 
     def test_reference_radio_key_resolves_to_object(self, tmp_path, da_stubs):
         key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="

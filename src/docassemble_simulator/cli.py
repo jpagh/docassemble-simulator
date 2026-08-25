@@ -161,6 +161,43 @@ def _strip_html(text: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def _preflight_warnings(root: Path) -> list[str]:
+    """Return advisory setup notes without making `info`/`check` fail."""
+    import re
+    import zipfile
+
+    warnings: list[str] = []
+    attorney_fields = re.compile(r"\.(?:bar_id|email)\b")
+    found_attorney_fields = False
+    for path in root.glob("docassemble/*/data/templates/**/*"):
+        if not path.is_file() or path.suffix.lower() not in {".docx", ".yml", ".yaml", ".txt"}:
+            continue
+        try:
+            if path.suffix.lower() == ".docx":
+                with zipfile.ZipFile(path) as archive:
+                    contents = b"\n".join(
+                        archive.read(name)
+                        for name in archive.namelist()
+                        if name.endswith(".xml")
+                    )
+                text = contents.decode("utf-8", errors="ignore")
+            else:
+                text = path.read_text(encoding="utf-8")
+        except (OSError, zipfile.BadZipFile):
+            continue
+        if attorney_fields.search(text):
+            found_attorney_fields = True
+            break
+
+    if found_attorney_fields:
+        warnings.append(
+            "templates reference attorney fields such as .bar_id/.email; "
+            "pre-seed those values and stable reference objects in "
+            ".config/simulator/config.py (see README 'Pre-seed server-scoped globals')"
+        )
+    return warnings
+
+
 def cmd_info(args, root: Path) -> int:
     from docassemble_simulator.detect import list_packages
 
@@ -173,6 +210,7 @@ def cmd_info(args, root: Path) -> int:
         "interviews": interviews,
         "session_file": str(root / ".simulator" / "session.pkl"),
         "session_exists": (root / ".simulator" / "session.pkl").exists(),
+        "warnings": _preflight_warnings(root) or None,
     }
     try:
         import docassemble.base
@@ -326,7 +364,7 @@ def cmd_seek(args, root: Path) -> int:
     ensure_importable(root)
     bootstrap(stub_define_defined=args.stub_defined)
     interview_path, _ = resolve_interview(root, args.interview)
-    from docassemble_simulator.session import Session
+    from docassemble_simulator.session import Session, _user_facing_error_message
 
     session = Session(interview_path, root)
     if args.continue_session:
@@ -339,7 +377,7 @@ def cmd_seek(args, root: Path) -> int:
         data = {
             "kind": "error",
             "error_type": type(err).__name__,
-            "message": str(err)[:400],
+            "message": _user_facing_error_message(err)[:500],
         }
         _emit(data, args.json)
         return 2
@@ -590,6 +628,11 @@ def cmd_render(args, root: Path) -> int:
 
                     if not isinstance(err, DAErrorNoEndpoint):
                         raise RenderError.from_exception(err) from err
+            else:
+                # --no-flow skips assembly, not the authored seed.  Seeded
+                # roots and template built-ins are still needed to resolve
+                # references while rendering saved state.
+                session.run_config(user_dict, interview)
 
             if args.snapshot:
                 try:
@@ -708,7 +751,15 @@ def cmd_check(args, root: Path) -> int:
                     "message": str(err)[:300],
                 }
             )
-    _emit({"checked": len(results), "failures": failures, "results": results}, args.json)
+    _emit(
+        {
+            "checked": len(results),
+            "failures": failures,
+            "results": results,
+            "warnings": _preflight_warnings(root) or None,
+        },
+        args.json,
+    )
     return 1 if failures else 0
 
 
@@ -963,6 +1014,9 @@ def build_parser() -> argparse.ArgumentParser:
             " the current screen answered, replay submit-time validation, re-run the"
             " mandatory logic, print the next screen, and save. Values parse as JSON first"
             " (true/false/null/42/[1,2]/\"text\"), then Python literals, then plain strings."
+            " Object-reference fields must be JSON, such as"
+            " {\"<safeid-key>\": true}; set receives the current screen automatically."
+            " Script drivers using Session.apply_assignments() must pass screen=screen."
             " Requires a session."
         ),
     )

@@ -77,7 +77,8 @@ class Session:
             "gather": [],
             "modtime": datetime.datetime.now(tz=datetime.timezone.utc),
             "tracker": 0,
-            "steps": [],
+            # parse.py uses steps as an integer cache-generation key.
+            "steps": 1,
             "question_queue": [],
             "step_order": 0,
             "action": None,
@@ -246,7 +247,37 @@ class Session:
             if package is not None:
                 this_thread.current_package = package
             this_thread.internal = user_dict.get("_internal", {})
+            # Reference-aware package objects resolve their instanceName roots
+            # through docassemble's get_info()/set_info() thread globals.  The
+            # server registers these in its initial block; do the same for
+            # roots already present in the namespace (seeded roots are added
+            # again after run_config()).
+            Session._register_global_roots(user_dict)
             yield status
+
+    @staticmethod
+    def _register_global_roots(user_dict: dict) -> None:
+        """Register top-level DAObject roots for reference-list resolution."""
+        try:
+            from docassemble.base.functions import set_info
+            from docassemble.base.util import DAObject
+        except ImportError:
+            return
+
+        roots = {
+            name: value
+            for name, value in user_dict.items()
+            if name.isidentifier() and not name.startswith("_")
+            and isinstance(value, DAObject)
+        }
+        if roots:
+            try:
+                set_info(**roots)
+            except Exception:
+                # A package may install a non-standard set_info hook. Root
+                # registration is fidelity support, not a reason to prevent a
+                # normal flow pass from running.
+                pass
 
 
     def run_config(self, user_dict: dict, interview=None) -> None:
@@ -259,6 +290,10 @@ class Session:
             if interview is None:
                 interview = self.load_interview()
             self.exec_in_namespace(code, user_dict, interview)
+            # exec_in_namespace uses its own thread context.  Re-register in
+            # the caller's context as well, where the ensuing assemble/render
+            # pass will consume the roots created by config.py.
+            self._register_global_roots(user_dict)
         except SessionError:
             raise
         except Exception as err:
@@ -285,7 +320,7 @@ class Session:
                     {
                         "kind": "error",
                         "error_type": type(err).__name__,
-                        "message": str(err),
+                        "message": _user_facing_error_message(err),
                         "traceback_tail": _traceback_tail(),
                     },
                     interview,
@@ -555,6 +590,28 @@ def _first_line(err: BaseException) -> str:
     return text.splitlines()[0] if text else type(err).__name__
 
 
+def _user_facing_error_message(err: BaseException) -> str:
+    """Add setup guidance to opaque choice-object NameErrors."""
+    message = str(err)
+    if (
+        type(err).__name__ == "DASourceError"
+        and "NameError" in message
+        and "object" in message.lower()
+    ):
+        return (
+            f"{message}\nHint: a choice object has an unstable instanceName; "
+            "pre-create it with a stable name in "
+            "`.config/simulator/config.py` (see README 'Pre-seed "
+            "server-scoped globals')."
+        )
+    if "Root object " in message and "not found" in message:
+        return (
+            f"{message}\nHint: register reference roots with set_info() in "
+            "`.config/simulator/config.py`; see the README seed contract."
+        )
+    return message
+
+
 def _traceback_tail(limit: int = 8) -> str:
     lines = traceback.format_exc().strip().splitlines()
     return "\n".join(lines[-limit:])
@@ -586,6 +643,12 @@ def _apply_object_assignment(
     selections = user_dict.get("_internal", {}).get("objselections", {}).get(var, {})
     if not isinstance(selections, dict):
         raise ValueError(f"no object selections are available for {var}")
+
+    if isinstance(value, str) and _looks_like_mistyped_json_object(value):
+        raise ValueError(
+            'object answers must be JSON: {"<choice-key>": true} '
+            "(use double-quoted keys and JSON booleans)"
+        )
 
     if datatype in {"object", "object_radio"}:
         if value in (None, ""):
@@ -623,8 +686,24 @@ def _apply_object_assignment(
     target.clear()
     for key in selected_keys:
         target.append(selections[key])
-    if hasattr(target, "gathered"):
+    # DAObject.__getattr__ raises for an unset attribute, so hasattr() is
+    # false even though the dynamic object accepts the assignment.  The
+    # server uses this flag to release the same gather screen on the next
+    # pass; assign it unconditionally, but keep plain test/list targets safe.
+    try:
         target.gathered = True
+    except Exception:
+        pass
+
+
+def _looks_like_mistyped_json_object(value: str) -> bool:
+    """Recognize a Python-ish object containing JSON-only literals."""
+    import re
+
+    stripped = value.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return False
+    return bool(re.search(r":\s*(?:true|false|null)(?=\s*[,}])", stripped))
 
 
 def parse_value(raw: str) -> Any:

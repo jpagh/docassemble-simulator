@@ -67,8 +67,12 @@ attachment context that v1 does not assemble.
 
 `set VAR=VALUE` parses VALUE as JSON first (`true`, `false`, `null`, `42`,
 `3.5`, `"text"`, `[1,2]`), then as a Python literal (so `['a','b']` with
-single quotes works), then falls back to a literal string. Use `--code` to
-treat the value as a Python expression instead:
+single quotes works), then falls back to a literal string. For
+object-reference fields, use the JSON mapping emitted by `describe`, for
+example `{"<safeid-key>": true}` (not a Python dict with single quotes).
+`set` supplies the current screen to the Session API internally; API callers
+must pass `screen=screen` to `apply_assignments()`.
+Use `--code` to treat the value as a Python expression instead:
 
 ```sh
 docassemble-simulator set M.parties.there_are_any=true
@@ -91,6 +95,56 @@ package configuration lives under `.config/simulator/`:
   docassemble as `.simulator/config-effective.yml`.
 - `config.py` is optional seed code executed before flow passes, useful for
   stubbing server-only dependencies such as firm databases or OAuth.
+
+### Pre-seed server-scoped globals in `config.py`
+
+Some docassemble objects are defined outside a package's main flow — they are
+account-scoped, backed by server-only storage, or defined in auxiliary YAML
+files (e.g. `account_*.yml`) that the interview only reaches after login:
+
+- `DAGlobal` — e.g. `firmdata` (a `DAGlobal`/`DWGlobal` bound to a storage
+  key) for firm/onboarding data
+- `DARedis`
+- `DAStore`
+- `DACloudStorage`
+- `DAOAuth`
+- `DAWeb`
+- `DAGoogleAPI`
+
+These **should be instantiated (and stubbed) in `config.py` ahead of time**.
+If the flow meets them lazily, docassemble's generic machinery creates
+throwaway containers with random instance names and no backing data; that
+breaks object-reference screens (choice keys become the random container
+names, which are never in the session → `NameError`) and any code that reads
+global state. Pre-creating them with stable `instanceName`s and `gathered =
+True` lets object-reference fields resolve choices against real variables.
+
+Use a positional name or assign both attributes explicitly; `DAObject` ignores
+an `instanceName=` keyword in some docassemble versions:
+
+```python
+def _named(name):
+    obj = DAObject()
+    obj.instanceName = name
+    obj.has_nonrandom_instance_name = True
+    return obj
+```
+
+Reference-aware globals also need to be registered with `set_info()` when the
+interview or templates resolve an `instanceName` path. The simulator registers
+top-level `DAObject` roots after each pass, but an explicit seed fallback is
+portable to the server:
+
+```python
+from docassemble.base.functions import set_info
+set_info(firmdata=firmdata, M=M)
+```
+
+For `Address`, populate `.address`, `.city`, `.state`, and `.zip`;
+`line_one()`, `line_two()`, and `block()` are methods, not fields. Seed every
+field used by templates (for example attorney `name`, `bar_id`, and `email`),
+and set reference lists' `gathered`/`there_are_any` flags.
+
 - `fixture.py` is an optional render-only namespace fixture.
 
 The recommended layout is:
@@ -110,9 +164,40 @@ wins over its committed sibling. A global file may be supplied with
 Example seed script:
 
 ```python
-"""Seed the session before every simulator flow pass."""
+"""Seed the session before every simulator flow pass.
+
+Pre-create server-scoped globals (DAGlobal, redis, store, cloud storage,
+OAuth, web, Google API) that are only defined in account_*.yml or backed by
+server storage; the main flow must never meet them lazily.
+"""
 import docassemble.automatedpleading.dw_pms as _pms
 _pms.DWClioAuth.get_credentials = lambda self: type("C", (), {"apply": lambda s, h: None})()
+
+from docassemble.base.functions import set_info
+from docassemble.base.util import DAObject, DAList
+from docassemble.automatedpleading.dw_objects import DWGlobal  # DAGlobal
+
+def _named(name):
+    obj = DAObject()
+    obj.instanceName = name
+    obj.has_nonrandom_instance_name = True
+    return obj
+
+firmdata = DWGlobal()
+firmdata.instanceName = "firmdata"
+firmdata.has_nonrandom_instance_name = True
+firmdata.firm = _named("firmdata.firm")
+firmdata.firm.name = _named("firmdata.firm.name")
+firmdata.firm.name.first = "Dodson" ; firmdata.firm.name.last = "& Waters"
+attorney = _named("firmdata.attorneys[0]")
+attorney.name = _named("firmdata.attorneys[0].name")
+attorney.name.first = "Jack" ; attorney.name.last = "Adamson"
+attorney.bar_id = 10040 ; attorney.email = "jack@example.com"
+attorneys = DAList("firmdata.attorneys")
+attorneys.elements = [attorney]
+attorneys.gathered = True ; attorneys.there_are_any = True
+firmdata.attorneys = attorneys
+set_info(firmdata=firmdata, M=M)
 ```
 
 

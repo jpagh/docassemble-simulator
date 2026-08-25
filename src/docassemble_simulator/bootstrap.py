@@ -18,8 +18,12 @@ library assumes a running webapp; these pieces are stubbed:
 """
 from __future__ import annotations
 
+import mimetypes
 import os
+import re
+import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -207,6 +211,48 @@ def _configured_timezone() -> str:
         return "America/New_York"
 
 
+_ATTACHMENT_FALLBACK_INSTALLED = False
+_SIMULATOR_FILES: dict[int, dict] = {}
+_NEXT_SIMULATOR_FILE = 0
+
+
+def install_attachment_filename_fallback() -> None:
+    """Give nameless compiled attachments a safe simulator filename.
+
+    A few generic attachment blocks leave the compiled ``filename`` as None
+    even though their rendered attachment name is valid.  The docassemble
+    server normally gets a filename from the attachment option; without one,
+    its save path concatenation raises late, after a successful DOCX render.
+    Keep the server behavior for named files and only supply a fallback for
+    this invalid ``None`` case.
+    """
+    global _ATTACHMENT_FALLBACK_INSTALLED
+    if _ATTACHMENT_FALLBACK_INSTALLED:
+        return
+    try:
+        from docassemble.base.parse import Question
+    except ImportError:
+        return
+
+    original = getattr(Question, "finalize_attachment", None)
+    if original is None:
+        return
+    if getattr(original, "_dasimulator_filename_fallback", False):
+        _ATTACHMENT_FALLBACK_INSTALLED = True
+        return
+
+    def finalize_with_filename(self, attachment, result, user_dict):
+        if result.get("filename") is None:
+            name = result.get("name") or "attachment"
+            filename = re.sub(r"[^\w.-]+", "_", str(name), flags=re.UNICODE).strip("._")
+            result["filename"] = filename or "attachment"
+        return original(self, attachment, result, user_dict)
+
+    finalize_with_filename._dasimulator_filename_fallback = True
+    Question.finalize_attachment = finalize_with_filename
+    _ATTACHMENT_FALLBACK_INSTALLED = True
+
+
 def register_hooks() -> None:
     """Register the webapp hook modules plus a minimal local implementation.
 
@@ -274,6 +320,29 @@ def register_hooks() -> None:
         @hookimpl
         def get_button_class_prefix(self):
             return "btn"
+
+        @hookimpl
+        def save_numbered_file(self, filename, orig_path, yaml_file_name=None, uid=None):
+            global _NEXT_SIMULATOR_FILE
+            _NEXT_SIMULATOR_FILE += 1
+            number = _NEXT_SIMULATOR_FILE
+            suffix = Path(filename).suffix or Path(orig_path).suffix
+            destination = Path(tempfile.gettempdir()) / f"dasimulator-{number}{suffix}"
+            shutil.copyfile(orig_path, destination)
+            mimetype = mimetypes.guess_type(str(destination))[0] or "application/octet-stream"
+            _SIMULATOR_FILES[number] = {
+                "path": str(destination),
+                "filename": Path(filename).name,
+                "extension": suffix.lstrip("."),
+                "mimetype": mimetype,
+                "persistent": False,
+                "private": True,
+            }
+            return number, suffix.lstrip("."), mimetype
+
+        @hookimpl
+        def file_number_finder(self, file_number, filename=None, uids=None, privileged=False):
+            return _SIMULATOR_FILES.get(file_number)
 
         @hookimpl
         def get_configuration(self):
@@ -383,3 +452,4 @@ def bootstrap(
     neutralize_argv()
     apply_session_stubs(stub_define_defined=stub_define_defined)
     register_hooks()
+    install_attachment_filename_fallback()
