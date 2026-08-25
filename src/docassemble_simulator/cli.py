@@ -994,6 +994,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("code", nargs="?", default="", help="Python statements to run, e.g. \"M.parties.append_object('Individual')\"")
     p.add_argument("--file", default=None, help="read the code from this file instead of the command line")
     p.add_argument("--show", action="store_true", help="after running, advance the flow and print the current screen")
+    p.set_defaults(func=cmd_exec)
 
     p = add_sub(
         "vars",
