@@ -197,10 +197,20 @@ class TestObjectAssignments:
         key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
         attorney = object()
 
-        class SelectionList(list):
-            gathered = False
+        class DynamicSelectionList(list):
+            """Model DAObject's unset dynamic attributes.
 
-        target = SelectionList()
+            Reading an unset DAObject attribute raises AttributeError, so
+            hasattr(target, "gathered") is false even though assignment is
+            supported.  This keeps the regression test sensitive to the
+            original hasattr() bug.
+            """
+
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        target = DynamicSelectionList()
+        assert not hasattr(target, "gathered")
         user_dict = {
             "M": SimpleNamespace(attorneys=target),
             "_internal": {"objselections": {"M.attorneys": {key: attorney}}},

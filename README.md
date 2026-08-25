@@ -223,9 +223,11 @@ submit-time `validation code` replay, and the required-field structure.
 Stubbed: redis (`FakeRedis` module swap), pluggy webapp hooks (minimal local
 implementations, including button-class and URL generation so UI fragments
 built during assembly don't crash), DB session bookkeeping
-(`set_sessions_data`, `cleanup_sessions`, ...). Screens cannot render HTML
-and signature/file widgets have no upload path — you set their variables
-directly.
+(`set_sessions_data`, `cleanup_sessions`, ...), and DOCX-to-PDF conversion.
+The simulator persists and validates DOCX output but intentionally omits
+converted PDF files; PDF conversion remains a server/deployment concern.
+Screens cannot render HTML and signature/file widgets have no upload path —
+you set their variables directly.
 
 Some older setups also need `define()`/`defined()` stubbed (the original
 harness did); pass `--stub-defined`. On recent docassemble versions this

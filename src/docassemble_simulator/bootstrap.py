@@ -216,15 +216,26 @@ _SIMULATOR_FILES: dict[int, dict] = {}
 _NEXT_SIMULATOR_FILE = 0
 
 
+def _without_pdf_conversion(result: dict) -> None:
+    """Remove generated PDF formats before docassemble dispatches converters."""
+    formats = result.get("formats_to_use")
+    if isinstance(formats, (list, tuple)):
+        result["formats_to_use"] = [item for item in formats if item != "pdf"]
+    valid_formats = result.get("valid_formats")
+    if isinstance(valid_formats, (list, tuple)):
+        result["valid_formats"] = [item for item in valid_formats if item != "pdf"]
+
+
 def install_attachment_filename_fallback() -> None:
-    """Give nameless compiled attachments a safe simulator filename.
+    """Stub PDF conversion and give nameless attachments a safe filename.
 
     A few generic attachment blocks leave the compiled ``filename`` as None
     even though their rendered attachment name is valid.  The docassemble
     server normally gets a filename from the attachment option; without one,
     its save path concatenation raises late, after a successful DOCX render.
     Keep the server behavior for named files and only supply a fallback for
-    this invalid ``None`` case.
+    this invalid ``None`` case. PDF conversion is handled separately by
+    removing generated ``pdf`` formats before the real finalizer runs.
     """
     global _ATTACHMENT_FALLBACK_INSTALLED
     if _ATTACHMENT_FALLBACK_INSTALLED:
@@ -242,6 +253,7 @@ def install_attachment_filename_fallback() -> None:
         return
 
     def finalize_with_filename(self, attachment, result, user_dict):
+        _without_pdf_conversion(result)
         if result.get("filename") is None:
             name = result.get("name") or "attachment"
             filename = re.sub(r"[^\w.-]+", "_", str(name), flags=re.UNICODE).strip("._")

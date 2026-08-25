@@ -1,7 +1,13 @@
 import sys
 import types
 
-from docassemble_simulator.bootstrap import _configured_timezone, deep_merge, prepare_environment
+from docassemble_simulator.bootstrap import (
+    _configured_timezone,
+    _without_pdf_conversion,
+    deep_merge,
+    install_attachment_filename_fallback,
+    prepare_environment,
+)
 
 
 class TestBootstrapConfig:
@@ -40,6 +46,51 @@ class TestBootstrapConfig:
         loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
         assert loaded["timezone"] == "America/Chicago"
         assert loaded["jinja data"]["category"]["family"] == "Family"
+
+
+class TestAttachmentFormats:
+    def test_pdf_conversion_is_omitted_but_docx_remains(self):
+        result = {
+            "formats_to_use": ["pdf", "docx"],
+            "valid_formats": ["pdf", "docx"],
+        }
+
+        _without_pdf_conversion(result)
+
+        assert result == {
+            "formats_to_use": ["docx"],
+            "valid_formats": ["docx"],
+        }
+
+    def test_pdf_only_attachment_has_no_output_format(self):
+        result = {"formats_to_use": ["pdf"], "valid_formats": ["pdf"]}
+
+        _without_pdf_conversion(result)
+
+        assert result["formats_to_use"] == []
+        assert result["valid_formats"] == []
+
+    def test_finalizer_never_receives_generated_pdf(self, monkeypatch):
+        import docassemble_simulator.bootstrap as bootstrap
+
+        seen = {}
+
+        class FakeQuestion:
+            def finalize_attachment(self, _attachment, result, _user_dict):
+                seen.update(result)
+                return result
+
+        parse = types.ModuleType("docassemble.base.parse")
+        parse.Question = FakeQuestion
+        monkeypatch.setitem(sys.modules, "docassemble.base.parse", parse)
+        monkeypatch.setattr(bootstrap, "_ATTACHMENT_FALLBACK_INSTALLED", False)
+
+        install_attachment_filename_fallback()
+        result = {"formats_to_use": ["pdf", "docx"], "valid_formats": ["pdf", "docx"]}
+        FakeQuestion().finalize_attachment(None, result, {})
+
+        assert seen["formats_to_use"] == ["docx"]
+        assert seen["valid_formats"] == ["docx"]
 
 
 class TestDeepMerge:

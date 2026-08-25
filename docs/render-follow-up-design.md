@@ -216,4 +216,6 @@ Integration (manual; needs a real package venv, recorded not automated):
 
 PDF templates (`pdf template file`), attachment generators/bundles, redacted
 twins, docxcompose merges, and doc-key template resolution remain future
-work; the `render` command stays a single-template pipeline.
+work; the `render` command stays a single-template pipeline. Generated PDF
+conversion is intentionally stubbed: DOCX artifacts are validated and saved,
+while a deployment/server remains responsible for producing PDFs.
