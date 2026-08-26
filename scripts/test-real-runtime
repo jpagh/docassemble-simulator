@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: scripts/test-real-runtime /path/to/target-package/python" >&2
+  exit 2
+fi
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+interpreter=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+if [[ ! -x "$interpreter" ]]; then
+  echo "error: target interpreter is not executable: $interpreter" >&2
+  exit 2
+fi
+
+cd "$repo_root"
+DASIMULATOR_REAL_PYTHON="$interpreter" uv run pytest -q tests/test_real_runtime.py
