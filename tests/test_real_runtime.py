@@ -29,8 +29,7 @@ def real_workspace(tmp_path, real_python):
     templates.mkdir()
     (package / "__init__.py").write_text("")
     (package / "helpers.py").write_text(
-        "def declared_helper(value):\n"
-        "    return f'declared:{value}'\n"
+        "def declared_helper(value):\n    return f'declared:{value}'\n"
     )
     (questions / "main.yml").write_text(
         "---\n"
@@ -182,9 +181,7 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         _assert_helper_output(artifact)
 
 
-def test_real_date_answer_formats_and_rejections_roll_back(
-    real_python, real_workspace
-):
+def test_real_date_answer_formats_and_rejections_roll_back(real_python, real_workspace):
     root = real_workspace
     assert _run(real_python, root, "start")["ok"]
     session = next((root / ".simulator" / "sessions").glob("*.pkl"))
@@ -209,15 +206,20 @@ def test_real_date_answer_formats_and_rejections_roll_back(
         "caption=2026-08-26",
     )
     assert accepted["ok"]
-    assert _run(
-        real_python, root, "eval", "type(filing_date).__name__"
-    )["result"]["value"] == "'DADateTime'"
-    assert _run(
-        real_python, root, "eval", "filing_date.format('MM/dd/yyyy')"
-    )["result"]["value"] == "'08/26/2026'"
-    assert _run(real_python, root, "eval", "type(caption).__name__")["result"][
-        "value"
-    ] == "'str'"
+    assert (
+        _run(real_python, root, "eval", "type(filing_date).__name__")["result"]["value"]
+        == "'DADateTime'"
+    )
+    assert (
+        _run(real_python, root, "eval", "filing_date.format('MM/dd/yyyy')")["result"][
+            "value"
+        ]
+        == "'08/26/2026'"
+    )
+    assert (
+        _run(real_python, root, "eval", "type(caption).__name__")["result"]["value"]
+        == "'str'"
+    )
 
     artifact = root / "date.docx"
     assert _run(
@@ -241,6 +243,7 @@ def test_real_date_answer_formats_and_rejections_roll_back(
         "--code",
         "filing_date='2026-08-26'",
     )["ok"]
-    assert _run(
-        real_python, root, "eval", "type(filing_date).__name__"
-    )["result"]["value"] == "'str'"
+    assert (
+        _run(real_python, root, "eval", "type(filing_date).__name__")["result"]["value"]
+        == "'str'"
+    )

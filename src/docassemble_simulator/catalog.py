@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from docassemble_simulator.detect import list_interviews, resolve_interview
 
@@ -62,7 +65,20 @@ class InterviewCatalog:
                         ),
                     }
                 )
-            except Exception as error:
+            except (
+                ValueError,
+                TypeError,
+                RuntimeError,
+                ImportError,
+                AttributeError,
+                KeyError,
+                IndexError,
+                LookupError,
+                OSError,
+                SyntaxError,
+                NameError,
+            ) as error:
+                logger.debug("interview %r failed to compile: %s", identity, error)
                 rows.append(
                     {
                         "interview": identity,
@@ -91,7 +107,15 @@ class InterviewCatalog:
                 encoded = getattr(field, "saveas", "") or ""
                 try:
                     variables.append(from_safeid_safe(encoded))
-                except Exception:
+                except (
+                    ValueError,
+                    TypeError,
+                    AttributeError,
+                    RuntimeError,
+                    OSError,
+                    LookupError,
+                ) as exc:
+                    logger.debug("safeid decode failed for %r: %s", encoded, exc)
                     variables.append(encoded)
             name = getattr(question, "name", None)
             if (
@@ -134,7 +158,19 @@ class InterviewCatalog:
     def _compile_for_inspection(self):
         try:
             return self._compile()
-        except Exception as error:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            ImportError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            LookupError,
+            OSError,
+            SyntaxError,
+            NameError,
+        ) as error:
             raise CatalogFailure(f"{type(error).__name__}: {error}") from error
 
 

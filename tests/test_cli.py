@@ -109,9 +109,7 @@ def test_render_json_presents_a_typed_outcome(monkeypatch, tmp_path, capsys):
 
     outcome = render_module.RenderOutcome(
         True,
-        render_module.RenderResult(
-            "form.docx", 4, tmp_path / "artifact.docx"
-        ),
+        render_module.RenderResult("form.docx", 4, tmp_path / "artifact.docx"),
     )
     monkeypatch.setattr(cli, "_execution", lambda args, root: object())
     monkeypatch.setattr(
@@ -119,9 +117,7 @@ def test_render_json_presents_a_typed_outcome(monkeypatch, tmp_path, capsys):
         "render",
         lambda self, request: outcome,
     )
-    args = cli.build_parser().parse_args(
-        ["render", "form.docx", "--fresh", "--json"]
-    )
+    args = cli.build_parser().parse_args(["render", "form.docx", "--fresh", "--json"])
 
     assert cli.cmd_render(args, tmp_path) == 0
     assert json.loads(capsys.readouterr().out) == {

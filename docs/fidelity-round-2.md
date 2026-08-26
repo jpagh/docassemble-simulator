@@ -80,7 +80,7 @@ interview:
 1. **Stable names are positional or explicit** — never `instanceName=` kwargs:
    ```python
    def _named(name):
-       obj = DAObject()          # or a typed class
+       obj = DAObject()  # or a typed class
        obj.instanceName = name
        obj.has_nonrandom_instance_name = True
        return obj
@@ -99,8 +99,9 @@ interview:
    so the seed must:
    ```python
    from docassemble.base.functions import set_info
-   set_info(firmdata=firmdata, M=M)   # any top-level DAObject root the
-                                      # interview references
+
+   set_info(firmdata=firmdata, M=M)  # any top-level DAObject root the
+   # interview references
    ```
    - Follow-up (recommended): the simulator should register the session's
      top-level DAObject roots itself on each pass (mirroring the server's

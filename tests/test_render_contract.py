@@ -52,18 +52,14 @@ def _workspace(tmp_path):
     templates.mkdir()
     (questions / "main.yml").write_text("---\nquestion: x\n")
     (templates / "form.docx").write_bytes(b"docx")
-    return InterviewExecution(
-        tmp_path, "docassemble.pkg:data/questions/main.yml"
-    )
+    return InterviewExecution(tmp_path, "docassemble.pkg:data/questions/main.yml")
 
 
 def test_missing_template_returns_a_typed_render_failure(tmp_path):
     questions = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     questions.mkdir(parents=True)
     (questions / "main.yml").write_text("---\nquestion: x\n")
-    execution = InterviewExecution(
-        tmp_path, "docassemble.pkg:data/questions/main.yml"
-    )
+    execution = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/main.yml")
 
     outcome = InterviewRenderer(tmp_path, execution).render(
         RenderRequest("missing.docx", SavedSessionSource(), assemble=False)
@@ -167,9 +163,7 @@ def test_source_variants_require_exactly_their_own_data(tmp_path):
         SavedSessionSource(tmp_path / "unexpected")
 
 
-def test_successful_render_returns_a_typed_result(
-    tmp_path, monkeypatch, da_stubs
-):
+def test_successful_render_returns_a_typed_result(tmp_path, monkeypatch, da_stubs):
     _install_fake_runtime(monkeypatch)
     fake_docx = SimpleNamespace(_dasimulator_paragraphs=4)
     monkeypatch.setattr(
@@ -240,9 +234,7 @@ def test_exception_filename_is_used_only_when_it_is_a_package_template(
             template=str(foreign),
         )
 
-    monkeypatch.setattr(
-        "docassemble_simulator.render.render_template", fail
-    )
+    monkeypatch.setattr("docassemble_simulator.render.render_template", fail)
 
     outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
         RenderRequest("form.docx", FreshSource(), assemble=False)
@@ -253,9 +245,7 @@ def test_exception_filename_is_used_only_when_it_is_a_package_template(
     assert outcome.error.details["template"] == "form.docx"
 
 
-def test_fresh_render_never_acquires_the_session_lock(
-    tmp_path, monkeypatch, da_stubs
-):
+def test_fresh_render_never_acquires_the_session_lock(tmp_path, monkeypatch, da_stubs):
     _install_fake_runtime(monkeypatch)
     monkeypatch.setattr(
         "docassemble_simulator.render.prepare_docx_template",

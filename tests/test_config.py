@@ -49,6 +49,6 @@ class TestConfigDiscovery:
             load_config(package, global_path=tmp_path / "missing.toml")
 
     def test_normalizes_jinja_data_table(self):
-        assert normalize_config(
-            {"jinja-data": {"category": {"family": "Family"}}}
-        ) == {"jinja data": {"category": {"family": "Family"}}}
+        assert normalize_config({"jinja-data": {"category": {"family": "Family"}}}) == {
+            "jinja data": {"category": {"family": "Family"}}
+        }

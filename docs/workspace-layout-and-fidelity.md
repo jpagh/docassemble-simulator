@@ -134,6 +134,7 @@ server-scoped roots with `set_info()` as a portable seed fallback:
 
 ```python
 from docassemble.base.functions import set_info
+
 set_info(firmdata=firmdata, M=M)
 ```
 

@@ -29,7 +29,7 @@ class TestBootstrapConfig:
         assert _configured_timezone() == "America/Chicago"
 
     def test_prepare_environment_writes_effective_yaml(self, tmp_path, monkeypatch):
-        import docassemble_simulator.bootstrap as bootstrap
+        from docassemble_simulator import bootstrap
 
         monkeypatch.setattr(bootstrap, "_PREPARED", False)
         target = tmp_path / ".simulator" / "config-effective.yml"
@@ -71,7 +71,7 @@ class TestAttachmentFormats:
         assert result["valid_formats"] == []
 
     def test_finalizer_never_receives_generated_pdf(self, monkeypatch):
-        import docassemble_simulator.bootstrap as bootstrap
+        from docassemble_simulator import bootstrap
 
         seen = {}
 

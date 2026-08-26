@@ -133,7 +133,7 @@ class TestRenderErrors:
 
 class TestAssertMissing:
     def test_missing_value_passes(self):
-        assert_missing({"M": SimpleNamespace()}, "M.x") is None
+        assert assert_missing({"M": SimpleNamespace()}, "M.x") is None
 
     def test_resolved_value_fails(self):
         with pytest.raises(RenderExpectationError, match="M.x"):

@@ -4,6 +4,7 @@ import datetime
 import sys
 import types
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -67,9 +68,7 @@ def _runtime(monkeypatch):
 
     def as_datetime(value):
         parsed = datetime.date.fromisoformat(value)
-        return DADateTime(
-            parsed.year, parsed.month, parsed.day, tzinfo=datetime.UTC
-        )
+        return DADateTime(parsed.year, parsed.month, parsed.day, tzinfo=datetime.UTC)
 
     parse = sys.modules["docassemble.base.parse"]
     parse.get_initial_dict = lambda: {
@@ -92,7 +91,7 @@ def _runtime(monkeypatch):
 
 class FakeInterview:
     source = SimpleNamespace(path="main.yml", package="docassemble.pkg")
-    questions_by_name = {}
+    questions_by_name: ClassVar[dict] = {}
 
     def populate_non_pickleable(self, namespace):
         namespace["helper"] = lambda value: f"${value}"
@@ -110,9 +109,7 @@ def _execution(tmp_path, monkeypatch, da_stubs, interview=FakeInterview):
     cache = types.ModuleType("docassemble.base.interview_cache")
     cache.get_interview = lambda identity: selected["interview"]()
     monkeypatch.setitem(sys.modules, "docassemble.base.interview_cache", cache)
-    execution = InterviewExecution(
-        tmp_path, "docassemble.pkg:data/questions/main.yml"
-    )
+    execution = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/main.yml")
     return execution, runtime, selected
 
 
@@ -148,9 +145,7 @@ def test_flow_error_is_committed_but_reported_as_failed_operation(
             namespace["debug_value"] = 42
             raise RuntimeError("authored flow broke")
 
-    execution, _, _ = _execution(
-        tmp_path, monkeypatch, da_stubs, BrokenInterview
-    )
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, BrokenInterview)
 
     outcome = execution.run(Start())
 
@@ -167,9 +162,7 @@ def test_sessions_are_isolated_by_canonical_interview_identity(
         tmp_path / "docassemble" / "pkg" / "data" / "questions" / "another.yml"
     )
     second_path.write_text("---\nquestion: y\n")
-    second = InterviewExecution(
-        tmp_path, "docassemble.pkg:data/questions/another.yml"
-    )
+    second = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/another.yml")
 
     assert first.run(Start()).ok
     assert second.run(Start()).ok
@@ -310,9 +303,7 @@ def test_date_answer_is_field_aware_and_invalid_multi_answer_rolls_back(
                     SimpleNamespace(
                         saveas="filing_date", datatype="date", required=False
                     ),
-                    SimpleNamespace(
-                        saveas="caption", datatype="text", required=False
-                    ),
+                    SimpleNamespace(saveas="caption", datatype="text", required=False),
                 ],
             )
             interview_status.question_text = "Dates"
@@ -322,16 +313,17 @@ def test_date_answer_is_field_aware_and_invalid_multi_answer_rolls_back(
             interview_status.orig_sought = None
             interview_status.selectcompute = {}
 
-    execution, _, _ = _execution(
-        tmp_path, monkeypatch, da_stubs, DateInterview
-    )
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, DateInterview)
     assert execution.run(Start()).ok
 
     accepted = execution.run(
         Answer((("filing_date", "2026-08-26"), ("caption", "2026-08-26")))
     )
     assert accepted.ok
-    assert execution.run(Evaluate("type(filing_date).__name__")).result["value"] == "'datetime'"
+    assert (
+        execution.run(Evaluate("type(filing_date).__name__")).result["value"]
+        == "'datetime'"
+    )
     assert execution.run(Evaluate("caption")).result["value"] == "'2026-08-26'"
 
     empty = execution.run(Answer((("filing_date", ""), ("caption", "kept"))))
@@ -346,8 +338,8 @@ def test_date_answer_is_field_aware_and_invalid_multi_answer_rolls_back(
     assert _session_bytes(tmp_path) == before
     assert execution.run(Evaluate("caption")).result["value"] == "'kept'"
 
-    coded = execution.run(
-        Answer((("filing_date", "'2026-08-26'"),), code=True)
-    )
+    coded = execution.run(Answer((("filing_date", "'2026-08-26'"),), code=True))
     assert coded.ok
-    assert execution.run(Evaluate("type(filing_date).__name__")).result["value"] == "'str'"
+    assert (
+        execution.run(Evaluate("type(filing_date).__name__")).result["value"] == "'str'"
+    )

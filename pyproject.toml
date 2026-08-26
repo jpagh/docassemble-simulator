@@ -1,27 +1,35 @@
 [project]
-name = "docassemble-simulator"
-version = "0.1.0"
-description = "Run docassemble interviews locally without a server: a CLI for humans and AI agents to load, step through, answer, and debug interviews."
-readme = "README.md"
-authors = [
-    { name = "Jack Adamson", email = "jackadamson@gmail.com" }
-]
-requires-python = ">=3.11"
-dependencies = [
-    "pyyaml",
-]
+    name            = "docassemble-simulator"
+    version         = "26.8.0"
+    description     = "Run docassemble interviews locally without a server: a CLI for humans and AI agents to load, step through, answer, and debug interviews."
+    readme          = "README.md"
+    requires-python = ">=3.11"
+    authors         = [{ name = "Jack Adamson", email = "jackadamson@gmail.com" }]
+    dependencies    = [
+        "pyyaml>=6.0.3",
+    ]
 
-[project.scripts]
-docassemble-simulator = "docassemble_simulator.cli:main"
+    [project.scripts]
+        docassemble-simulator = "docassemble_simulator.cli:main"
 
 [dependency-groups]
-dev = ["pytest"]
+    dev = [
+        "docxtpl>=0.20.2",
+        "pytest>=9.1.1",
+    ]
 
 [build-system]
-requires = ["uv_build>=0.12.5,<0.13.0"]
-build-backend = "uv_build"
+    requires      = ["uv_build>=0.12.5,<0.13.0"]
+    build-backend = "uv_build"
 
-# NOTE: `docassemble` itself is intentionally NOT a dependency here. The
-# simulator must run inside the same interpreter environment as the target
-# docassemble package (the package's own .venv), because it imports
-# docassemble.base directly and drives the real interview machinery.
+    # NOTE: `docassemble` itself is intentionally NOT a dependency here. The
+    # simulator must run inside the same interpreter environment as the target
+    # docassemble package (the package's own .venv), because it imports
+    # docassemble.base directly and drives the real interview machinery.
+
+[tool.pyrefly]
+    project-includes = [
+        "**/*.py*",
+        "**/*.ipynb",
+    ]
+    preset           = "basic"

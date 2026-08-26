@@ -1,4 +1,5 @@
 """Discover and merge simulator TOML configuration."""
+
 from __future__ import annotations
 
 import os
@@ -37,8 +38,10 @@ def discover_config_files(
     """Return project config files in descending precedence order."""
     root = Path(package_root).resolve()
     excluded = (
-        Path(global_path) if global_path else global_config_path()
-    ).expanduser().resolve()
+        (Path(global_path) if global_path else global_config_path())
+        .expanduser()
+        .resolve()
+    )
     files: list[Path] = []
     for directory in (root, *root.parents):
         for candidate in PROJECT_CANDIDATES:
@@ -71,10 +74,10 @@ def _read_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as stream:
             value = tomllib.load(stream)
-    except Exception as err:
+    except (OSError, tomllib.TOMLDecodeError, ValueError) as err:
         raise ValueError(f"could not parse simulator config {path}: {err}") from err
     if not isinstance(value, dict):
-        raise ValueError(f"simulator config {path} must be a TOML table")
+        raise TypeError(f"simulator config {path} must be a TOML table")
     return normalize_config(value)
 
 
@@ -89,7 +92,9 @@ def load_config(
     if global_file.is_file():
         layers.append(global_file)
     # Files are returned nearest/highest first, so merge them in reverse.
-    layers.extend(reversed(discover_config_files(package_root, global_path=global_file)))
+    layers.extend(
+        reversed(discover_config_files(package_root, global_path=global_file))
+    )
     merged: dict[str, Any] = {}
     for path in layers:
         deep_merge(merged, _read_toml(path))

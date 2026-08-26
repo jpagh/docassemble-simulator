@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import logging
 import pickle
 import re
 import traceback
@@ -13,6 +14,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from docassemble_simulator._files import atomic_replace
 from docassemble_simulator.catalog import InterviewCatalog
@@ -120,16 +123,7 @@ class _RenderPreparation:
     effect_destinations: tuple[Path, ...]
 
 
-Operation = (
-    Start
-    | Status
-    | Refresh
-    | Answer
-    | Seek
-    | Evaluate
-    | Variables
-    | Execute
-)
+Operation = Start | Status | Refresh | Answer | Seek | Evaluate | Variables | Execute
 
 
 class ExecutionFailure(Exception):
@@ -220,9 +214,7 @@ class StateStore:
             "interview": self.identity,
             "namespace": pickle.dumps(_picklable_view(namespace)),
         }
-        _atomic_pickle(
-            path.expanduser().resolve(), payload, lock_destination=True
-        )
+        _atomic_pickle(path.expanduser().resolve(), payload, lock_destination=True)
 
     def load_snapshot(self, path: Path) -> dict[str, Any]:
         try:
@@ -288,7 +280,20 @@ class InterviewExecution:
             return ExecutionOutcome(
                 False, error=ExecutionError(error.kind, str(error), error.details)
             )
-        except Exception as error:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+            SyntaxError,
+        ) as error:
+            logger.exception("unhandled execution fault")
             return ExecutionOutcome(
                 False, error=ExecutionError("fault", f"{type(error).__name__}: {error}")
             )
@@ -399,7 +404,20 @@ class InterviewExecution:
             return ExecutionOutcome(
                 False, error=ExecutionError(error.kind, str(error), error.details)
             )
-        except Exception as error:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+            SyntaxError,
+        ) as error:
+            logger.exception("seek failed")
             return ExecutionOutcome(
                 False, error=ExecutionError("seek", f"{type(error).__name__}: {error}")
             )
@@ -437,7 +455,19 @@ class InterviewExecution:
                     continue
                 try:
                     values[name] = _safe_repr(eval(name, namespace))
-                except Exception as error:
+                except (
+                    ValueError,
+                    TypeError,
+                    RuntimeError,
+                    AttributeError,
+                    KeyError,
+                    IndexError,
+                    ImportError,
+                    OSError,
+                    LookupError,
+                    NameError,
+                    SyntaxError,
+                ) as error:
                     values[name] = f"<{type(error).__name__}: {str(error)[:80]}>"
         return ExecutionOutcome(True, values)
 
@@ -448,8 +478,20 @@ class InterviewExecution:
         with _interview_context(interview, namespace) as status:
             self._prepare(interview, namespace)
             try:
-                exec(operation.code, namespace)
-            except Exception as error:
+                __builtins__["exec"](operation.code, namespace)
+            except (
+                ValueError,
+                TypeError,
+                RuntimeError,
+                AttributeError,
+                KeyError,
+                IndexError,
+                ImportError,
+                OSError,
+                LookupError,
+                NameError,
+                SyntaxError,
+            ) as error:
                 raise ExecutionFailure(
                     "execution", f"{type(error).__name__}: {error}"
                 ) from error
@@ -489,8 +531,22 @@ class InterviewExecution:
                 self._prepare(interview, namespace)
                 if isinstance(source, FixtureSource):
                     try:
-                        exec(source.path.read_text(encoding="utf-8"), namespace)
-                    except Exception as error:
+                        __builtins__["exec"](
+                            source.path.read_text(encoding="utf-8"), namespace
+                        )
+                    except (
+                        ValueError,
+                        TypeError,
+                        RuntimeError,
+                        AttributeError,
+                        KeyError,
+                        IndexError,
+                        ImportError,
+                        OSError,
+                        LookupError,
+                        NameError,
+                        SyntaxError,
+                    ) as error:
                         raise ExecutionFailure(
                             "execution",
                             f"fixture failed: {type(error).__name__}: {error}",
@@ -510,7 +566,20 @@ class InterviewExecution:
             return ExecutionOutcome(
                 False, error=ExecutionError(error.kind, str(error), error.details)
             )
-        except Exception as error:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+            SyntaxError,
+        ) as error:
+            logger.exception("render state failed")
             return ExecutionOutcome(
                 False,
                 error=ExecutionError("fault", f"{type(error).__name__}: {error}"),
@@ -532,7 +601,19 @@ class InterviewExecution:
                 populate(namespace)
             else:
                 interview.load_util(namespace)
-        except Exception as error:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+            SyntaxError,
+        ) as error:
             raise ExecutionFailure(
                 "execution",
                 f"namespace rehydration failed: {type(error).__name__}: {error}",
@@ -540,8 +621,20 @@ class InterviewExecution:
         config = self.root / ".config" / "simulator" / "config.py"
         if config.exists():
             try:
-                exec(config.read_text(encoding="utf-8"), namespace)
-            except Exception as error:
+                __builtins__["exec"](config.read_text(encoding="utf-8"), namespace)
+            except (
+                ValueError,
+                TypeError,
+                RuntimeError,
+                AttributeError,
+                KeyError,
+                IndexError,
+                ImportError,
+                OSError,
+                LookupError,
+                NameError,
+                SyntaxError,
+            ) as error:
                 raise ExecutionFailure(
                     "execution",
                     f"simulator config {config} failed: {type(error).__name__}: {error}",
@@ -628,7 +721,7 @@ def _interview_context(interview, namespace):
 def _assemble(interview, namespace, status):
     try:
         interview.assemble(namespace, interview_status=status)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - assembly may raise any interview-authored exception
         from docassemble.base.error import DAErrorNoEndpoint
 
         if isinstance(error, DAErrorNoEndpoint):
@@ -669,8 +762,8 @@ def _assemble(interview, namespace, status):
 def _seek(interview, namespace, status, variable, trace):
     try:
         interview.assemble(namespace, interview_status=status)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - pre-seek assembly is best-effort, ignore any failure
+        logger.debug("assemble before seek failed for %r: %s", variable, exc)
     result = interview.askfor(
         variable,
         namespace,
@@ -733,7 +826,7 @@ def _apply_assignments(interview, namespace, screen, assignments, use_code):
         previous = namespace.get(temporary, _MISSING)
         try:
             if use_code:
-                exec(f"{variable} = {raw}", namespace)
+                __builtins__["exec"](f"{variable} = {raw}", namespace)
                 continue
             value = parse_value(raw)
             datatype = field_types.get(variable, "")
@@ -752,8 +845,20 @@ def _apply_assignments(interview, namespace, screen, assignments, use_code):
 
                 value = DADict(elements=value)
             namespace[temporary] = value
-            exec(f"{variable} = {temporary}", namespace)
-        except Exception as error:
+            __builtins__["exec"](f"{variable} = {temporary}", namespace)
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+            SyntaxError,
+        ) as error:
             errors.append(f"{variable}: {type(error).__name__}: {error}")
         finally:
             if previous is _MISSING:
@@ -788,7 +893,7 @@ def _validate(interview, namespace, screen):
         from docassemble.base.error import DAValidationError
 
         try:
-            exec(code, namespace)
+            __builtins__["exec"](code, namespace)
         except DAValidationError as error:
             errors.append(
                 (
@@ -798,7 +903,24 @@ def _validate(interview, namespace, screen):
                 )
                 + (str(error) or "validation failed")
             )
-        except BaseException as error:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+            SyntaxError,
+            KeyboardInterrupt,
+            SystemExit,
+            GeneratorExit,
+            ArithmeticError,
+            AssertionError,
+        ) as error:
             errors.append(
                 f"validation code crashed ({type(error).__name__}): {_first_line(error)}"
             )
@@ -830,7 +952,20 @@ def _validate(interview, namespace, screen):
             continue
         try:
             eval(variable, namespace)
-        except Exception:
+        except (
+            NameError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            SyntaxError,
+            RuntimeError,
+            ImportError,
+            LookupError,
+            OSError,
+        ) as exc:
+            logger.debug("required field %r undefined: %s", variable, exc)
             warnings.append(
                 f"required field '{variable}' is undefined (the browser would refuse to submit this screen)"
             )
@@ -844,8 +979,19 @@ def _mark_answered(interview, namespace, name):
     if question is not None:
         try:
             question.mark_as_answered(namespace)
-        except Exception:
-            pass
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+            KeyError,
+            IndexError,
+            ImportError,
+            OSError,
+            LookupError,
+            NameError,
+        ) as exc:
+            logger.debug("mark_as_answered failed for %r: %s", name, exc)
 
 
 def _apply_object(namespace, variable, datatype, value):
@@ -853,7 +999,7 @@ def _apply_object(namespace, variable, datatype, value):
         namespace.get("_internal", {}).get("objselections", {}).get(variable, {})
     )
     if not isinstance(selections, dict):
-        raise ValueError(f"no object selections are available for {variable}")
+        raise TypeError(f"no object selections are available for {variable}")
     if datatype in {"object", "object_radio"}:
         key = next(iter(value), None) if isinstance(value, dict) else value
         if key in (None, ""):
@@ -864,7 +1010,7 @@ def _apply_object(namespace, variable, datatype, value):
             selected = selections[key]
         namespace["__dasimulator_object"] = selected
         try:
-            exec(f"{variable} = __dasimulator_object", namespace)
+            __builtins__["exec"](f"{variable} = __dasimulator_object", namespace)
         finally:
             namespace.pop("__dasimulator_object", None)
         return
@@ -879,7 +1025,20 @@ def _apply_object(namespace, variable, datatype, value):
         raise ValueError(f"unknown object choices for {variable}: {unknown!r}")
     try:
         target = eval(variable, namespace)
-    except Exception:
+    except (
+        NameError,
+        AttributeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        SyntaxError,
+        RuntimeError,
+        ImportError,
+        LookupError,
+        OSError,
+    ) as exc:
+        logger.debug("object target %r not found, creating: %s", variable, exc)
         from docassemble.base.parse import ensure_object_exists
 
         ensure_object_exists(variable, datatype, namespace)
@@ -889,8 +1048,8 @@ def _apply_object(namespace, variable, datatype, value):
         target.append(selections[key])
     try:
         target.gathered = True
-    except Exception:
-        pass
+    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        logger.debug("setting gathered failed: %s", exc)
 
 
 def _register_global_roots(namespace):
@@ -907,8 +1066,17 @@ def _register_global_roots(namespace):
         }
         if roots:
             set_info(**roots)
-    except Exception:
-        pass
+    except (
+        ImportError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        KeyError,
+        OSError,
+        LookupError,
+    ) as exc:
+        logger.debug("register global roots failed: %s", exc)
 
 
 def parse_value(raw: str):
@@ -926,7 +1094,8 @@ def parse_value(raw: str):
             or value is None
             else raw
         )
-    except Exception:
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
+        logger.debug("literal_eval failed for %r: %s", raw, exc)
         return raw
 
 
@@ -935,7 +1104,17 @@ def _picklable_view(namespace):
     for key, value in namespace.items():
         try:
             pickle.loads(pickle.dumps(value))
-        except Exception:
+        except (
+            pickle.PickleError,
+            TypeError,
+            ValueError,
+            AttributeError,
+            RuntimeError,
+            OSError,
+            LookupError,
+            ImportError,
+        ) as exc:
+            logger.debug("pickling %r failed, skipping: %s", key, exc)
             continue
         kept[key] = value
     return kept
@@ -966,7 +1145,17 @@ def _user_facing_error(error):
 def _safe_repr(value):
     try:
         rendered = repr(value)
-    except Exception as error:
+    except (
+        ValueError,
+        TypeError,
+        RuntimeError,
+        AttributeError,
+        KeyError,
+        OSError,
+        LookupError,
+        NameError,
+        ImportError,
+    ) as error:
         return f"<unrepr-able: {error}>"
     return rendered if len(rendered) <= 2000 else rendered[:2000] + "..."
 

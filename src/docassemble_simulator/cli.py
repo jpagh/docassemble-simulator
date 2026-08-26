@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from docassemble_simulator.bootstrap import (
     bootstrap,
@@ -53,7 +56,9 @@ def _json_requested(arguments):
 
 def _clean(value):
     if is_dataclass(value) and not isinstance(value, type):
-        return _clean({field.name: getattr(value, field.name) for field in fields(value)})
+        return _clean(
+            {field.name: getattr(value, field.name) for field in fields(value)}
+        )
     if isinstance(value, dict):
         return {key: _clean(item) for key, item in value.items() if item is not None}
     if isinstance(value, (list, tuple)):
@@ -131,7 +136,8 @@ def cmd_info(args, root):
         data["docassemble_version"] = getattr(
             docassemble.base, "__version__", "unknown"
         )
-    except Exception:
+    except (ImportError, AttributeError, ModuleNotFoundError) as exc:
+        logger.debug("docassemble version lookup failed: %s", exc)
         data["docassemble_version"] = "unknown (docassemble not importable)"
     _emit(_envelope("info", data), args.json)
     return 0
@@ -236,9 +242,7 @@ def cmd_render(args, root):
     if args.fixture:
         source = FixtureSource(Path(args.fixture).expanduser().resolve())
     elif args.snapshot_source:
-        source = SnapshotSource(
-            Path(args.snapshot_source).expanduser().resolve()
-        )
+        source = SnapshotSource(Path(args.snapshot_source).expanduser().resolve())
     elif args.fresh:
         source = FreshSource()
     else:
@@ -247,9 +251,7 @@ def cmd_render(args, root):
         args.template,
         source,
         False if isinstance(source, FixtureSource) else not args.no_assemble,
-        Path(args.save_snapshot).expanduser().resolve()
-        if args.save_snapshot
-        else None,
+        Path(args.save_snapshot).expanduser().resolve() if args.save_snapshot else None,
         Path(args.output).expanduser().resolve() if args.output else None,
         args.expect_missing,
     )
@@ -295,9 +297,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name, **kwargs):
-        return sub.add_parser(
-            name, parents=[common], command_name=name, **kwargs
-        )
+        return sub.add_parser(name, parents=[common], command_name=name, **kwargs)
 
     add("info", help="inspect the workspace without runtime bootstrap").set_defaults(
         func=cmd_info
@@ -410,7 +410,19 @@ def main(argv=None):
             args.json,
         )
         return 1
-    except Exception as error:
+    except (
+        RuntimeError,
+        TypeError,
+        AttributeError,
+        KeyError,
+        IndexError,
+        ImportError,
+        OSError,
+        LookupError,
+        NameError,
+        SyntaxError,
+    ) as error:
+        logger.exception("unhandled CLI fault")
         _emit(
             _envelope(
                 args.command,

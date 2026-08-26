@@ -1,4 +1,5 @@
 """Locate a docassemble package in a directory and its interviews."""
+
 from __future__ import annotations
 
 import re
@@ -95,13 +96,15 @@ def guess_main_interview(interviews: list[str]) -> str | None:
     ]
     if mains:
         return mains[0]
-    others = [i for i in interviews if i.endswith("main.yml") or i.endswith("main.yaml")]
+    others = [i for i in interviews if i.endswith(("main.yml", "main.yaml"))]
     if others:
         return others[0]
     return interviews[0] if interviews else None
 
 
-def resolve_interview(root: str | Path, requested: str | None = None) -> tuple[str, list[str]]:
+def resolve_interview(
+    root: str | Path, requested: str | None = None
+) -> tuple[str, list[str]]:
     """Resolve an interview reference to a full 'docassemble.pkg:path' string.
 
     Accepts: full path ('docassemble.pkg:main.yml'), bare filename

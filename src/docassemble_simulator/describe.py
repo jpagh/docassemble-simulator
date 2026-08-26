@@ -1,11 +1,16 @@
 """Turn docassemble question objects into plain dicts for CLI/agent consumption."""
+
 from __future__ import annotations
 
 import ast
 import base64
+import binascii
+import logging
 import re
 from contextlib import contextmanager
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def from_safeid_safe(text: str) -> str:
@@ -17,7 +22,14 @@ def from_safeid_safe(text: str) -> str:
     try:
         padded = text + "=" * ((4 - len(text) % 4) % 4)
         return base64.b64decode(padded).decode("utf-8")
-    except Exception:
+    except (
+        binascii.Error,
+        ValueError,
+        UnicodeDecodeError,
+        AttributeError,
+        TypeError,
+    ) as exc:
+        logger.debug("safeid decode failed for %r: %s", text, exc)
         return text
 
 
@@ -27,11 +39,20 @@ def _text_of(obj: Any, user_dict: dict) -> Any:
         return None
     try:
         return obj.text(user_dict).rstrip()
-    except Exception:
-        pass
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        KeyError,
+        IndexError,
+        LookupError,
+    ) as exc:
+        logger.debug("text() render failed for %r: %s", obj, exc)
     try:
         return str(obj)
-    except Exception:
+    except (TypeError, ValueError, RuntimeError, AttributeError) as exc:
+        logger.debug("str() render failed for %r: %s", obj, exc)
         return repr(obj)
 
 
@@ -54,7 +75,19 @@ def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]
         sign0 = extras.get("show_if_sign_code") == 0
         try:
             result = bool(eval(showif, user_dict))
-        except Exception as err:
+        except (
+            NameError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            SyntaxError,
+            RuntimeError,
+            ImportError,
+            LookupError,
+            OSError,
+        ) as err:
             return None, f"show-if not evaluable ({type(err).__name__}: {err})"
         # show_if_sign_code == 0 marks a "hide if" condition.
         return ((not result) if sign0 else result), None
@@ -63,7 +96,19 @@ def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]
         hide = extras.get("show_if_sign") == 0
         try:
             actual = eval(from_safeid_safe(extras["show_if_var"]), user_dict)
-        except Exception as err:
+        except (
+            NameError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            SyntaxError,
+            RuntimeError,
+            ImportError,
+            LookupError,
+            OSError,
+        ) as err:
             return None, f"show-if not evaluable ({type(err).__name__}: {err})"
         if "show_if_val" in extras:
             target = _text_of(extras["show_if_val"], user_dict)
@@ -82,7 +127,20 @@ def field_required(field: Any, user_dict: dict) -> bool:
     if isinstance(required, dict) and "compute" in required:
         try:
             return bool(eval(required["compute"], user_dict))
-        except Exception:
+        except (
+            NameError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            SyntaxError,
+            RuntimeError,
+            ImportError,
+            LookupError,
+            OSError,
+        ) as exc:
+            logger.debug("required compute eval failed: %s", exc)
             return True
     return bool(required)
 
@@ -135,7 +193,13 @@ def describe_choices(
         try:
             if isinstance(item, dict):
                 if "compute" in item and "label" not in item and "key" not in item:
-                    out.append({"reference_to": _selection_reference(field) or reference or "<dynamic choices>"})
+                    out.append(
+                        {
+                            "reference_to": _selection_reference(field)
+                            or reference
+                            or "<dynamic choices>"
+                        }
+                    )
                     break
                 if "label" in item and "key" in item:
                     out.append(
@@ -147,10 +211,18 @@ def describe_choices(
                 else:
                     for key, val in item.items():
                         out.append(
-                            {"value": _choice_value(key), "label": _text_of(val, user_dict)}
+                            {
+                                "value": _choice_value(key),
+                                "label": _text_of(val, user_dict),
+                            }
                         )
             elif isinstance(item, (list, tuple)) and len(item) == 2:
-                out.append({"value": _choice_value(item[0]), "label": _text_of(item[1], user_dict)})
+                out.append(
+                    {
+                        "value": _choice_value(item[0]),
+                        "label": _text_of(item[1], user_dict),
+                    }
+                )
             elif getattr(item, "instanceName", None):
                 out.append(
                     {
@@ -166,7 +238,19 @@ def describe_choices(
             else:
                 out.append({"reference_to": "<dynamic choices>"})
                 break
-        except Exception as err:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            LookupError,
+            OSError,
+            NameError,
+            ImportError,
+        ) as err:
+            logger.debug("choice render failed: %s", err)
             out.append({"value": f"<unrenderable choice: {err}>", "label": None})
     return out
 
@@ -189,7 +273,11 @@ def _choice_value(key: Any) -> Any:
     """Choice keys may be code (quoted strings); unquote when they are literals."""
     if isinstance(key, str):
         stripped = key.strip()
-        if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in ("'", '"'):
+        if (
+            len(stripped) >= 2
+            and stripped[0] == stripped[-1]
+            and stripped[0] in ("'", '"')
+        ):
             return stripped[1:-1]
     return key
 
@@ -294,7 +382,20 @@ def _describe_all_fields(
             if choices is None:
                 choices = selectcompute.get(str(getattr(field, "number", "")))
             described = describe_field(field, user_dict, choices=choices)
-        except Exception as err:
+        except (
+            ValueError,
+            TypeError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            LookupError,
+            OSError,
+            NameError,
+            ImportError,
+            SyntaxError,
+        ) as err:
+            logger.debug("field describe failed: %s", err)
             described = {"error": f"could not describe field: {err}"}
         fields.append(described)
     return fields

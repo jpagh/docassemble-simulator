@@ -131,13 +131,15 @@ def prepare_docx_template(path: str | Path):
         paragraphs = len(re.findall(r"\n<w:p(?:[ >])", xml))
         xml = docx_template.patch_xml(xml)
         custom_jinja_env().parse(xml)
-        setattr(docx_template, "_dasimulator_paragraphs", paragraphs)
-        setattr(docx_template, "_dasimulator_prepared_xml", xml)
+        docx_template._dasimulator_paragraphs = paragraphs
+        docx_template._dasimulator_prepared_xml = xml
         return docx_template
     except RenderError:
         raise
     except Exception as err:
-        raise RenderError.from_exception(err, template=str(Path(path).resolve())) from err
+        raise RenderError.from_exception(
+            err, template=str(Path(path).resolve())
+        ) from err
 
 
 def render_template(
@@ -189,7 +191,7 @@ def render_template(
                 current.save(str(temporary))
                 current = DocxTemplate(str(temporary))
                 current.render_init()
-                setattr(current, "_dasimulator_paragraphs", paragraphs)
+                current._dasimulator_paragraphs = paragraphs
             finally:
                 temporary.unlink(missing_ok=True)
         else:
@@ -314,9 +316,7 @@ class InterviewRenderer:
                         f"expected missing variable {request.expect_missing!r}, but render succeeded"
                     )
                 artifact = (
-                    write_artifact(rendered, request.output)
-                    if request.output
-                    else None
+                    write_artifact(rendered, request.output) if request.output else None
                 )
                 return RenderOutcome(
                     True,
@@ -419,16 +419,16 @@ def _validate_effect_destinations(
             return _render_failure(
                 "input", "render effects cannot replace a template or render input"
             )
-        if any(destination.is_relative_to(directory) for directory in template_directories):
+        if any(
+            destination.is_relative_to(directory) for directory in template_directories
+        ):
             return _render_failure(
                 "input", "render effects cannot write inside template directories"
             )
     return None
 
 
-def _attributed_template(
-    root: Path, error: RenderError, requested: str
-) -> str:
+def _attributed_template(root: Path, error: RenderError, requested: str) -> str:
     """Prefer an exception template only when it maps to a real package file."""
     if error.template is None:
         return requested

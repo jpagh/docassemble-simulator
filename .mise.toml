@@ -1,0 +1,39 @@
+[tools]
+    "pipx:bump-my-version" = "latest"
+    "pipx:pyrefly"         = "latest"
+    tombi                  = "latest"
+    ruff                   = "latest"
+    uv                     = "latest"
+
+[settings]
+    python.uv_venv_auto = "create|source"
+
+[tasks.bump]
+    description = "Bump the patch digit (CalVer YY.MM.patch → YY.MM.patch+1) and push"
+    tools       = { node = "latest", uv = "latest" }
+    run         = "bump-my-version bump patch && git push --follow-tags"
+
+[tasks.lint]
+    description = "Lint with ruff, tombi, and pyrefly"
+    run         = [
+        "ruff check",
+        "tombi lint",
+        "pyrefly check",
+    ]
+
+[tasks.format]
+    description = "Format with ruff and tombi"
+    run         = [
+        "ruff format",
+        "tombi format",
+    ]
+
+[tasks.test]
+    description = "Run the test suite with pytest"
+    run         = "uv run pytest"
+
+[tasks.pre-commit]
+    description = "Lint and format the whole project"
+    run         = [
+        { tasks = ["lint", "format", "test"] },
+    ]

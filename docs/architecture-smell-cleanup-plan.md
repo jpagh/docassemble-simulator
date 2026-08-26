@@ -186,6 +186,7 @@ class Failure:
     message: str
     details: dict[str, Any] | None = None
 
+
 @dataclass(frozen=True)
 class Outcome(Generic[T]):
     ok: bool

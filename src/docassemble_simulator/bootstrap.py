@@ -16,8 +16,10 @@ library assumes a running webapp; these pieces are stubbed:
 | cleanup_sessions          |                                            |            |
 | DA_CONFIG_FILE            | interviews render Jinja against `jinja data` config | write a config file (sqlite + fake redis + jinja data) and point the env var at it |
 """
+
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import re
@@ -26,6 +28,8 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_TEXT = """\
 db:
@@ -201,13 +205,29 @@ def _configured_timezone() -> str:
         configured = getattr(da_config, "daconfig", {}).get("timezone")
         if configured:
             return str(configured)
-    except Exception:
-        pass
+    except (
+        ImportError,
+        AttributeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        OSError,
+    ) as exc:
+        logger.debug("configured timezone not available: %s", exc)
     try:
         from tzlocal import get_localzone_name
 
         return get_localzone_name()
-    except Exception:
+    except (
+        ImportError,
+        ValueError,
+        OSError,
+        RuntimeError,
+        AttributeError,
+        LookupError,
+    ) as exc:
+        logger.debug("tzlocal lookup failed, using default: %s", exc)
         return "America/New_York"
 
 
@@ -334,14 +354,18 @@ def register_hooks() -> None:
             return "btn"
 
         @hookimpl
-        def save_numbered_file(self, filename, orig_path, yaml_file_name=None, uid=None):
+        def save_numbered_file(
+            self, filename, orig_path, yaml_file_name=None, uid=None
+        ):
             global _NEXT_SIMULATOR_FILE
             _NEXT_SIMULATOR_FILE += 1
             number = _NEXT_SIMULATOR_FILE
             suffix = Path(filename).suffix or Path(orig_path).suffix
             destination = Path(tempfile.gettempdir()) / f"dasimulator-{number}{suffix}"
             shutil.copyfile(orig_path, destination)
-            mimetype = mimetypes.guess_type(str(destination))[0] or "application/octet-stream"
+            mimetype = (
+                mimetypes.guess_type(str(destination))[0] or "application/octet-stream"
+            )
             _SIMULATOR_FILES[number] = {
                 "path": str(destination),
                 "filename": Path(filename).name,
@@ -353,7 +377,9 @@ def register_hooks() -> None:
             return number, suffix.lstrip("."), mimetype
 
         @hookimpl
-        def file_number_finder(self, file_number, filename=None, uids=None, privileged=False):
+        def file_number_finder(
+            self, file_number, filename=None, uids=None, privileged=False
+        ):
             return _SIMULATOR_FILES.get(file_number)
 
         @hookimpl
@@ -395,7 +421,20 @@ def _fake_defined(name) -> bool:
         return False
     try:
         eval(name, current)
-    except Exception:
+    except (
+        NameError,
+        AttributeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        SyntaxError,
+        RuntimeError,
+        ImportError,
+        LookupError,
+        OSError,
+    ) as exc:
+        logger.debug("defined check for %r failed: %s", name, exc)
         return False
     return True
 
