@@ -97,26 +97,14 @@ class InterviewCatalog:
         )
 
     def questions(self, contains: str | None = None) -> CatalogOutcome:
-        from docassemble_simulator.describe import from_safeid_safe
+        from docassemble_simulator.describe import field_variable
 
         interview = self._compile_for_inspection()
         rows = []
         for index, question in enumerate(interview.questions_list):
             variables = []
             for field in getattr(question, "fields", None) or []:
-                encoded = getattr(field, "saveas", "") or ""
-                try:
-                    variables.append(from_safeid_safe(encoded))
-                except (
-                    ValueError,
-                    TypeError,
-                    AttributeError,
-                    RuntimeError,
-                    OSError,
-                    LookupError,
-                ) as exc:
-                    logger.debug("safeid decode failed for %r: %s", encoded, exc)
-                    variables.append(encoded)
+                variables.append(field_variable(field))
             name = getattr(question, "name", None)
             if (
                 contains

@@ -4,6 +4,7 @@ import sys
 from types import SimpleNamespace
 
 from docassemble_simulator import cli
+from docassemble_simulator._outcomes import ErrorKind, Failure
 
 
 def _run_cli(*arguments):
@@ -13,6 +14,17 @@ def _run_cli(*arguments):
         text=True,
         check=False,
     )
+
+
+def test_error_kinds_keep_exit_codes_and_json_values_stable():
+    assert cli._exit_for_error(ErrorKind.INPUT) == 1
+    assert cli._exit_for_error(ErrorKind.FAULT) == 3
+    assert cli._exit_for_error("future-kind") == 2
+    assert cli._envelope("answer", error=Failure(ErrorKind.INPUT, "bad", {})) == {
+        "ok": False,
+        "command": "answer",
+        "error": {"kind": ErrorKind.INPUT, "message": "bad", "details": {}},
+    }
 
 
 def test_json_usage_failure_uses_the_envelope_and_exit_code_one():

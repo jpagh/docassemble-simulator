@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from docassemble_simulator.describe import (
     describe_choices,
     describe_question_result,
+    field_variable,
     field_visible,
 )
 from docassemble_simulator.execution import parse_value
@@ -14,6 +15,11 @@ def safeid(name: str) -> str:
     import base64
 
     return base64.b64encode(name.encode()).decode()
+
+
+def test_field_variable_decodes_saveas_once():
+    assert field_variable(SimpleNamespace(saveas=safeid("M.value"))) == "M.value"
+    assert field_variable(SimpleNamespace(saveas=None)) == ""
 
 
 class TestParseValue:

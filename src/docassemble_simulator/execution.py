@@ -17,32 +17,29 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from docassemble_simulator._files import atomic_replace
+from docassemble_simulator._files import (
+    DestinationError,
+    ProtectedPath,
+    atomic_replace,
+    flock,
+    validate_destinations,
+)
+from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator.catalog import InterviewCatalog
 from docassemble_simulator.describe import (
     describe_question_result,
     describe_seeking,
     field_required,
+    field_variable,
     field_visible,
-    from_safeid_safe,
 )
 
 STATE_SCHEMA = 1
 _MISSING = object()
 
 
-@dataclass(frozen=True)
-class ExecutionError:
-    kind: str
-    message: str
-    details: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class ExecutionOutcome:
-    ok: bool
-    result: Any = None
-    error: ExecutionError | None = None
+ExecutionError = Failure
+ExecutionOutcome = Outcome
 
 
 @dataclass(frozen=True)
@@ -121,16 +118,85 @@ class _RenderPreparation:
     assemble: bool
     save_snapshot: Path | None
     effect_destinations: tuple[Path, ...]
+    protected: tuple[ProtectedPath, ...] = ()
 
 
 Operation = Start | Status | Refresh | Answer | Seek | Evaluate | Variables | Execute
 
 
 class ExecutionFailure(Exception):
-    def __init__(self, kind: str, message: str, details: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        kind: ErrorKind,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
-        self.kind = kind
+        self.kind = ErrorKind(kind)
         self.details = details
+
+
+def _read_payload(
+    path: Path,
+    *,
+    identity: str,
+    load_namespace: bool,
+    label: str,
+) -> dict[str, Any]:
+    """Read and validate a saved-session or snapshot payload."""
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception as error:
+        if label == "saved":
+            message = f"saved state is unreadable; run `start` again ({error})"
+        else:
+            message = f"could not load snapshot {path}: {error}"
+        raise ExecutionFailure(ErrorKind.STATE, message) from error
+
+    if not isinstance(payload, dict) or payload.get("schema") != STATE_SCHEMA:
+        message = (
+            "saved state uses an unsupported format; run `start` again"
+            if label == "saved"
+            else "snapshot uses an unsupported format"
+        )
+        raise ExecutionFailure(ErrorKind.STATE, message)
+    if payload.get("interview") != identity:
+        message = (
+            "saved state belongs to another interview; run `start` again"
+            if label == "saved"
+            else "snapshot belongs to another interview"
+        )
+        raise ExecutionFailure(ErrorKind.STATE, message)
+
+    blob = payload.get("namespace")
+    if not isinstance(blob, bytes):
+        message = (
+            "saved state is invalid; run `start` again"
+            if label == "saved"
+            else "snapshot does not contain an interview namespace"
+        )
+        raise ExecutionFailure(ErrorKind.STATE, message)
+    if not load_namespace:
+        return payload
+
+    try:
+        payload["namespace"] = pickle.loads(blob)
+    except Exception as error:
+        message = (
+            f"saved namespace is unreadable; run `start` again ({error})"
+            if label == "saved"
+            else f"snapshot namespace is unreadable: {error}"
+        )
+        raise ExecutionFailure(ErrorKind.STATE, message) from error
+    if not isinstance(payload["namespace"], dict):
+        message = (
+            "saved state is invalid; run `start` again"
+            if label == "saved"
+            else "snapshot does not contain an interview namespace"
+        )
+        raise ExecutionFailure(ErrorKind.STATE, message)
+    return payload
 
 
 class StateStore:
@@ -148,50 +214,20 @@ class StateStore:
 
     @contextmanager
     def lock(self):
-        import fcntl
-
-        self.directory.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with flock(self.lock_path):
+            yield
 
     def load(self, *, namespace: bool = True) -> dict[str, Any]:
         if not self.path.exists():
-            raise ExecutionFailure("state", "no saved session; run `start` first")
-        try:
-            with self.path.open("rb") as handle:
-                payload = pickle.load(handle)
-        except Exception as error:
             raise ExecutionFailure(
-                "state", f"saved state is unreadable; run `start` again ({error})"
-            ) from error
-        if not isinstance(payload, dict) or payload.get("schema") != STATE_SCHEMA:
-            raise ExecutionFailure(
-                "state", "saved state uses an unsupported format; run `start` again"
+                ErrorKind.STATE, "no saved session; run `start` first"
             )
-        if payload.get("interview") != self.identity:
-            raise ExecutionFailure(
-                "state", "saved state belongs to another interview; run `start` again"
-            )
-        blob = payload.get("namespace")
-        if not isinstance(blob, bytes):
-            raise ExecutionFailure("state", "saved state is invalid; run `start` again")
-        if namespace:
-            try:
-                payload["namespace"] = pickle.loads(blob)
-            except Exception as error:
-                raise ExecutionFailure(
-                    "state",
-                    f"saved namespace is unreadable; run `start` again ({error})",
-                ) from error
-            if not isinstance(payload["namespace"], dict):
-                raise ExecutionFailure(
-                    "state", "saved state is invalid; run `start` again"
-                )
-        return payload
+        return _read_payload(
+            self.path,
+            identity=self.identity,
+            load_namespace=namespace,
+            label="saved",
+        )
 
     def save(
         self,
@@ -217,33 +253,12 @@ class StateStore:
         _atomic_pickle(path.expanduser().resolve(), payload, lock_destination=True)
 
     def load_snapshot(self, path: Path) -> dict[str, Any]:
-        try:
-            with path.expanduser().resolve().open("rb") as handle:
-                payload = pickle.load(handle)
-        except Exception as error:
-            raise ExecutionFailure(
-                "state", f"could not load snapshot {path}: {error}"
-            ) from error
-        if not isinstance(payload, dict) or payload.get("schema") != STATE_SCHEMA:
-            raise ExecutionFailure("state", "snapshot uses an unsupported format")
-        if payload.get("interview") != self.identity:
-            raise ExecutionFailure("state", "snapshot belongs to another interview")
-        blob = payload.get("namespace")
-        if not isinstance(blob, bytes):
-            raise ExecutionFailure(
-                "state", "snapshot does not contain an interview namespace"
-            )
-        try:
-            namespace = pickle.loads(blob)
-        except Exception as error:
-            raise ExecutionFailure(
-                "state", f"snapshot namespace is unreadable: {error}"
-            ) from error
-        if not isinstance(namespace, dict):
-            raise ExecutionFailure(
-                "state", "snapshot does not contain an interview namespace"
-            )
-        return namespace
+        return _read_payload(
+            path.expanduser().resolve(),
+            identity=self.identity,
+            load_namespace=True,
+            label="snapshot",
+        )["namespace"]
 
 
 class InterviewExecution:
@@ -295,7 +310,10 @@ class InterviewExecution:
         ) as error:
             logger.exception("unhandled execution fault")
             return ExecutionOutcome(
-                False, error=ExecutionError("fault", f"{type(error).__name__}: {error}")
+                False,
+                error=ExecutionError(
+                    ErrorKind.FAULT, f"{type(error).__name__}: {error}"
+                ),
             )
 
     def _mutate(self, action: Callable[[], Any]) -> ExecutionOutcome:
@@ -305,7 +323,7 @@ class InterviewExecution:
             return ExecutionOutcome(
                 False,
                 error=ExecutionError(
-                    "execution",
+                    ErrorKind.EXECUTION,
                     result.get("message", "interview assembly failed"),
                     result,
                 ),
@@ -338,13 +356,15 @@ class InterviewExecution:
 
     def _answer(self, operation: Answer):
         if not operation.assignments:
-            raise ExecutionFailure("input", "no VAR=VALUE assignments were provided")
+            raise ExecutionFailure(
+                ErrorKind.INPUT, "no VAR=VALUE assignments were provided"
+            )
         payload = self._store.load()
         namespace = payload["namespace"]
         screen = payload.get("outcome") or {}
         if screen.get("kind") not in {"question", "continue"}:
             raise ExecutionFailure(
-                "input", "the saved outcome is not an answerable screen"
+                ErrorKind.INPUT, "the saved outcome is not an answerable screen"
             )
         interview = self._catalog._compile()
         with _interview_context(interview, namespace) as status:
@@ -354,7 +374,7 @@ class InterviewExecution:
             )
             if errors:
                 raise ExecutionFailure(
-                    "answer-input",
+                    ErrorKind.ANSWER_INPUT,
                     "one or more answers could not be applied",
                     {"errors": errors},
                 )
@@ -368,7 +388,7 @@ class InterviewExecution:
                 validation["warnings"] = []
             if validation["errors"]:
                 raise ExecutionFailure(
-                    "validation",
+                    ErrorKind.VALIDATION,
                     "screen rejected; all answers were discarded",
                     validation,
                 )
@@ -419,7 +439,10 @@ class InterviewExecution:
         ) as error:
             logger.exception("seek failed")
             return ExecutionOutcome(
-                False, error=ExecutionError("seek", f"{type(error).__name__}: {error}")
+                False,
+                error=ExecutionError(
+                    ErrorKind.SEEK, f"{type(error).__name__}: {error}"
+                ),
             )
 
     def _evaluate(self, operation: Evaluate):
@@ -432,7 +455,7 @@ class InterviewExecution:
                 value = eval(operation.expression, namespace)
             except Exception as error:
                 raise ExecutionFailure(
-                    "execution", f"{type(error).__name__}: {error}"
+                    ErrorKind.EXECUTION, f"{type(error).__name__}: {error}"
                 ) from error
         return ExecutionOutcome(
             True, {"expression": operation.expression, "value": _safe_repr(value)}
@@ -493,7 +516,7 @@ class InterviewExecution:
                 SyntaxError,
             ) as error:
                 raise ExecutionFailure(
-                    "execution", f"{type(error).__name__}: {error}"
+                    ErrorKind.EXECUTION, f"{type(error).__name__}: {error}"
                 ) from error
             outcome = (
                 _assemble(interview, namespace, status)
@@ -514,7 +537,17 @@ class InterviewExecution:
     ) -> ExecutionOutcome:
         """Invoke render's private action while prepared context remains active."""
         try:
-            self._reject_session_destinations(preparation.effect_destinations)
+            protected = preparation.protected + (
+                ProtectedPath(
+                    self._store.directory,
+                    "saved-session storage",
+                    directory=True,
+                ),
+            )
+            try:
+                validate_destinations(preparation.effect_destinations, protected)
+            except DestinationError as error:
+                raise ExecutionFailure(ErrorKind.INPUT, str(error)) from error
             source = preparation.source
             if isinstance(source, SavedSessionSource):
                 namespace = self._store.load()["namespace"]
@@ -525,7 +558,7 @@ class InterviewExecution:
             elif isinstance(source, FixtureSource):
                 namespace = _fresh_namespace()
             else:
-                raise ExecutionFailure("input", "invalid render source")
+                raise ExecutionFailure(ErrorKind.INPUT, "invalid render source")
             interview = self._catalog._compile()
             with _interview_context(interview, namespace) as status:
                 self._prepare(interview, namespace)
@@ -548,14 +581,14 @@ class InterviewExecution:
                         SyntaxError,
                     ) as error:
                         raise ExecutionFailure(
-                            "execution",
+                            ErrorKind.EXECUTION,
                             f"fixture failed: {type(error).__name__}: {error}",
                         ) from error
                 elif preparation.assemble:
                     outcome = _assemble(interview, namespace, status)
                     if outcome.get("kind") == "error":
                         raise ExecutionFailure(
-                            "execution",
+                            ErrorKind.EXECUTION,
                             outcome.get("message", "assembly failed"),
                             outcome,
                         )
@@ -582,16 +615,10 @@ class InterviewExecution:
             logger.exception("render state failed")
             return ExecutionOutcome(
                 False,
-                error=ExecutionError("fault", f"{type(error).__name__}: {error}"),
+                error=ExecutionError(
+                    ErrorKind.FAULT, f"{type(error).__name__}: {error}"
+                ),
             )
-
-    def _reject_session_destinations(self, destinations: tuple[Path, ...]) -> None:
-        session_directory = self._store.directory.resolve()
-        for destination in destinations:
-            if destination.expanduser().resolve().is_relative_to(session_directory):
-                raise ExecutionFailure(
-                    "input", "render effects cannot write inside saved-session storage"
-                )
 
     def _prepare(self, interview, namespace: dict[str, Any]) -> None:
         """Restore server request names, then run authored package adapters."""
@@ -615,7 +642,7 @@ class InterviewExecution:
             SyntaxError,
         ) as error:
             raise ExecutionFailure(
-                "execution",
+                ErrorKind.EXECUTION,
                 f"namespace rehydration failed: {type(error).__name__}: {error}",
             ) from error
         config = self.root / ".config" / "simulator" / "config.py"
@@ -636,7 +663,7 @@ class InterviewExecution:
                 SyntaxError,
             ) as error:
                 raise ExecutionFailure(
-                    "execution",
+                    ErrorKind.EXECUTION,
                     f"simulator config {config} failed: {type(error).__name__}: {error}",
                 ) from error
         _register_global_roots(namespace)
@@ -810,7 +837,7 @@ def _field_types(interview, screen):
         else None
     )
     for field in getattr(question, "fields", None) or []:
-        name = from_safeid_safe(getattr(field, "saveas", "") or "")
+        name = field_variable(field)
         if name:
             result[name] = str(
                 getattr(field, "datatype", "") or result.get(name, "")
@@ -943,7 +970,7 @@ def _validate(interview, namespace, screen):
                 continue
             checks.append(
                 (
-                    from_safeid_safe(getattr(field, "saveas", "") or ""),
+                    field_variable(field),
                     getattr(field, "datatype", ""),
                 )
             )

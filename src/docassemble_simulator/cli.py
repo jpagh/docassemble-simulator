@@ -12,6 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from docassemble_simulator._outcomes import ErrorKind, Failure
 from docassemble_simulator.bootstrap import (
     bootstrap,
     deep_merge,
@@ -69,13 +70,7 @@ def _clean(value):
 def _envelope(command: str, result: Any = None, error: Any = None):
     if error is None:
         return {"ok": True, "command": command, "result": result}
-    if hasattr(error, "kind"):
-        error = {
-            "kind": error.kind,
-            "message": error.message,
-            "details": error.details or {},
-        }
-    return {"ok": False, "command": command, "error": error}
+    return {"ok": False, "command": command, "error": _clean(error)}
 
 
 def _emit(payload, as_json):
@@ -107,12 +102,21 @@ def _human(value, indent=0):
     return f"{pad}{value}"
 
 
-def _exit_for_error(kind: str):
-    if kind in {"input", "state", "workspace", "configuration"}:
-        return 1
-    if kind == "fault":
-        return 3
-    return 2
+EXIT_CODES = {
+    ErrorKind.INPUT: 1,
+    ErrorKind.STATE: 1,
+    ErrorKind.WORKSPACE: 1,
+    ErrorKind.CONFIGURATION: 1,
+    ErrorKind.FAULT: 3,
+}
+
+
+def _exit_for_error(kind: ErrorKind | str):
+    try:
+        normalized = ErrorKind(kind)
+    except ValueError:
+        return 2
+    return EXIT_CODES.get(normalized, 2)
 
 
 def _execution(args, root):
@@ -158,7 +162,7 @@ def cmd_catalog(args, root):
         _emit(
             _envelope(
                 args.command,
-                error={"kind": "compile", "message": str(error), "details": {}},
+                error=Failure(ErrorKind.COMPILE, str(error), {}),
             ),
             args.json,
         )
@@ -173,7 +177,7 @@ def cmd_catalog(args, root):
         else _envelope(
             args.command,
             error={
-                "kind": "compile",
+                "kind": ErrorKind.COMPILE,
                 "message": "one or more interviews failed to compile",
                 "details": result,
             },
@@ -373,7 +377,7 @@ def main(argv=None):
         _emit(
             _envelope(
                 error.command,
-                error={"kind": "input", "message": str(error), "details": {}},
+                error=Failure(ErrorKind.INPUT, str(error), {}),
             ),
             _json_requested(arguments),
         )
@@ -405,7 +409,7 @@ def main(argv=None):
         _emit(
             _envelope(
                 args.command,
-                error={"kind": "input", "message": message, "details": {}},
+                error=Failure(ErrorKind.INPUT, message, {}),
             ),
             args.json,
         )
@@ -427,7 +431,7 @@ def main(argv=None):
             _envelope(
                 args.command,
                 error={
-                    "kind": "fault",
+                    "kind": ErrorKind.FAULT,
                     "message": f"{type(error).__name__}: {error}",
                     "details": {},
                 },

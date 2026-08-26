@@ -1,6 +1,6 @@
 # Architecture Smell Cleanup Plan
 
-Status: proposed
+Status: implemented
 Date: 2026-08-26
 Depends on: `docs/architecture-refactor-follow-up-plan.md` (implemented), ADR-0002
 

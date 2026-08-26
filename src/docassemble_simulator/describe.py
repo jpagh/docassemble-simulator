@@ -33,6 +33,11 @@ def from_safeid_safe(text: str) -> str:
         return text
 
 
+def field_variable(field: Any) -> str:
+    """Return a field's decoded saved-variable name."""
+    return from_safeid_safe(getattr(field, "saveas", "") or "")
+
+
 def _text_of(obj: Any, user_dict: dict) -> Any:
     """Best-effort render of a TextObject / value in the interview context."""
     if obj is None:
@@ -339,7 +344,7 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
     if qtype in YESNO_TYPES:
         seen: set[str] = set()
         for field in _raw_fields(question):
-            var = from_safeid_safe(getattr(field, "saveas", "") or "")
+            var = field_variable(field)
             if var and var not in seen:
                 seen.add(var)
                 visible, note = field_visible(field, user_dict)
@@ -399,6 +404,18 @@ def _describe_all_fields(
             described = {"error": f"could not describe field: {err}"}
         fields.append(described)
     return fields
+
+
+__all__ = [
+    "describe_choices",
+    "describe_field",
+    "describe_question_result",
+    "describe_seeking",
+    "field_required",
+    "field_variable",
+    "field_visible",
+    "from_safeid_safe",
+]
 
 
 def describe_seeking(seeking: list, limit: int = 40) -> list[dict]:

@@ -26,6 +26,36 @@ def _run_writers(script, arguments):
     return failures
 
 
+def test_concurrent_session_mutations_do_not_lose_updates(tmp_path):
+    from docassemble_simulator.execution import StateStore
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    store = StateStore(tmp_path, identity)
+    store.save({"counter": 0}, {"kind": "executed"})
+    script = """
+import sys
+from pathlib import Path
+from docassemble_simulator.execution import StateStore
+
+root, identity = sys.argv[1:]
+store = StateStore(Path(root), identity)
+for _ in range(20):
+    with store.lock():
+        payload = store.load()
+        namespace = payload["namespace"]
+        namespace["counter"] += 1
+        store.save(namespace, {"kind": "executed"})
+"""
+
+    failures = _run_writers(
+        script,
+        [(str(tmp_path), identity) for _ in ("a", "b", "c", "d")],
+    )
+
+    assert failures == []
+    assert store.load()["namespace"]["counter"] == 80
+
+
 def test_concurrent_snapshot_writers_install_complete_payloads(tmp_path):
     destination = tmp_path / "shared.snapshot"
     identity = "docassemble.pkg:data/questions/main.yml"
@@ -55,6 +85,39 @@ for index in range(20):
     assert snapshot["marker"] in {"a", "b", "c", "d"}
     assert snapshot["index"] == 19
     assert snapshot["padding"] == snapshot["marker"] * 200000
+
+
+def test_corrupt_payload_has_saved_state_recovery_message(tmp_path):
+    from docassemble_simulator.execution import ExecutionFailure
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    store = StateStore(tmp_path, identity)
+    store.directory.mkdir(parents=True)
+    store.path.write_bytes(b"not pickle")
+
+    with pytest.raises(ExecutionFailure, match="run `start` again"):
+        store.load()
+
+
+def test_snapshot_with_another_interview_identity_is_rejected(tmp_path):
+    import pickle
+
+    from docassemble_simulator.execution import ExecutionFailure
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    snapshot = tmp_path / "snapshot.pkl"
+    snapshot.write_bytes(
+        pickle.dumps(
+            {
+                "schema": 1,
+                "interview": "docassemble.other:data/questions/main.yml",
+                "namespace": pickle.dumps({}),
+            }
+        )
+    )
+
+    with pytest.raises(ExecutionFailure, match="another interview"):
+        StateStore(tmp_path, identity).load_snapshot(snapshot)
 
 
 def test_flush_failure_preserves_destination_and_cleans_temporary(

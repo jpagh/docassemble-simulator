@@ -7,6 +7,7 @@ import pytest
 import docassemble_simulator.execution as execution_module
 from docassemble_simulator.execution import InterviewExecution
 from docassemble_simulator.render import (
+    FixtureSource,
     FreshSource,
     InterviewRenderer,
     RenderError,
@@ -113,6 +114,27 @@ def test_render_effects_cannot_target_saved_session_storage(tmp_path):
     assert outcome.error.kind == "input"
     assert "saved-session" in outcome.error.message
     assert not destination.exists()
+
+
+def test_destination_validation_precedes_fixture_execution(tmp_path):
+    execution = _workspace(tmp_path)
+    fixture = tmp_path / "fixture.py"
+    marker = tmp_path / "marker"
+    fixture.write_text(f"{marker!r}.write_text('ran')\n")
+    template_directory = tmp_path / "docassemble" / "pkg" / "data" / "templates"
+
+    outcome = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(
+            "form.docx",
+            FixtureSource(fixture),
+            assemble=False,
+            output=template_directory / "output.docx",
+        )
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "input"
+    assert not marker.exists()
 
 
 def test_snapshot_and_artifact_destinations_must_be_distinct(tmp_path):

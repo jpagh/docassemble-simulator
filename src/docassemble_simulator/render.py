@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from docassemble_simulator._files import atomic_replace
+from docassemble_simulator._files import ProtectedPath, atomic_replace
+from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator.execution import (
     FixtureSource,
     FreshSource,
@@ -256,11 +257,8 @@ class RenderRequest:
     expect_missing: str | None = None
 
 
-@dataclass(frozen=True)
-class RenderFailure:
-    kind: str
-    message: str
-    details: dict[str, Any] | None = None
+RenderFailure = Failure
+RenderOutcome = Outcome
 
 
 @dataclass(frozen=True)
@@ -268,13 +266,6 @@ class RenderResult:
     template: str
     paragraphs: int
     artifact: Path | None = None
-
-
-@dataclass(frozen=True)
-class RenderOutcome:
-    ok: bool
-    result: RenderResult | None = None
-    error: RenderFailure | None = None
 
 
 class InterviewRenderer:
@@ -298,11 +289,18 @@ class InterviewRenderer:
             template_path = find_template(self.root, request.template)
         except TemplateNotFoundError as error:
             return _render_failure("input", str(error))
-        invalid_destination = _validate_effect_destinations(
-            self.root, request, template_path
+        protected = [ProtectedPath(template_path, "a template or render input")]
+        if isinstance(request.source, (FixtureSource, SnapshotSource)):
+            protected.append(
+                ProtectedPath(
+                    request.source.path,
+                    "a template or render input",
+                )
+            )
+        protected.extend(
+            ProtectedPath(directory, "template directories", directory=True)
+            for directory in _template_directories(self.root)
         )
-        if invalid_destination is not None:
-            return invalid_destination
 
         def action(namespace):
             prepared = None
@@ -348,13 +346,13 @@ class InterviewRenderer:
                     details["render_pass"] = error.render_pass
                 return RenderOutcome(
                     False,
-                    error=RenderFailure("render", str(error), details),
+                    error=RenderFailure(ErrorKind.RENDER, str(error), details),
                 )
             except (RenderExpectationError, OSError) as error:
                 return RenderOutcome(
                     False,
                     error=RenderFailure(
-                        "render",
+                        ErrorKind.RENDER,
                         str(error),
                         {
                             "template": request.template,
@@ -372,6 +370,7 @@ class InterviewRenderer:
                 request.assemble,
                 request.save_snapshot,
                 destinations,
+                tuple(protected),
             ),
             action,
         )
@@ -389,43 +388,16 @@ class InterviewRenderer:
         return _render_failure("fault", "render action returned an invalid outcome")
 
 
-def _render_failure(kind: str, message: str) -> RenderOutcome:
-    return RenderOutcome(False, error=RenderFailure(kind, message, {}))
+def _render_failure(kind: ErrorKind | str, message: str) -> RenderOutcome:
+    return RenderOutcome(False, error=RenderFailure(ErrorKind(kind), message, {}))
 
 
-def _validate_effect_destinations(
-    root: Path, request: RenderRequest, template_path: Path
-) -> RenderOutcome | None:
-    effects = [
-        path.expanduser().resolve()
-        for path in (request.save_snapshot, request.output)
-        if path is not None
-    ]
-    if len(effects) == 2 and effects[0] == effects[1]:
-        return _render_failure(
-            "input", "snapshot and artifact destinations must be different"
-        )
-
-    inputs = {template_path.resolve()}
-    if isinstance(request.source, (FixtureSource, SnapshotSource)):
-        inputs.add(request.source.path.expanduser().resolve())
-    template_directories = [
+def _template_directories(root: Path) -> list[Path]:
+    return [
         path.resolve()
         for path in (root / "docassemble").glob("*/data/templates")
         if path.is_dir()
     ]
-    for destination in effects:
-        if destination in inputs:
-            return _render_failure(
-                "input", "render effects cannot replace a template or render input"
-            )
-        if any(
-            destination.is_relative_to(directory) for directory in template_directories
-        ):
-            return _render_failure(
-                "input", "render effects cannot write inside template directories"
-            )
-    return None
 
 
 def _attributed_template(root: Path, error: RenderError, requested: str) -> str:
@@ -436,12 +408,9 @@ def _attributed_template(root: Path, error: RenderError, requested: str) -> str:
     if not candidate.is_file():
         return requested
     resolved = candidate.resolve()
-    directories = [
-        path.resolve()
-        for path in (root / "docassemble").glob("*/data/templates")
-        if path.is_dir()
-    ]
-    if any(resolved.is_relative_to(directory) for directory in directories):
+    if any(
+        resolved.is_relative_to(directory) for directory in _template_directories(root)
+    ):
         return error.template
     return requested
 
