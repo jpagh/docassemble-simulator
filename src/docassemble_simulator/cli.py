@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 
 from docassemble_simulator.bootstrap import (
     bootstrap,
@@ -22,7 +23,37 @@ from docassemble_simulator.detect import (
 )
 
 
+class InputFailure(Exception):
+    pass
+
+
+class UsageFailure(Exception):
+    def __init__(self, command: str, message: str):
+        super().__init__(message)
+        self.command = command
+
+
+class UsageParser(argparse.ArgumentParser):
+    def __init__(self, *args, command_name: str = "cli", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.command_name = command_name
+
+    def error(self, message):
+        raise UsageFailure(self.command_name, message)
+
+
+def _json_requested(arguments):
+    for argument in arguments:
+        if argument == "--":
+            return False
+        if argument == "--json":
+            return True
+    return False
+
+
 def _clean(value):
+    if is_dataclass(value) and not isinstance(value, type):
+        return _clean({field.name: getattr(value, field.name) for field in fields(value)})
     if isinstance(value, dict):
         return {key: _clean(item) for key, item in value.items() if item is not None}
     if isinstance(value, (list, tuple)):
@@ -43,8 +74,9 @@ def _envelope(command: str, result: Any = None, error: Any = None):
 
 
 def _emit(payload, as_json):
+    payload = _clean(payload)
     if as_json:
-        print(json.dumps(_clean(payload), indent=2, default=str))
+        print(json.dumps(payload, indent=2, default=str))
         return
     if payload["ok"]:
         print(_human(payload.get("result")))
@@ -192,69 +224,59 @@ def cmd_execution(args, root):
 
 
 def cmd_render(args, root):
-    from docassemble_simulator.execution import RenderSource
-    from docassemble_simulator.render import InterviewRenderer, RenderRequest
+    from docassemble_simulator.render import (
+        FixtureSource,
+        FreshSource,
+        InterviewRenderer,
+        RenderRequest,
+        SavedSessionSource,
+        SnapshotSource,
+    )
 
-    selected = [
-        ("fresh", args.fresh),
-        ("snapshot", args.snapshot_source),
-        ("fixture", args.fixture),
-    ]
-    choices = [(kind, value) for kind, value in selected if value]
-    result: dict[str, Any]
-    if len(choices) > 1:
-        result = {
-            "ok": False,
-            "error": {
-                "kind": "input",
-                "message": "select exactly one of --fresh, --snapshot, or --fixture",
-                "details": {},
-            },
-        }
+    if args.fixture:
+        source = FixtureSource(Path(args.fixture).expanduser().resolve())
+    elif args.snapshot_source:
+        source = SnapshotSource(
+            Path(args.snapshot_source).expanduser().resolve()
+        )
+    elif args.fresh:
+        source = FreshSource()
     else:
-        kind: Literal["saved", "fresh", "snapshot", "fixture"]
-        value: Any
-        raw_kind, value = choices[0] if choices else ("saved", None)
-        kind = cast(Literal["saved", "fresh", "snapshot", "fixture"], raw_kind)
-        path = (
-            Path(str(value)).expanduser().resolve()
-            if kind in {"snapshot", "fixture"}
-            else None
-        )
-        source = RenderSource(kind, path)
-        assemble = False if kind == "fixture" else not args.no_assemble
-        request = RenderRequest(
-            args.template,
-            source,
-            assemble,
-            Path(args.save_snapshot).expanduser().resolve()
-            if args.save_snapshot
-            else None,
-            Path(args.output).expanduser().resolve() if args.output else None,
-            args.expect_missing,
-        )
-        result = InterviewRenderer(root, _execution(args, root)).render(request)
+        source = SavedSessionSource()
+    request = RenderRequest(
+        args.template,
+        source,
+        False if isinstance(source, FixtureSource) else not args.no_assemble,
+        Path(args.save_snapshot).expanduser().resolve()
+        if args.save_snapshot
+        else None,
+        Path(args.output).expanduser().resolve() if args.output else None,
+        args.expect_missing,
+    )
+    outcome = InterviewRenderer(root, _execution(args, root)).render(request)
     payload = (
-        _envelope("render", result.get("result"))
-        if result["ok"]
-        else _envelope("render", error=result["error"])
+        _envelope("render", outcome.result)
+        if outcome.ok
+        else _envelope("render", error=outcome.error)
     )
     _emit(payload, args.json)
-    return 0 if result["ok"] else _exit_for_error(str(result["error"]["kind"]))
+    if outcome.ok:
+        return 0
+    return _exit_for_error(outcome.error.kind)
 
 
 def _parse_assignments(pairs):
     result = []
     for pair in pairs:
         if "=" not in pair:
-            raise SystemExit(f"error: expected VAR=VALUE, got {pair!r}")
+            raise InputFailure(f"expected VAR=VALUE, got {pair!r}")
         variable, value = pair.split("=", 1)
         result.append((variable.strip(), value))
     return result
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(
+    parser = UsageParser(
         prog="docassemble-simulator",
         description="Run and render docassemble interviews locally. JSON uses a stable ok/command/result-or-error envelope.",
     )
@@ -273,7 +295,9 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name, **kwargs):
-        return sub.add_parser(name, parents=[common], **kwargs)
+        return sub.add_parser(
+            name, parents=[common], command_name=name, **kwargs
+        )
 
     add("info", help="inspect the workspace without runtime bootstrap").set_defaults(
         func=cmd_info
@@ -317,9 +341,10 @@ def build_parser():
     variables.set_defaults(func=cmd_execution)
     render = add("render", help="render a DOCX from one explicit state source")
     render.add_argument("template")
-    render.add_argument("--fresh", action="store_true")
-    render.add_argument("--snapshot", dest="snapshot_source")
-    render.add_argument("--fixture")
+    render_source = render.add_mutually_exclusive_group()
+    render_source.add_argument("--fresh", action="store_true")
+    render_source.add_argument("--snapshot", dest="snapshot_source")
+    render_source.add_argument("--fixture")
     render.add_argument("--no-assemble", action="store_true")
     render.add_argument("--save-snapshot")
     render.add_argument("--output", metavar="PATH")
@@ -341,7 +366,18 @@ def _reexec_with_dyld_path():
 
 def main(argv=None):
     _reexec_with_dyld_path()
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = build_parser().parse_args(arguments)
+    except UsageFailure as error:
+        _emit(
+            _envelope(
+                error.command,
+                error={"kind": "input", "message": str(error), "details": {}},
+            ),
+            _json_requested(arguments),
+        )
+        return 1
     try:
         root = find_package_root(args.root)
         config = load_config(root)
@@ -363,10 +399,9 @@ def main(argv=None):
             ensure_importable(root)
             bootstrap(stub_define_defined=args.stub_defined)
         return args.func(args, root)
-    except (SystemExit, ValueError) as error:
+    except (InputFailure, SystemExit, ValueError) as error:
         message = str(error)
-        if message.startswith("error: "):
-            message = message[7:]
+        message = message.removeprefix("error: ")
         _emit(
             _envelope(
                 args.command,

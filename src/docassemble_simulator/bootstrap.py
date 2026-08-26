@@ -274,8 +274,8 @@ def register_hooks() -> None:
     """
     from docassemble.base.plugin_manager import pm
     from docassemble.webapp import main as webapp_main
-    from docassemble.webapp.main import hooks as main_hooks
     from docassemble.webapp.interview import hooks as interview_hooks
+    from docassemble.webapp.main import hooks as main_hooks
 
     # These are normally auto-registered when docassemble.webapp imports;
     # only add them if somehow missing.

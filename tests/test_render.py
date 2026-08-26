@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from docassemble_simulator.cli import build_parser
 from docassemble_simulator.render import (
     RenderError,
     RenderExpectationError,
@@ -259,69 +258,6 @@ class TestArtifact:
 
 
 class TestRenderModule:
-    def test_render_request_runs_inside_execution_callback(self, monkeypatch, tmp_path):
-        from docassemble_simulator.execution import ExecutionOutcome, RenderSource
-        from docassemble_simulator.render import InterviewRenderer, RenderRequest
-
-        template = tmp_path / "docassemble" / "pkg" / "data" / "templates" / "form.docx"
-        template.parent.mkdir(parents=True)
-        template.write_bytes(b"docx")
-
-        fake_docx = SimpleNamespace(_dasimulator_paragraphs=4)
-        monkeypatch.setattr(
-            "docassemble_simulator.render.prepare_docx_template", lambda path: fake_docx
-        )
-        monkeypatch.setattr(
-            "docassemble_simulator.render.render_template",
-            lambda prepared, namespace: prepared,
-        )
-
-        class FakeExecution:
-            def run(self, operation):
-                return ExecutionOutcome(True, operation.action({"name": "Alice"}))
-
-        result = InterviewRenderer(tmp_path, FakeExecution()).render(
-            RenderRequest("form.docx", RenderSource("fresh"), True)
-        )
-
-        assert result == {
-            "ok": True,
-            "result": {"template": "form.docx", "paragraphs": 4},
-        }
-
-    def test_render_error_is_typed_and_attributed(self, monkeypatch, tmp_path):
-        from docassemble_simulator.execution import ExecutionOutcome, RenderSource
-        from docassemble_simulator.render import InterviewRenderer, RenderRequest
-
-        template = tmp_path / "docassemble" / "pkg" / "data" / "templates" / "form.docx"
-        template.parent.mkdir(parents=True)
-        template.write_bytes(b"docx")
-        monkeypatch.setattr(
-            "docassemble_simulator.render.prepare_docx_template",
-            lambda path: SimpleNamespace(_dasimulator_paragraphs=8),
-        )
-        monkeypatch.setattr(
-            "docassemble_simulator.render.render_template",
-            lambda prepared, namespace: (_ for _ in ()).throw(
-                RenderError("bad template", paragraph=7, error_type="UndefinedError")
-            ),
-        )
-
-        class FakeExecution:
-            def run(self, operation):
-                return ExecutionOutcome(True, operation.action({}))
-
-        result = InterviewRenderer(tmp_path, FakeExecution()).render(
-            RenderRequest("form.docx", RenderSource("fresh"), False)
-        )
-
-        assert result["ok"] is False
-        assert result["error"]["kind"] == "render"
-        assert result["error"]["details"] == {
-            "error_type": "UndefinedError",
-            "paragraph": 7,
-        }
-
     def test_exact_artifact_path_is_atomic(self, tmp_path):
         class FakeTemplate:
             def save(self, path):

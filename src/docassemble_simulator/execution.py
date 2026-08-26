@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-import os
 import pickle
 import re
 import traceback
@@ -13,8 +12,9 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
+from docassemble_simulator._files import atomic_replace
 from docassemble_simulator.catalog import InterviewCatalog
 from docassemble_simulator.describe import (
     describe_question_result,
@@ -90,17 +90,34 @@ class Execute:
 
 
 @dataclass(frozen=True)
-class RenderSource:
-    kind: Literal["saved", "fresh", "snapshot", "fixture"] = "saved"
-    path: Path | None = None
+class SavedSessionSource:
+    pass
 
 
 @dataclass(frozen=True)
-class PrepareRender:
+class FreshSource:
+    pass
+
+
+@dataclass(frozen=True)
+class SnapshotSource:
+    path: Path
+
+
+@dataclass(frozen=True)
+class FixtureSource:
+    path: Path
+
+
+RenderSource = SavedSessionSource | FreshSource | SnapshotSource | FixtureSource
+
+
+@dataclass(frozen=True)
+class _RenderPreparation:
     source: RenderSource
     assemble: bool
     save_snapshot: Path | None
-    action: Callable[[dict[str, Any]], Any]
+    effect_destinations: tuple[Path, ...]
 
 
 Operation = (
@@ -112,7 +129,6 @@ Operation = (
     | Evaluate
     | Variables
     | Execute
-    | PrepareRender
 )
 
 
@@ -189,7 +205,6 @@ class StateStore:
         outcome: dict[str, Any],
         active_seek: str | None = None,
     ) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema": STATE_SCHEMA,
             "interview": self.identity,
@@ -197,16 +212,7 @@ class StateStore:
             "outcome": _jsonable(outcome),
             "active_seek": active_seek,
         }
-        temporary = self.path.with_name(self.path.name + ".tmp")
-        try:
-            with temporary.open("wb") as handle:
-                pickle.dump(payload, handle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
+        _atomic_pickle(self.path, payload, lock_destination=False)
 
     def save_snapshot(self, path: Path, namespace: dict[str, Any]) -> None:
         payload = {
@@ -214,7 +220,9 @@ class StateStore:
             "interview": self.identity,
             "namespace": pickle.dumps(_picklable_view(namespace)),
         }
-        _atomic_pickle(path.expanduser().resolve(), payload)
+        _atomic_pickle(
+            path.expanduser().resolve(), payload, lock_destination=True
+        )
 
     def load_snapshot(self, path: Path) -> dict[str, Any]:
         try:
@@ -275,8 +283,6 @@ class InterviewExecution:
                 return self._variables(operation)
             if isinstance(operation, Execute):
                 return self._mutate(lambda: self._execute(operation))
-            if isinstance(operation, PrepareRender):
-                return self._prepare_render(operation)
             raise TypeError(f"unknown operation: {type(operation).__name__}")
         except ExecutionFailure as error:
             return ExecutionOutcome(
@@ -459,38 +465,64 @@ class InterviewExecution:
         )
         return outcome
 
-    def _prepare_render(self, operation: PrepareRender):
-        source = operation.source
-        if source.kind == "saved":
-            namespace = self._store.load()["namespace"]
-        elif source.kind == "fresh":
-            namespace = _fresh_namespace()
-        elif source.kind == "snapshot" and source.path:
-            namespace = self._store.load_snapshot(source.path)
-        elif source.kind == "fixture" and source.path:
-            namespace = _fresh_namespace()
-        else:
-            raise ExecutionFailure("input", "invalid render source")
-        interview = self._catalog._compile()
-        with _interview_context(interview, namespace) as status:
-            self._prepare(interview, namespace)
-            if source.kind == "fixture":
-                assert source.path is not None
-                try:
-                    exec(source.path.read_text(encoding="utf-8"), namespace)
-                except Exception as error:
-                    raise ExecutionFailure(
-                        "execution", f"fixture failed: {type(error).__name__}: {error}"
-                    ) from error
-            elif operation.assemble:
-                outcome = _assemble(interview, namespace, status)
-                if outcome.get("kind") == "error":
-                    raise ExecutionFailure(
-                        "execution", outcome.get("message", "assembly failed"), outcome
-                    )
-            if operation.save_snapshot:
-                self._store.save_snapshot(operation.save_snapshot, namespace)
-            return ExecutionOutcome(True, operation.action(namespace))
+    def _with_render_state(
+        self,
+        preparation: _RenderPreparation,
+        action: Callable[[dict[str, Any]], Any],
+    ) -> ExecutionOutcome:
+        """Invoke render's private action while prepared context remains active."""
+        try:
+            self._reject_session_destinations(preparation.effect_destinations)
+            source = preparation.source
+            if isinstance(source, SavedSessionSource):
+                namespace = self._store.load()["namespace"]
+            elif isinstance(source, FreshSource):
+                namespace = _fresh_namespace()
+            elif isinstance(source, SnapshotSource):
+                namespace = self._store.load_snapshot(source.path)
+            elif isinstance(source, FixtureSource):
+                namespace = _fresh_namespace()
+            else:
+                raise ExecutionFailure("input", "invalid render source")
+            interview = self._catalog._compile()
+            with _interview_context(interview, namespace) as status:
+                self._prepare(interview, namespace)
+                if isinstance(source, FixtureSource):
+                    try:
+                        exec(source.path.read_text(encoding="utf-8"), namespace)
+                    except Exception as error:
+                        raise ExecutionFailure(
+                            "execution",
+                            f"fixture failed: {type(error).__name__}: {error}",
+                        ) from error
+                elif preparation.assemble:
+                    outcome = _assemble(interview, namespace, status)
+                    if outcome.get("kind") == "error":
+                        raise ExecutionFailure(
+                            "execution",
+                            outcome.get("message", "assembly failed"),
+                            outcome,
+                        )
+                if preparation.save_snapshot:
+                    self._store.save_snapshot(preparation.save_snapshot, namespace)
+                return ExecutionOutcome(True, action(namespace))
+        except ExecutionFailure as error:
+            return ExecutionOutcome(
+                False, error=ExecutionError(error.kind, str(error), error.details)
+            )
+        except Exception as error:
+            return ExecutionOutcome(
+                False,
+                error=ExecutionError("fault", f"{type(error).__name__}: {error}"),
+            )
+
+    def _reject_session_destinations(self, destinations: tuple[Path, ...]) -> None:
+        session_directory = self._store.directory.resolve()
+        for destination in destinations:
+            if destination.expanduser().resolve().is_relative_to(session_directory):
+                raise ExecutionFailure(
+                    "input", "render effects cannot write inside saved-session storage"
+                )
 
     def _prepare(self, interview, namespace: dict[str, Any]) -> None:
         """Restore server request names, then run authored package adapters."""
@@ -909,18 +941,17 @@ def _picklable_view(namespace):
     return kept
 
 
-def _atomic_pickle(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    try:
+def _atomic_pickle(path, payload, *, lock_destination):
+    def write_pickle(temporary):
         with temporary.open("wb") as handle:
             pickle.dump(payload, handle)
             handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+
+    atomic_replace(
+        path,
+        write_pickle,
+        lock_destination=lock_destination,
+    )
 
 
 def _first_line(error):
@@ -956,11 +987,14 @@ __all__ = [
     "Execute",
     "ExecutionError",
     "ExecutionOutcome",
+    "FixtureSource",
+    "FreshSource",
     "InterviewExecution",
-    "PrepareRender",
     "Refresh",
     "RenderSource",
+    "SavedSessionSource",
     "Seek",
+    "SnapshotSource",
     "Start",
     "Status",
     "Variables",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import pytest
+
 from docassemble_simulator.execution import StateStore
 
 
@@ -53,6 +55,46 @@ for index in range(20):
     assert snapshot["marker"] in {"a", "b", "c", "d"}
     assert snapshot["index"] == 19
     assert snapshot["padding"] == snapshot["marker"] * 200000
+
+
+def test_flush_failure_preserves_destination_and_cleans_temporary(
+    tmp_path, monkeypatch
+):
+    import docassemble_simulator._files as file_module
+
+    destination = tmp_path / "state.pkl"
+    destination.write_bytes(b"previous")
+    monkeypatch.setattr(
+        file_module.os,
+        "fsync",
+        lambda *args: (_ for _ in ()).throw(OSError("flush failed")),
+    )
+
+    with pytest.raises(OSError):
+        file_module.atomic_replace(
+            destination,
+            lambda temporary: temporary.write_bytes(b"new"),
+            lock_destination=False,
+        )
+
+    assert destination.read_bytes() == b"previous"
+    assert not list(destination.parent.glob(".*.tmp"))
+
+
+def test_write_failure_cleans_temporary(tmp_path):
+    from docassemble_simulator._files import atomic_replace
+
+    destination = tmp_path / "state.pkl"
+    destination.write_bytes(b"previous")
+
+    def fail(temporary):
+        raise RuntimeError("serialization failed")
+
+    with pytest.raises(RuntimeError):
+        atomic_replace(destination, fail, lock_destination=False)
+
+    assert destination.read_bytes() == b"previous"
+    assert not list(destination.parent.glob(".*.tmp"))
 
 
 def test_concurrent_artifact_writers_install_complete_files(tmp_path):

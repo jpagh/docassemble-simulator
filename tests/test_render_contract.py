@@ -190,6 +190,94 @@ def test_successful_render_returns_a_typed_result(
     assert outcome.result == RenderResult("form.docx", 4)
 
 
+def test_expectation_and_io_failures_still_carry_template_attribution(
+    tmp_path, monkeypatch, da_stubs
+):
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setattr(
+        "docassemble_simulator.render.prepare_docx_template",
+        lambda path: SimpleNamespace(_dasimulator_paragraphs=8),
+    )
+    monkeypatch.setattr(
+        "docassemble_simulator.render.render_template",
+        lambda prepared, namespace, **kwargs: prepared,
+    )
+
+    outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
+        RenderRequest(
+            "form.docx",
+            FreshSource(),
+            assemble=False,
+            expect_missing="M.x",
+        )
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "render"
+    assert outcome.error.details == {
+        "template": "form.docx",
+        "error_type": "RenderExpectationError",
+    }
+
+
+def test_exception_filename_is_used_only_when_it_is_a_package_template(
+    tmp_path, monkeypatch, da_stubs
+):
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setattr(
+        "docassemble_simulator.render.prepare_docx_template",
+        lambda path: SimpleNamespace(_dasimulator_paragraphs=8),
+    )
+    foreign = tmp_path / "sandbox" / "included.docx"
+    foreign.parent.mkdir()
+    foreign.write_bytes(b"not a package template")
+
+    def fail(prepared, namespace, **kwargs):
+        raise RenderError(
+            "bad include",
+            paragraph=3,
+            error_type="UndefinedError",
+            template=str(foreign),
+        )
+
+    monkeypatch.setattr(
+        "docassemble_simulator.render.render_template", fail
+    )
+
+    outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
+        RenderRequest("form.docx", FreshSource(), assemble=False)
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "render"
+    assert outcome.error.details["template"] == "form.docx"
+
+
+def test_fresh_render_never_acquires_the_session_lock(
+    tmp_path, monkeypatch, da_stubs
+):
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setattr(
+        "docassemble_simulator.render.prepare_docx_template",
+        lambda path: SimpleNamespace(_dasimulator_paragraphs=4),
+    )
+    monkeypatch.setattr(
+        "docassemble_simulator.render.render_template",
+        lambda prepared, namespace, **kwargs: prepared,
+    )
+
+    def forbidden_lock():
+        raise AssertionError("session lock must not be acquired by render")
+
+    monkeypatch.setattr(execution_module.StateStore, "lock", forbidden_lock)
+
+    outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
+        RenderRequest("form.docx", FreshSource(), assemble=False)
+    )
+
+    assert outcome.ok is True
+
+
 def test_render_failure_identifies_the_requested_template(
     tmp_path, monkeypatch, da_stubs
 ):

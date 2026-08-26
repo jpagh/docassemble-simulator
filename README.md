@@ -79,7 +79,8 @@ Every command accepts `--json` and returns one envelope:
 Exit codes are `0` for success (including interview completion), `1` for usage,
 workspace, configuration, or missing-state failures, `2` for validation,
 execution, seek, compile, or render failures, and `3` for unexpected simulator
-faults.
+faults. Argument-parsing failures follow the same envelope when `--json` is
+present and exit `1`; normal `--help` output remains a successful exit.
 
 ## Rendering
 
@@ -107,9 +108,16 @@ A render request has orthogonal concerns:
   the expected result.
 
 Rendering never writes, replaces, or deletes a saved session. Fresh rendering is
-ephemeral. Snapshot payloads are versioned and interview-specific. Render and
-include passes run while execution keeps the docassemble thread context active.
-Structural DOCX failures are reported; source and included templates are never
+ephemeral. Snapshot payloads are versioned and interview-specific. Snapshot and
+artifact destinations cannot point into saved-session storage or authored
+`data/templates` trees, alias a render input, or alias one another in the same
+request. Writes use unique sibling temporary files and per-destination locks, so
+concurrent writers install complete files with final-writer-wins behavior.
+
+Render and include passes run while execution keeps the docassemble thread
+context active. Structural DOCX failures report the requested template, error
+type, and available paragraph/line; an included filename is reported only when
+the runtime preserves it reliably. Source and included templates are never
 rewritten or repaired.
 
 DOCX output is supported. Generated PDF conversion remains intentionally
@@ -153,3 +161,22 @@ docassemble context, template evaluation, include passes, and intentional PDF
 policy. It does not provide browser HTML, uploads, arbitrary server workers,
 Celery, or rollback of external filesystem/network effects caused by authored
 Python. Package-specific server dependency behavior belongs in authored seeds.
+
+## Development
+
+Run the fast suite with:
+
+```sh
+uv run pytest -q
+```
+
+Real-docassemble fidelity is covered by a separate lane that runs the CLI in a
+target package's interpreter (which supplies `docassemble` and `python-docx`):
+
+```sh
+scripts/test-real-runtime /path/to/target/package/.venv/bin/python
+```
+
+The lane skips when no interpreter is configured and fails clearly when the
+supplied runtime cannot run the tests. The fast suite uses stubbed runtime
+modules and never requires `docassemble`.
