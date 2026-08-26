@@ -156,7 +156,7 @@ def describe_field(
     out: dict[str, Any] = {}
     saveas = getattr(field, "saveas", None)
     if saveas is not None:
-        out["variable"] = from_safeid_safe(saveas)
+        out["variable"] = field_variable(field)
     datatype = getattr(field, "datatype", None)
     fieldtype = getattr(field, "fieldtype", None)
     out["type"] = fieldtype or datatype or "text"

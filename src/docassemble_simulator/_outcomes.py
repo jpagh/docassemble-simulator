@@ -29,6 +29,8 @@ class Failure:
 
     def __post_init__(self):
         object.__setattr__(self, "kind", ErrorKind(self.kind))
+        if self.details is None:
+            object.__setattr__(self, "details", {})
 
 
 T = TypeVar("T")

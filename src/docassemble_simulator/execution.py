@@ -142,6 +142,7 @@ def _read_payload(
     identity: str,
     load_namespace: bool,
     label: str,
+    display_path: Path | None = None,
 ) -> dict[str, Any]:
     """Read and validate a saved-session or snapshot payload."""
     try:
@@ -151,7 +152,7 @@ def _read_payload(
         if label == "saved":
             message = f"saved state is unreadable; run `start` again ({error})"
         else:
-            message = f"could not load snapshot {path}: {error}"
+            message = f"could not load snapshot {display_path or path}: {error}"
         raise ExecutionFailure(ErrorKind.STATE, message) from error
 
     if not isinstance(payload, dict) or payload.get("schema") != STATE_SCHEMA:
@@ -258,6 +259,7 @@ class StateStore:
             identity=self.identity,
             load_namespace=True,
             label="snapshot",
+            display_path=path,
         )["namespace"]
 
 

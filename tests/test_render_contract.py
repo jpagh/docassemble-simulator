@@ -137,6 +137,26 @@ def test_destination_validation_precedes_fixture_execution(tmp_path):
     assert not marker.exists()
 
 
+def test_snapshot_destination_cannot_replace_an_authored_template(tmp_path):
+    execution = _workspace(tmp_path)
+    template_directory = tmp_path / "docassemble" / "pkg" / "data" / "templates"
+    destination = template_directory / "state.snapshot"
+
+    outcome = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(
+            "form.docx",
+            FreshSource(),
+            assemble=False,
+            save_snapshot=destination,
+        )
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "input"
+    assert "template directories" in outcome.error.message
+    assert not destination.exists()
+
+
 def test_snapshot_and_artifact_destinations_must_be_distinct(tmp_path):
     destination = tmp_path / "render-output"
 
