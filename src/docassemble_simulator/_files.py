@@ -15,7 +15,11 @@ from pathlib import Path
 class ProtectedPath:
     path: Path
     reason: str
-    directory: bool = False
+
+
+@dataclass(frozen=True)
+class ProtectedDirectory(ProtectedPath):
+    pass
 
 
 class DestinationError(ValueError):
@@ -31,11 +35,12 @@ def validate_destinations(
     for destination in resolved:
         for item in protected:
             protected_path = item.path.expanduser().resolve()
-            if item.directory and destination.is_relative_to(protected_path):
-                raise DestinationError(
-                    f"render effects cannot write inside {item.reason}"
-                )
-            if not item.directory and destination == protected_path:
+            if isinstance(item, ProtectedDirectory):
+                if destination.is_relative_to(protected_path):
+                    raise DestinationError(
+                        f"render effects cannot write inside {item.reason}"
+                    )
+            elif destination == protected_path:
                 raise DestinationError(f"render effects cannot replace {item.reason}")
 
 

@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from docassemble_simulator._files import ProtectedPath, atomic_replace
+from docassemble_simulator._files import (
+    ProtectedDirectory,
+    ProtectedPath,
+    atomic_replace,
+)
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator.execution import (
     FixtureSource,
@@ -298,7 +302,7 @@ class InterviewRenderer:
                 )
             )
         protected.extend(
-            ProtectedPath(directory, "template directories", directory=True)
+            ProtectedDirectory(directory, "template directories")
             for directory in _template_directories(self.root)
         )
 

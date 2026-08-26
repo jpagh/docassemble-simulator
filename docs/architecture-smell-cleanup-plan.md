@@ -111,6 +111,10 @@ class ProtectedPath:
     path: Path
     reason: str          # exact message fragment, e.g. "saved-session storage"
 
+@dataclass(frozen=True)
+class ProtectedDirectory(ProtectedPath):
+    pass
+
 def validate_destinations(
     destinations: tuple[Path, ...],
     protected: tuple[ProtectedPath, ...],

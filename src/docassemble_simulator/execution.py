@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from docassemble_simulator._files import (
     DestinationError,
+    ProtectedDirectory,
     ProtectedPath,
     atomic_replace,
     flock,
@@ -136,12 +137,40 @@ class ExecutionFailure(Exception):
         self.details = details
 
 
+@dataclass(frozen=True)
+class _PayloadPolicy:
+    unreadable: str
+    unsupported: str
+    wrong_interview: str
+    invalid_blob: str
+    namespace_unreadable: str
+    invalid_namespace: str
+
+
+_SAVED_PAYLOAD = _PayloadPolicy(
+    unreadable="saved state is unreadable; run `start` again ({error})",
+    unsupported="saved state uses an unsupported format; run `start` again",
+    wrong_interview="saved state belongs to another interview; run `start` again",
+    invalid_blob="saved state is invalid; run `start` again",
+    namespace_unreadable="saved namespace is unreadable; run `start` again ({error})",
+    invalid_namespace="saved state is invalid; run `start` again",
+)
+_SNAPSHOT_PAYLOAD = _PayloadPolicy(
+    unreadable="could not load snapshot {path}: {error}",
+    unsupported="snapshot uses an unsupported format",
+    wrong_interview="snapshot belongs to another interview",
+    invalid_blob="snapshot does not contain an interview namespace",
+    namespace_unreadable="snapshot namespace is unreadable: {error}",
+    invalid_namespace="snapshot does not contain an interview namespace",
+)
+
+
 def _read_payload(
     path: Path,
     *,
     identity: str,
     load_namespace: bool,
-    label: str,
+    policy: _PayloadPolicy,
     display_path: Path | None = None,
 ) -> dict[str, Any]:
     """Read and validate a saved-session or snapshot payload."""
@@ -149,54 +178,29 @@ def _read_payload(
         with path.open("rb") as handle:
             payload = pickle.load(handle)
     except Exception as error:
-        if label == "saved":
-            message = f"saved state is unreadable; run `start` again ({error})"
-        else:
-            message = f"could not load snapshot {display_path or path}: {error}"
+        message = policy.unreadable.format(error=error, path=display_path or path)
         raise ExecutionFailure(ErrorKind.STATE, message) from error
 
     if not isinstance(payload, dict) or payload.get("schema") != STATE_SCHEMA:
-        message = (
-            "saved state uses an unsupported format; run `start` again"
-            if label == "saved"
-            else "snapshot uses an unsupported format"
-        )
-        raise ExecutionFailure(ErrorKind.STATE, message)
+        raise ExecutionFailure(ErrorKind.STATE, policy.unsupported)
     if payload.get("interview") != identity:
-        message = (
-            "saved state belongs to another interview; run `start` again"
-            if label == "saved"
-            else "snapshot belongs to another interview"
-        )
-        raise ExecutionFailure(ErrorKind.STATE, message)
+        raise ExecutionFailure(ErrorKind.STATE, policy.wrong_interview)
 
     blob = payload.get("namespace")
     if not isinstance(blob, bytes):
-        message = (
-            "saved state is invalid; run `start` again"
-            if label == "saved"
-            else "snapshot does not contain an interview namespace"
-        )
-        raise ExecutionFailure(ErrorKind.STATE, message)
+        raise ExecutionFailure(ErrorKind.STATE, policy.invalid_blob)
     if not load_namespace:
         return payload
 
     try:
         payload["namespace"] = pickle.loads(blob)
     except Exception as error:
-        message = (
-            f"saved namespace is unreadable; run `start` again ({error})"
-            if label == "saved"
-            else f"snapshot namespace is unreadable: {error}"
-        )
-        raise ExecutionFailure(ErrorKind.STATE, message) from error
+        raise ExecutionFailure(
+            ErrorKind.STATE,
+            policy.namespace_unreadable.format(error=error),
+        ) from error
     if not isinstance(payload["namespace"], dict):
-        message = (
-            "saved state is invalid; run `start` again"
-            if label == "saved"
-            else "snapshot does not contain an interview namespace"
-        )
-        raise ExecutionFailure(ErrorKind.STATE, message)
+        raise ExecutionFailure(ErrorKind.STATE, policy.invalid_namespace)
     return payload
 
 
@@ -227,7 +231,7 @@ class StateStore:
             self.path,
             identity=self.identity,
             load_namespace=namespace,
-            label="saved",
+            policy=_SAVED_PAYLOAD,
         )
 
     def save(
@@ -258,7 +262,7 @@ class StateStore:
             path.expanduser().resolve(),
             identity=self.identity,
             load_namespace=True,
-            label="snapshot",
+            policy=_SNAPSHOT_PAYLOAD,
             display_path=path,
         )["namespace"]
 
@@ -540,10 +544,9 @@ class InterviewExecution:
         """Invoke render's private action while prepared context remains active."""
         try:
             protected = preparation.protected + (
-                ProtectedPath(
+                ProtectedDirectory(
                     self._store.directory,
                     "saved-session storage",
-                    directory=True,
                 ),
             )
             try:

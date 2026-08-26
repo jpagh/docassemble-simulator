@@ -95,8 +95,12 @@ def test_corrupt_payload_has_saved_state_recovery_message(tmp_path):
     store.directory.mkdir(parents=True)
     store.path.write_bytes(b"not pickle")
 
-    with pytest.raises(ExecutionFailure, match="run `start` again"):
+    with pytest.raises(ExecutionFailure) as caught:
         store.load()
+
+    assert str(caught.value).startswith(
+        "saved state is unreadable; run `start` again ("
+    )
 
 
 def test_snapshot_with_another_interview_identity_is_rejected(tmp_path):
@@ -116,8 +120,10 @@ def test_snapshot_with_another_interview_identity_is_rejected(tmp_path):
         )
     )
 
-    with pytest.raises(ExecutionFailure, match="another interview"):
+    with pytest.raises(ExecutionFailure) as caught:
         StateStore(tmp_path, identity).load_snapshot(snapshot)
+
+    assert str(caught.value) == "snapshot belongs to another interview"
 
 
 def test_flush_failure_preserves_destination_and_cleans_temporary(

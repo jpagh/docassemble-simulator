@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import sys
 import types
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -170,6 +171,28 @@ def test_sessions_are_isolated_by_canonical_interview_identity(
     files = _session_files(tmp_path)
     assert len(files) == 2
     assert files[0].name != files[1].name
+
+
+def test_execution_mutation_acquires_the_session_transaction_lock(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+    acquired = []
+    original_lock = execution._store.lock
+
+    @contextmanager
+    def observed_lock():
+        acquired.append(True)
+        with original_lock():
+            yield
+
+    monkeypatch.setattr(execution._store, "lock", observed_lock)
+
+    outcome = execution.run(Execute("counter = 1", assemble=False))
+
+    assert outcome.ok
+    assert acquired == [True]
 
 
 def test_read_only_evaluation_rehydrates_callables_without_changing_session(
