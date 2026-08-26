@@ -103,6 +103,21 @@ def test_corrupt_payload_has_saved_state_recovery_message(tmp_path):
     )
 
 
+def test_snapshot_open_failure_keeps_state_error_kind_and_display_path(tmp_path):
+    from docassemble_simulator.execution import ExecutionFailure
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    snapshot = tmp_path / "missing.snapshot"
+
+    with pytest.raises(ExecutionFailure) as caught:
+        StateStore(tmp_path, identity).load_snapshot(snapshot)
+
+    assert str(caught.value).startswith(
+        "could not load snapshot " + str(snapshot) + ": "
+    )
+    assert caught.value.kind.value == "state"
+
+
 def test_snapshot_with_another_interview_identity_is_rejected(tmp_path):
     import pickle
 

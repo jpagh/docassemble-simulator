@@ -173,6 +173,32 @@ def test_sessions_are_isolated_by_canonical_interview_identity(
     assert files[0].name != files[1].name
 
 
+def test_concurrent_execution_operations_do_not_lose_updates(
+    tmp_path, monkeypatch, da_stubs
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+
+    def mutate_many(_):
+        return [
+            execution.run(
+                Execute(
+                    "counter = globals().get('counter', 0) + 1",
+                    assemble=False,
+                )
+            )
+            for _ in range(20)
+        ]
+
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        outcomes = list(workers.map(mutate_many, range(4)))
+
+    assert all(outcome.ok for batch in outcomes for outcome in batch)
+    assert execution.run(Evaluate("counter")).result["value"] == "80"
+
+
 def test_execution_mutation_acquires_the_session_transaction_lock(
     tmp_path, monkeypatch, da_stubs
 ):

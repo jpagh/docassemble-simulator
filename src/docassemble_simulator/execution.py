@@ -259,7 +259,7 @@ class StateStore:
 
     def load_snapshot(self, path: Path) -> dict[str, Any]:
         return _read_payload(
-            path.expanduser().resolve(),
+            path.expanduser(),
             identity=self.identity,
             load_namespace=True,
             policy=_SNAPSHOT_PAYLOAD,
