@@ -106,15 +106,25 @@ def cmd_info(args, root):
 
 
 def cmd_catalog(args, root):
-    from docassemble_simulator.catalog import InterviewCatalog
+    from docassemble_simulator.catalog import CatalogFailure, InterviewCatalog
 
     catalog = InterviewCatalog(root, args.interview)
-    if args.command == "check":
-        outcome = catalog.check()
-    elif args.command == "questions":
-        outcome = catalog.questions(args.var)
-    else:
-        outcome = catalog.index(args.var)
+    try:
+        if args.command == "check":
+            outcome = catalog.check()
+        elif args.command == "questions":
+            outcome = catalog.questions(args.var)
+        else:
+            outcome = catalog.index(args.var)
+    except CatalogFailure as error:
+        _emit(
+            _envelope(
+                args.command,
+                error={"kind": "compile", "message": str(error), "details": {}},
+            ),
+            args.json,
+        )
+        return 2
     result = outcome.result | (
         {"interview": outcome.interview} if outcome.interview else {}
     )
@@ -178,11 +188,7 @@ def cmd_execution(args, root):
     _emit(payload, args.json)
     if not outcome.ok:
         return _exit_for_error(outcome.error.kind)
-    return (
-        2
-        if isinstance(outcome.result, dict) and outcome.result.get("kind") == "error"
-        else 0
-    )
+    return 0
 
 
 def cmd_render(args, root):
@@ -336,34 +342,39 @@ def _reexec_with_dyld_path():
 def main(argv=None):
     _reexec_with_dyld_path()
     args = build_parser().parse_args(argv)
-    root = find_package_root(args.root)
     try:
+        root = find_package_root(args.root)
         config = load_config(root)
-    except ValueError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    if getattr(args, "config", None):
-        import yaml
+        if getattr(args, "config", None):
+            import yaml
 
-        source = Path(args.config).expanduser()
-        if not source.exists():
-            print(f"error: config {source} does not exist", file=sys.stderr)
-            return 1
-        loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
-        if not isinstance(loaded, dict):
-            print(f"error: config {source} must be a YAML mapping", file=sys.stderr)
-            return 1
-        deep_merge(config, loaded)
-    prepare_environment(
-        config_path=root / ".simulator" / "config-effective.yml", extra_config=config
-    )
-    if args.command not in {"info", "status"}:
-        ensure_importable(root)
-        bootstrap(stub_define_defined=args.stub_defined)
-    try:
+            source = Path(args.config).expanduser()
+            if not source.exists():
+                raise ValueError(f"config {source} does not exist")
+            loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError(f"config {source} must be a YAML mapping")
+            deep_merge(config, loaded)
+        prepare_environment(
+            config_path=root / ".simulator" / "config-effective.yml",
+            extra_config=config,
+        )
+        if args.command not in {"info", "status"}:
+            ensure_importable(root)
+            bootstrap(stub_define_defined=args.stub_defined)
         return args.func(args, root)
-    except SystemExit:
-        raise
+    except (SystemExit, ValueError) as error:
+        message = str(error)
+        if message.startswith("error: "):
+            message = message[7:]
+        _emit(
+            _envelope(
+                args.command,
+                error={"kind": "input", "message": message, "details": {}},
+            ),
+            args.json,
+        )
+        return 1
     except Exception as error:
         _emit(
             _envelope(

@@ -41,6 +41,36 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
     }
 
 
+def test_composition_root_skips_runtime_for_info_and_status(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+    monkeypatch.setattr(cli, "prepare_environment", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "ensure_importable", lambda root: calls.append("import"))
+    monkeypatch.setattr(cli, "bootstrap", lambda **kwargs: calls.append("bootstrap"))
+    monkeypatch.setattr(cli, "cmd_info", lambda args, root: 0)
+    monkeypatch.setattr(cli, "cmd_execution", lambda args, root: 0)
+
+    assert cli.main(["info"]) == 0
+    assert cli.main(["status"]) == 0
+    assert calls == []
+
+
+def test_composition_root_bootstraps_runtime_command_once(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+    monkeypatch.setattr(cli, "prepare_environment", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "ensure_importable", lambda root: calls.append("import"))
+    monkeypatch.setattr(cli, "bootstrap", lambda **kwargs: calls.append("bootstrap"))
+    monkeypatch.setattr(cli, "cmd_execution", lambda args, root: 0)
+
+    assert cli.main(["start"]) == 0
+    assert calls == ["import", "bootstrap"]
+
+
 def test_render_parser_models_orthogonal_request_concerns():
     args = cli.build_parser().parse_args(
         [

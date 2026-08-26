@@ -10,6 +10,10 @@ from typing import Any
 from docassemble_simulator.detect import list_interviews, resolve_interview
 
 
+class CatalogFailure(Exception):
+    """A user-facing interview definition compilation failure."""
+
+
 @dataclass(frozen=True)
 class CatalogOutcome:
     interview: str | None
@@ -27,7 +31,7 @@ class InterviewCatalog:
     def identity(self) -> str:
         return resolve_interview(self.root, self.selector)[0]
 
-    def compile(self, identity: str | None = None):
+    def _compile(self, identity: str | None = None):
         """Internal definition loader shared with execution."""
         from docassemble.base.interview_cache import get_interview
         from docassemble.base.thread_context import empty_globals, global_context
@@ -46,7 +50,7 @@ class InterviewCatalog:
         rows = []
         for identity in identities:
             try:
-                interview = self.compile(identity)
+                interview = self._compile(identity)
                 rows.append(
                     {
                         "interview": identity,
@@ -79,7 +83,7 @@ class InterviewCatalog:
     def questions(self, contains: str | None = None) -> CatalogOutcome:
         from docassemble_simulator.describe import from_safeid_safe
 
-        interview = self.compile()
+        interview = self._compile_for_inspection()
         rows = []
         for index, question in enumerate(interview.questions_list):
             variables = []
@@ -110,7 +114,7 @@ class InterviewCatalog:
         return CatalogOutcome(self.identity, {"blocks": rows})
 
     def index(self, contains: str | None = None) -> CatalogOutcome:
-        interview = self.compile()
+        interview = self._compile_for_inspection()
         mapping = {}
         for variable, entry in interview.questions.items():
             if contains and contains.lower() not in variable.lower():
@@ -127,5 +131,11 @@ class InterviewCatalog:
             mapping[variable] = screens or None
         return CatalogOutcome(self.identity, {"index": mapping})
 
+    def _compile_for_inspection(self):
+        try:
+            return self._compile()
+        except Exception as error:
+            raise CatalogFailure(f"{type(error).__name__}: {error}") from error
 
-__all__ = ["CatalogOutcome", "InterviewCatalog"]
+
+__all__ = ["CatalogFailure", "CatalogOutcome", "InterviewCatalog"]

@@ -8,7 +8,10 @@ import tempfile
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from docassemble_simulator.execution import RenderSource
 
 
 class TemplateNotFoundError(Exception):
@@ -232,7 +235,7 @@ def paragraph_count(docx_template) -> int:
 @dataclass(frozen=True)
 class RenderRequest:
     template: str
-    source: Any
+    source: RenderSource
     assemble: bool
     save_snapshot: Path | None = None
     output: Path | None = None

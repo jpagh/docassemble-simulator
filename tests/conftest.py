@@ -1,8 +1,7 @@
 """Shared fixtures: a minimal in-memory stub of the docassemble.base modules.
 
-Only what Session._in_interview / validate_screen touch at call time. The
-pure helpers (parse_value, field_visible, deep_merge, detect.*) need no
-stubs at all.
+Only what the execution context and validation path touch at call time. Pure
+helpers (parse_value, field_visible, deep_merge, detect.*) need no stubs.
 """
 from __future__ import annotations
 

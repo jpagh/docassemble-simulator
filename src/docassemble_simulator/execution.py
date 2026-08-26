@@ -251,15 +251,15 @@ class InterviewExecution:
 
     def __init__(self, root: str | Path, selector: str | None = None):
         self.root = Path(root).resolve()
-        self.catalog = InterviewCatalog(self.root, selector)
-        self.identity = self.catalog.identity
-        self.store = StateStore(self.root, self.identity)
+        self._catalog = InterviewCatalog(self.root, selector)
+        self._identity = self._catalog.identity
+        self._store = StateStore(self.root, self._identity)
 
     def run(self, operation: Operation) -> ExecutionOutcome:
         try:
             if isinstance(operation, Status):
                 return ExecutionOutcome(
-                    True, self.store.load(namespace=False)["outcome"]
+                    True, self._store.load(namespace=False)["outcome"]
                 )
             if isinstance(operation, Start):
                 return self._mutate(lambda: self._start())
@@ -288,22 +288,32 @@ class InterviewExecution:
             )
 
     def _mutate(self, action: Callable[[], Any]) -> ExecutionOutcome:
-        with self.store.lock():
-            return ExecutionOutcome(True, action())
+        with self._store.lock():
+            result = action()
+        if isinstance(result, dict) and result.get("kind") == "error":
+            return ExecutionOutcome(
+                False,
+                error=ExecutionError(
+                    "execution",
+                    result.get("message", "interview assembly failed"),
+                    result,
+                ),
+            )
+        return ExecutionOutcome(True, result)
 
     def _start(self):
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         namespace = _fresh_namespace()
         with _interview_context(interview, namespace) as status:
             self._prepare(interview, namespace)
             outcome = _assemble(interview, namespace, status)
-        self.store.save(namespace, outcome)
+        self._store.save(namespace, outcome)
         return outcome
 
     def _refresh(self):
-        payload = self.store.load()
+        payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         with _interview_context(interview, namespace) as status:
             self._prepare(interview, namespace)
             active = payload.get("active_seek")
@@ -312,20 +322,20 @@ class InterviewExecution:
                 if active
                 else _assemble(interview, namespace, status)
             )
-        self.store.save(namespace, outcome, active)
+        self._store.save(namespace, outcome, active)
         return outcome
 
     def _answer(self, operation: Answer):
         if not operation.assignments:
             raise ExecutionFailure("input", "no VAR=VALUE assignments were provided")
-        payload = self.store.load()
+        payload = self._store.load()
         namespace = payload["namespace"]
         screen = payload.get("outcome") or {}
         if screen.get("kind") not in {"question", "continue"}:
             raise ExecutionFailure(
                 "input", "the saved outcome is not an answerable screen"
             )
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         with _interview_context(interview, namespace) as status:
             self._prepare(interview, namespace)
             errors = _apply_assignments(
@@ -355,7 +365,7 @@ class InterviewExecution:
             outcome = _assemble(interview, namespace, status)
         if validation["warnings"]:
             outcome["warnings"] = validation["warnings"]
-        self.store.save(namespace, outcome)
+        self._store.save(namespace, outcome)
         return outcome
 
     def _seek_operation(self, operation: Seek):
@@ -363,16 +373,16 @@ class InterviewExecution:
             namespace = (
                 _fresh_namespace()
                 if operation.fresh
-                else self.store.load()["namespace"]
+                else self._store.load()["namespace"]
             )
-            interview = self.catalog.compile()
+            interview = self._catalog._compile()
             with _interview_context(interview, namespace) as status:
                 self._prepare(interview, namespace)
                 outcome = _seek(
                     interview, namespace, status, operation.variable, operation.trace
                 )
             if operation.activate:
-                self.store.save(namespace, outcome, operation.variable)
+                self._store.save(namespace, outcome, operation.variable)
             return outcome
 
         if operation.activate:
@@ -389,9 +399,9 @@ class InterviewExecution:
             )
 
     def _evaluate(self, operation: Evaluate):
-        payload = self.store.load()
+        payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         with _interview_context(interview, namespace):
             self._prepare(interview, namespace)
             try:
@@ -405,9 +415,9 @@ class InterviewExecution:
         )
 
     def _variables(self, operation: Variables):
-        payload = self.store.load()
+        payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         values = {}
         with _interview_context(interview, namespace):
             self._prepare(interview, namespace)
@@ -426,9 +436,9 @@ class InterviewExecution:
         return ExecutionOutcome(True, values)
 
     def _execute(self, operation: Execute):
-        payload = self.store.load()
+        payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         with _interview_context(interview, namespace) as status:
             self._prepare(interview, namespace)
             try:
@@ -442,7 +452,7 @@ class InterviewExecution:
                 if operation.assemble
                 else {"kind": "executed"}
             )
-        self.store.save(
+        self._store.save(
             namespace,
             outcome,
             payload.get("active_seek") if not operation.assemble else None,
@@ -452,16 +462,16 @@ class InterviewExecution:
     def _prepare_render(self, operation: PrepareRender):
         source = operation.source
         if source.kind == "saved":
-            namespace = self.store.load()["namespace"]
+            namespace = self._store.load()["namespace"]
         elif source.kind == "fresh":
             namespace = _fresh_namespace()
         elif source.kind == "snapshot" and source.path:
-            namespace = self.store.load_snapshot(source.path)
+            namespace = self._store.load_snapshot(source.path)
         elif source.kind == "fixture" and source.path:
             namespace = _fresh_namespace()
         else:
             raise ExecutionFailure("input", "invalid render source")
-        interview = self.catalog.compile()
+        interview = self._catalog._compile()
         with _interview_context(interview, namespace) as status:
             self._prepare(interview, namespace)
             if source.kind == "fixture":
@@ -479,7 +489,7 @@ class InterviewExecution:
                         "execution", outcome.get("message", "assembly failed"), outcome
                     )
             if operation.save_snapshot:
-                self.store.save_snapshot(operation.save_snapshot, namespace)
+                self._store.save_snapshot(operation.save_snapshot, namespace)
             return ExecutionOutcome(True, operation.action(namespace))
 
     def _prepare(self, interview, namespace: dict[str, Any]) -> None:
@@ -722,8 +732,10 @@ def _apply_assignments(interview, namespace, screen, assignments, use_code):
 
 
 def _coerce_date(raw, parsed):
+    # docassemble's form processor preserves an empty date input as the empty
+    # string; optional date fields therefore remain browser-faithful.
     if raw == "" or parsed == "":
-        return None
+        return ""
     if not isinstance(parsed, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", parsed):
         raise ValueError("date answers must use YYYY-MM-DD")
     datetime.date.fromisoformat(parsed)
