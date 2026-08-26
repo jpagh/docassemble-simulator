@@ -198,10 +198,12 @@ class Outcome(Generic[T]):
     error: Failure | None = None
 ```
 
-- `execution.py`: `ExecutionError = Failure`, `ExecutionOutcome = Outcome[Any]`
+- `execution.py`: `ExecutionError = Failure`, `ExecutionOutcome = Outcome`
   (kept in `__all__`).
-- `render.py`: `RenderFailure = Failure`, `RenderOutcome = Outcome[RenderResult]`
-  (kept in `__all__`).
+- `render.py`: `RenderFailure = Failure`, `RenderOutcome = Outcome`
+  (kept in `__all__`). The aliases remain bare runtime classes rather than
+  parameterized generics so existing `isinstance` checks continue to work;
+  annotations may specialize `Outcome[T]` internally.
 - `cli._envelope` simplifies: the generic `_clean` dataclass handling already
   converts typed outcomes and failures to the documented envelope, so the
   `hasattr(error, "kind")` branch and the mirrored dictionary construction
