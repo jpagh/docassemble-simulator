@@ -48,12 +48,9 @@ def ensure_importable(root: str | Path) -> None:
     portions merge as one namespace package).
     """
     root_path = str(Path(root).resolve())
-    try:
-        import docassemble.base  # noqa: F401
-
-        return
-    except ImportError:
-        pass
+    # Always add plain source trees before checking docassemble.base. The
+    # runtime may already provide docassemble.base while the selected package
+    # itself is not installed in that interpreter.
     if root_path not in sys.path:
         sys.path.insert(0, root_path)
     try:

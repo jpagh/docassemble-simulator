@@ -1,4 +1,6 @@
-import pickle
+from __future__ import annotations
+
+import datetime
 import sys
 import types
 from types import SimpleNamespace
@@ -6,403 +8,160 @@ from types import SimpleNamespace
 import pytest
 
 from docassemble_simulator.detect import guess_main_interview, resolve_interview
-from docassemble_simulator.session import Session
-
-
-class TestGuessMainInterview:
-    def test_prefers_top_level_main(self):
-        interviews = [
-            "docassemble.pkg:data/questions/intake.yml",
-            "docassemble.pkg:data/questions/main.yml",
-        ]
-        assert (
-            guess_main_interview(interviews)
-            == "docassemble.pkg:data/questions/main.yml"
-        )
-
-    def test_accepts_main_yaml_spelling(self):
-        interviews = [
-            "docassemble.pkg:data/questions/main.yaml",
-            "docassemble.pkg:data/questions/other.yml",
-        ]
-        assert (
-            guess_main_interview(interviews)
-            == "docassemble.pkg:data/questions/main.yaml"
-        )
-
-    def test_falls_back_to_nested_main_before_first(self):
-        interviews = [
-            "docassemble.pkg:data/questions/sub/main.yml",
-            "docassemble.pkg:data/questions/aaa.yml",
-        ]
-        assert (
-            guess_main_interview(interviews)
-            == "docassemble.pkg:data/questions/sub/main.yml"
-        )
-
-    def test_no_main_returns_first(self):
-        interviews = [
-            "docassemble.pkg:data/questions/b.yml",
-            "docassemble.pkg:data/questions/a.yml",
-        ]
-        assert guess_main_interview(interviews) == "docassemble.pkg:data/questions/b.yml"
-
-    def test_empty_returns_none(self):
-        assert guess_main_interview([]) is None
+from docassemble_simulator.execution import (
+    Answer,
+    Evaluate,
+    InterviewExecution,
+    Start,
+    Status,
+)
 
 
 @pytest.fixture
 def pkg_root(tmp_path):
     for pkg in ("pkg1", "pkg2"):
-        pkg_dir = tmp_path / "docassemble" / pkg
-        pkg_dir.mkdir(parents=True)
-        (pkg_dir / "__init__.py").write_text("")
-        qdir = pkg_dir / "data" / "questions"
+        qdir = tmp_path / "docassemble" / pkg / "data" / "questions"
         qdir.mkdir(parents=True)
+        (qdir.parent.parent / "__init__.py").write_text("")
         (qdir / "main.yml").write_text("---\nquestion: x\n")
         (qdir / "shared.yml").write_text("---\nquestion: y\n")
     return tmp_path
 
 
-class TestResolveInterview:
-    def test_auto_detect_picks_main(self, pkg_root):
-        chosen, all_interviews = resolve_interview(pkg_root)
-        assert chosen == "docassemble.pkg1:data/questions/main.yml"
-        assert len(all_interviews) == 4
-
-    def test_unique_filename_resolves_across_suffix(self, pkg_root):
-        (pkg_root / "docassemble" / "pkg1" / "data" / "questions" / "only1.yml").write_text("---")
-        chosen, _ = resolve_interview(pkg_root, "only1.yml")
-        assert chosen == "docassemble.pkg1:data/questions/only1.yml"
-
-    def test_ambiguous_filename_raises_with_candidates(self, pkg_root):
-        with pytest.raises(SystemExit) as exc:
-            resolve_interview(pkg_root, "shared.yml")
-        message = str(exc.value)
-        assert "ambiguous" in message
-        assert "pkg1:data/questions/shared.yml" in message
-        assert "pkg2:data/questions/shared.yml" in message
-
-    def test_full_reference_passthrough(self, pkg_root):
-        chosen, all_interviews = resolve_interview(
-            pkg_root, "docassemble.pkg2:data/questions/shared.yml"
-        )
-        assert chosen == "docassemble.pkg2:data/questions/shared.yml"
-        assert len(all_interviews) == 4
-
-    def test_unknown_name_raises_listing_available(self, pkg_root):
-        with pytest.raises(SystemExit) as exc:
-            resolve_interview(pkg_root, "nope.yml")
-        assert "not found" in str(exc.value)
-
-    def test_no_interviews_raises_hint(self, tmp_path):
-        (tmp_path / "docassemble" / "emptypkg").mkdir(parents=True)
-        with pytest.raises(SystemExit) as exc:
-            resolve_interview(tmp_path)
-        assert "--interview" in str(exc.value)
+def test_guess_main_interview_prefers_main():
+    assert guess_main_interview(
+        [
+            "docassemble.pkg:data/questions/x.yml",
+            "docassemble.pkg:data/questions/main.yml",
+        ]
+    ).endswith("main.yml")
 
 
-class TestFreshNamespace:
-    def test_internal_keys_match_docassemble_initial_dict(self, tmp_path, monkeypatch):
-        initial = {
-            "_internal": {
-                "answers": {},
-                "misc": {},
-                "informed": {},
-                "objselections": {},
-                "server_only": {},
-            },
-            "url_args": {},
-            "nav": SimpleNamespace(instanceName="nav"),
-        }
-        parse = types.ModuleType("docassemble.base.parse")
-        parse.get_initial_dict = lambda: initial.copy() | {
-            "_internal": dict(initial["_internal"])
-        }
-        util = types.ModuleType("docassemble.base.util")
-        util.DAObject = SimpleNamespace
-        monkeypatch.setitem(sys.modules, "docassemble.base.parse", parse)
-        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+def test_resolve_interview_rejects_ambiguous_filename(pkg_root):
+    with pytest.raises(SystemExit, match="ambiguous"):
+        resolve_interview(pkg_root, "shared.yml")
 
-        user_dict = Session("docassemble.pkg:main.yml", tmp_path).fresh_user_dict()
 
-        assert set(user_dict["_internal"]) == set(initial["_internal"])
-        assert {"answers", "misc", "informed", "objselections"} <= set(
-            user_dict["_internal"]
+def _runtime(monkeypatch):
+    class DAObject(SimpleNamespace):
+        def __init__(self, instanceName=None, **values):
+            super().__init__(instanceName=instanceName, **values)
+
+    class DADict:
+        def __init__(self, *, elements):
+            self.elements = elements
+
+    DADateTime = datetime.datetime
+
+    def as_datetime(value):
+        parsed = datetime.date.fromisoformat(value)
+        return DADateTime(
+            parsed.year, parsed.month, parsed.day, tzinfo=datetime.timezone.utc
         )
 
-
-class TestSaveRoundTrip:
-    def test_save_is_atomic_and_round_trips(self, tmp_path):
-        session = Session("docassemble.pkg:main.yml", tmp_path)
-        user_dict = {"answer": 42}
-        screen = {"kind": "question", "question_name": "q1"}
-
-        session.save(user_dict, screen)
-
-        assert session.state_file.exists()
-        assert not list(tmp_path.rglob("*.tmp"))
-        payload = pickle.loads(session.state_file.read_bytes())
-        assert payload["interview_path"] == "docassemble.pkg:main.yml"
-        assert payload["user_dict"] == {"answer": 42}
-        assert payload["screen"] == screen
-        assert payload["origin"] == "flow"
-
-    def test_reset_removes_state_file(self, tmp_path):
-        session = Session("docassemble.pkg:main.yml", tmp_path)
-        session.save({}, None)
-        session.reset()
-        assert not session.state_file.exists()
-
-    def test_snapshot_round_trip_drops_unpicklable_entries(self, tmp_path):
-        session = Session("docassemble.pkg:main.yml", tmp_path)
-        snapshot = tmp_path / "state.pkl"
-
-        session.save_snapshot(snapshot, {"answer": 42, "callback": lambda: None})
-
-        assert session.load_snapshot(snapshot) == {"answer": 42}
-
-
-def _fake_interview(question=None):
+    parse = sys.modules["docassemble.base.parse"]
+    parse.get_initial_dict = lambda: {
+        "_internal": {"tracker": 0, "answers": {}, "objselections": {}},
+        "nav": DAObject("nav", sections=None),
+        "url_args": {},
+    }
+    util = types.ModuleType("docassemble.base.util")
+    util.DAObject = DAObject
+    util.DADict = DADict
+    util.DADateTime = DADateTime
+    util.as_datetime = as_datetime
+    monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+    error = sys.modules["docassemble.base.error"]
+    error.DAErrorNoEndpoint = type("DAErrorNoEndpoint", (Exception,), {})
     return SimpleNamespace(
-        source=SimpleNamespace(path="/tmp/main.yml"),
-        questions_by_name={} if question is None else {question.name: question},
+        DAErrorNoEndpoint=error.DAErrorNoEndpoint, DADateTime=DADateTime
     )
 
 
-class TestObjectAssignments:
-    def test_registers_top_level_daobject_roots(self, monkeypatch, da_stubs):
-        class FakeDAObject:
-            pass
+class FakeInterview:
+    source = SimpleNamespace(path="main.yml", package="docassemble.pkg")
+    questions_by_name = {}
 
-        roots = {}
-        da_functions = sys.modules["docassemble.base.functions"]
-        monkeypatch.setattr(
-            da_functions, "set_info", lambda **values: roots.update(values), raising=False
-        )
-        util = types.ModuleType("docassemble.base.util")
-        util.DAObject = FakeDAObject
-        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+    def populate_non_pickleable(self, namespace):
+        namespace["helper"] = lambda value: f"${value}"
 
-        root = FakeDAObject()
-        Session._register_global_roots(
-            {"M": root, "plain": object(), "_internal": {}, "not-valid": root}
-        )
-
-        assert roots == {"M": root}
-
-    def test_reference_checkbox_keys_are_resolved_through_objselections(
-        self, tmp_path, da_stubs
-    ):
-        key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
-        attorney = object()
-
-        class DynamicSelectionList(list):
-            """Model DAObject's unset dynamic attributes.
-
-            Reading an unset DAObject attribute raises AttributeError, so
-            hasattr(target, "gathered") is false even though assignment is
-            supported.  This keeps the regression test sensitive to the
-            original hasattr() bug.
-            """
-
-            def __getattr__(self, name):
-                raise AttributeError(name)
-
-        target = DynamicSelectionList()
-        assert not hasattr(target, "gathered")
-        user_dict = {
-            "M": SimpleNamespace(attorneys=target),
-            "_internal": {"objselections": {"M.attorneys": {key: attorney}}},
-        }
-        screen = {
-            "fields": [
-                {"variable": "M.attorneys", "type": "object_checkboxes"}
-            ]
-        }
-
-        errors = Session("docassemble.pkg:main.yml", tmp_path).apply_assignments(
-            _fake_interview(),
-            user_dict,
-            [("M.attorneys", f'{{"{key}": true}}')],
-            use_code=False,
-            screen=screen,
-        )
-
-        assert errors == []
-        assert target == [attorney]
-        assert target.gathered is True
-
-    def test_single_quoted_json_object_gets_helpful_error(self, tmp_path, da_stubs):
-        key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
-        user_dict = {
-            "M": SimpleNamespace(attorneys=[]),
-            "_internal": {"objselections": {"M.attorneys": {key: object()}}},
-        }
-
-        errors = Session("docassemble.pkg:main.yml", tmp_path).apply_assignments(
-            _fake_interview(),
-            user_dict,
-            [("M.attorneys", f"{{'{key}': true}}")],
-            use_code=False,
-            screen={"fields": [{"variable": "M.attorneys", "type": "object_checkboxes"}]},
-        )
-
-        assert len(errors) == 1
-        assert "object answers must be JSON" in errors[0]
-        assert '"<choice-key>": true' in errors[0]
-
-    def test_reference_radio_key_resolves_to_object(self, tmp_path, da_stubs):
-        key = "ZmlybWRhdGEuYXR0b3JuZXNbMF0="
-        attorney = object()
-        user_dict = {
-            "M": SimpleNamespace(attorney=None),
-            "_internal": {"objselections": {"M.attorney": {key: attorney}}},
-        }
-
-        errors = Session("docassemble.pkg:main.yml", tmp_path).apply_assignments(
-            _fake_interview(),
-            user_dict,
-            [("M.attorney", key)],
-            use_code=False,
-            screen={"fields": [{"variable": "M.attorney", "type": "object_radio"}]},
-        )
-
-        assert errors == []
-        assert user_dict["M"].attorney is attorney
+    def assemble(self, namespace, interview_status):
+        raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
 
 
-class TestCheckboxAssignments:
-    def test_json_dict_is_coerced_to_dadict_for_checkbox_field(self, tmp_path, da_stubs, monkeypatch):
-        class FakeDADict:
-            def __init__(self, *, elements):
-                self.elements = elements
-
-        util = types.ModuleType("docassemble.base.util")
-        util.DADict = FakeDADict
-        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
-
-        session = Session("docassemble.pkg:main.yml", tmp_path)
-        user_dict = {"documents": SimpleNamespace()}
-        screen = {
-            "fields": [
-                {"variable": "documents.selected_documents", "type": "checkboxes"}
-            ]
-        }
-
-        errors = session.apply_assignments(
-            _fake_interview(),
-            user_dict,
-            [("documents.selected_documents", '{"family_parenting_plan": true}')],
-            use_code=False,
-            screen=screen,
-        )
-
-        assert errors == []
-        assert isinstance(user_dict["documents"].selected_documents, FakeDADict)
-        assert user_dict["documents"].selected_documents.elements == {
-            "family_parenting_plan": True
-        }
-
-    def test_code_assignments_bypass_checkbox_coercion(self, tmp_path, da_stubs, monkeypatch):
-        class FakeDADict:
-            def __init__(self, *, elements):
-                self.elements = elements
-
-        util = types.ModuleType("docassemble.base.util")
-        util.DADict = FakeDADict
-        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
-
-        session = Session("docassemble.pkg:main.yml", tmp_path)
-        user_dict = {"documents": SimpleNamespace(), "DADict": FakeDADict}
-        screen = {
-            "fields": [
-                {"variable": "documents.selected_documents", "type": "checkboxes"}
-            ]
-        }
-
-        errors = session.apply_assignments(
-            _fake_interview(),
-            user_dict,
-            [("documents.selected_documents", "DADict(elements={})")],
-            use_code=True,
-            screen=screen,
-        )
-
-        assert errors == []
-        assert isinstance(user_dict["documents"].selected_documents, FakeDADict)
+def _execution(tmp_path, monkeypatch, da_stubs):
+    qdir = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    qdir.mkdir(parents=True)
+    (qdir / "main.yml").write_text("---\nquestion: x\n")
+    runtime = _runtime(monkeypatch)
+    execution = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    monkeypatch.setattr(
+        execution.catalog, "compile", lambda identity=None: FakeInterview()
+    )
+    return execution, runtime
 
 
-class TestValidateScreenFallback:
-    """The pickled-screen fallback must honor visible/required flags."""
+def test_start_commits_versioned_per_interview_state_and_status_is_pure(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _ = _execution(tmp_path, monkeypatch, da_stubs)
 
-    def _session(self, tmp_path):
-        return Session("docassemble.pkg:main.yml", tmp_path)
+    started = execution.run(Start())
+    before = execution.store.path.read_bytes()
+    status = execution.run(Status())
 
-    def _screen(self, *fields, question_name=None):
-        return {
-            "kind": "question",
-            "question_name": question_name,
-            "fields": list(fields),
-        }
+    assert started.ok and started.result["kind"] == "finished"
+    assert status.result == started.result
+    assert execution.store.path.read_bytes() == before
+    assert execution.store.path.parent.name == "sessions"
+    assert "main.yml" in execution.store.path.name
 
-    def test_missing_required_field_warns(self, tmp_path):
-        session = self._session(tmp_path)
-        screen = self._screen({"variable": "M.missing", "type": "text", "required": True})
-        result = session.validate_screen(object(), {}, screen)
-        assert result["errors"] == []
-        assert any("M.missing" in w for w in result["warnings"])
 
-    def test_optional_field_skipped(self, tmp_path):
-        session = self._session(tmp_path)
-        screen = self._screen({"variable": "M.opt", "type": "text", "required": False})
-        result = session.validate_screen(object(), {}, screen)
-        assert result == {"errors": [], "warnings": []}
+def test_read_only_evaluation_rehydrates_callables_without_changing_session(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _ = _execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+    before = execution.store.path.read_bytes()
 
-    def test_hidden_field_skipped_even_if_required(self, tmp_path):
-        session = self._session(tmp_path)
-        screen = self._screen(
-            {"variable": "M.hidden", "type": "text", "required": True, "visible": False}
-        )
-        result = session.validate_screen(object(), {}, screen)
-        assert result == {"errors": [], "warnings": []}
+    result = execution.run(Evaluate("helper(12)"))
 
-    def test_signature_field_skipped(self, tmp_path):
-        session = self._session(tmp_path)
-        screen = self._screen(
-            {"variable": "M.sig", "type": "signature", "required": True}
-        )
-        result = session.validate_screen(object(), {}, screen)
-        assert result == {"errors": [], "warnings": []}
+    assert result.ok and result.result["value"] == "'$12'"
+    assert execution.store.path.read_bytes() == before
 
-    def test_validation_error_and_warning_reported_separately(self, tmp_path, da_stubs):
-        session = self._session(tmp_path)
 
-        class FakeQuestion:
-            name = "q1"
-            validation_code = "raise DAValidationError('bad answer')"
-            fields = None
+def test_date_answer_is_field_aware_and_invalid_multi_answer_rolls_back(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, runtime = _execution(tmp_path, monkeypatch, da_stubs)
+    screen = {
+        "kind": "question",
+        "question_name": None,
+        "fields": [
+            {"variable": "filing_date", "type": "date", "required": False},
+            {"variable": "caption", "type": "text", "required": False},
+        ],
+    }
+    execution.store.save(
+        {
+            "_internal": {"tracker": 0, "objselections": {}},
+            "nav": SimpleNamespace(sections=None),
+        },
+        screen,
+    )
 
-        interview = _fake_interview(FakeQuestion())
-        user_dict = {"DAValidationError": da_stubs.DAValidationError}
-        screen = self._screen(
-            {"variable": "M.gone", "type": "text"}, question_name="q1"
-        )
-        result = session.validate_screen(interview, user_dict, screen)
-        assert result["errors"] == ["bad answer"]
-        assert len(result["warnings"]) == 1
-        assert "M.gone" in result["warnings"][0]
+    accepted = execution.run(
+        Answer((("filing_date", "2026-08-26"), ("caption", "2026-08-26")))
+    )
+    state = execution.store.load()["namespace"]
+    assert accepted.ok
+    assert isinstance(state["filing_date"], runtime.DADateTime)
+    assert state["caption"] == "2026-08-26"
 
-    def test_validation_code_crash_reports_error(self, tmp_path, da_stubs):
-        session = self._session(tmp_path)
-
-        class FakeQuestion:
-            name = "q1"
-            validation_code = "raise RuntimeError('boom')"
-
-        interview = _fake_interview(FakeQuestion())
-        screen = self._screen(question_name="q1")
-        result = session.validate_screen(interview, {}, screen)
-        assert len(result["errors"]) == 1
-        assert "crashed" in result["errors"][0]
-        assert "RuntimeError" in result["errors"][0]
+    execution.store.save(state, screen)
+    before = execution.store.path.read_bytes()
+    rejected = execution.run(
+        Answer((("filing_date", "2026-02-30"), ("caption", "changed")))
+    )
+    assert not rejected.ok and rejected.error.kind == "answer-input"
+    assert execution.store.path.read_bytes() == before

@@ -7,7 +7,7 @@ from docassemble_simulator.describe import (
     describe_question_result,
     field_visible,
 )
-from docassemble_simulator.session import parse_value
+from docassemble_simulator.execution import parse_value
 
 
 def safeid(name: str) -> str:
@@ -211,12 +211,16 @@ class TestFieldVisibleCodeForm:
 
 class TestFieldVisibleVarValForm:
     def test_equal_target_visible(self):
-        f = _field(extras={"show_if_var": safeid("custody_type"), "show_if_val": "sole"})
+        f = _field(
+            extras={"show_if_var": safeid("custody_type"), "show_if_val": "sole"}
+        )
         visible, note = field_visible(f, {"custody_type": "sole"})
         assert (visible, note) == (True, None)
 
     def test_different_target_hidden(self):
-        f = _field(extras={"show_if_var": safeid("custody_type"), "show_if_val": "sole"})
+        f = _field(
+            extras={"show_if_var": safeid("custody_type"), "show_if_val": "sole"}
+        )
         visible, _ = field_visible(f, {"custody_type": "joint"})
         assert visible is False
 

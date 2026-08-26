@@ -37,7 +37,9 @@ class TestFindTemplate:
 
     def test_ambiguous_template_is_rejected(self, tmp_path):
         for pkg in ("one", "two"):
-            template = tmp_path / "docassemble" / pkg / "data" / "templates" / "form.docx"
+            template = (
+                tmp_path / "docassemble" / pkg / "data" / "templates" / "form.docx"
+            )
             template.parent.mkdir(parents=True, exist_ok=True)
             template.write_bytes(b"docx")
 
@@ -56,7 +58,9 @@ class TestFindTemplate:
 
 
 class TestPrepareDocxTemplate:
-    def test_injects_paragraph_lines_and_fixes_only_expression_quotes(self, monkeypatch, tmp_path):
+    def test_injects_paragraph_lines_and_fixes_only_expression_quotes(
+        self, monkeypatch, tmp_path
+    ):
         template_path = tmp_path / "template.docx"
         template_path.write_bytes(b"placeholder")
         calls = {}
@@ -69,7 +73,7 @@ class TestPrepareDocxTemplate:
                 calls["render_init"] = True
 
             def get_xml(self):
-                return '<w:body><w:p><w:t>{{ “name” }}</w:t></w:p><w:p><w:t>body “quote”</w:t></w:p></w:body>'
+                return "<w:body><w:p><w:t>{{ “name” }}</w:t></w:p><w:p><w:t>body “quote”</w:t></w:p></w:body>"
 
             def patch_xml(self, xml):
                 calls["patched_xml"] = xml
@@ -82,7 +86,9 @@ class TestPrepareDocxTemplate:
         def fake_fix_quotes(match):
             return match.group(1).replace("“", '"').replace("”", '"')
 
-        monkeypatch.setitem(sys.modules, "docxtpl", types.SimpleNamespace(DocxTemplate=FakeTemplate))
+        monkeypatch.setitem(
+            sys.modules, "docxtpl", types.SimpleNamespace(DocxTemplate=FakeTemplate)
+        )
         monkeypatch.setitem(
             sys.modules,
             "docassemble.base.helpers",
@@ -101,7 +107,7 @@ class TestPrepareDocxTemplate:
         assert calls["render_init"] is True
         assert calls["patched_xml"].count("\n<w:p") == 2
         assert '{{ "name" }}' in calls["patched_xml"]
-        assert 'body “quote”' in calls["patched_xml"]
+        assert "body “quote”" in calls["patched_xml"]
         assert calls["parsed_xml"] == calls["patched_xml"] + "<!-- patched -->"
         assert result._dasimulator_paragraphs == 2
 
@@ -227,7 +233,9 @@ class TestRenderContext:
             def save(self, path):
                 Path(path).write_bytes(b"docx")
 
-        monkeypatch.setitem(sys.modules, "docxtpl", types.SimpleNamespace(DocxTemplate=FakeTemplate))
+        monkeypatch.setitem(
+            sys.modules, "docxtpl", types.SimpleNamespace(DocxTemplate=FakeTemplate)
+        )
         template = FakeTemplate()
 
         result = render_template(template, {})
@@ -250,102 +258,76 @@ class TestArtifact:
         assert not list((tmp_path / "render").glob(".*.tmp"))
 
 
-class TestRenderParser:
-    def test_render_options_are_available(self):
-        args = build_parser().parse_args(
-            [
-                "render",
-                "form.docx",
-                "--fresh",
-                "--no-flow",
-                "--fixture",
-                "fixture.py",
-                "--expect-missing",
-                "M.x",
-                "--output",
-                "out",
-                "--snapshot",
-                "state.pkl",
-                "--from-snapshot",
-                "saved.pkl",
-            ]
-        )
+class TestRenderModule:
+    def test_render_request_runs_inside_execution_callback(self, monkeypatch, tmp_path):
+        from docassemble_simulator.execution import ExecutionOutcome, RenderSource
+        from docassemble_simulator.render import InterviewRenderer, RenderRequest
 
-        assert args.command == "render"
-        assert args.template == "form.docx"
-        assert args.fresh is True
-        assert args.no_flow is True
-        assert args.fixture == "fixture.py"
-        assert args.expect_missing == "M.x"
-        assert args.output == "out"
-        assert args.snapshot == "state.pkl"
-        assert args.from_snapshot == "saved.pkl"
+        template = tmp_path / "docassemble" / "pkg" / "data" / "templates" / "form.docx"
+        template.parent.mkdir(parents=True)
+        template.write_bytes(b"docx")
 
-
-class TestRenderCommand:
-    def test_render_failure_has_json_error_shape(self, monkeypatch, tmp_path, capsys):
-        from contextlib import nullcontext
-        import json
-
-        import docassemble_simulator.cli as cli
-        import docassemble_simulator.render as render
-        import docassemble_simulator.session as session_module
-
-        fixture = tmp_path / "fixture.py"
-        fixture.write_text("pass\\n")
-
-        class FakeSession:
-            state_file = tmp_path / "session.pkl"
-
-            def __init__(self, interview_path, root):
-                self.interview_path = interview_path
-
-            def load_interview(self):
-                return SimpleNamespace()
-
-            def fresh_user_dict(self):
-                return {}
-
-            @staticmethod
-            def _in_interview(interview, user_dict):
-                return nullcontext()
-
-            def exec_in_namespace(self, code, user_dict, interview):
-                pass
-
-        monkeypatch.setattr(cli, "ensure_importable", lambda root: None)
-        monkeypatch.setattr(cli, "bootstrap", lambda **kwargs: None)
+        fake_docx = SimpleNamespace(_dasimulator_paragraphs=4)
         monkeypatch.setattr(
-            cli, "resolve_interview", lambda root, requested: ("demo.yml", [])
-        )
-        monkeypatch.setattr(session_module, "Session", FakeSession)
-        monkeypatch.setattr(render, "find_template", lambda root, name: tmp_path / name)
-        monkeypatch.setattr(
-            render,
-            "prepare_docx_template",
-            lambda path: SimpleNamespace(_dasimulator_paragraphs=12),
+            "docassemble_simulator.render.prepare_docx_template", lambda path: fake_docx
         )
         monkeypatch.setattr(
-            render,
-            "render_template",
-            lambda template, context: (_ for _ in ()).throw(
-                render.RenderError(
-                    "'M.missing' is undefined",
-                    paragraph=7,
-                    error_type="UndefinedError",
-                )
+            "docassemble_simulator.render.render_template",
+            lambda prepared, namespace: prepared,
+        )
+
+        class FakeExecution:
+            def run(self, operation):
+                return ExecutionOutcome(True, operation.action({"name": "Alice"}))
+
+        result = InterviewRenderer(tmp_path, FakeExecution()).render(
+            RenderRequest("form.docx", RenderSource("fresh"), True)
+        )
+
+        assert result == {
+            "ok": True,
+            "result": {"template": "form.docx", "paragraphs": 4},
+        }
+
+    def test_render_error_is_typed_and_attributed(self, monkeypatch, tmp_path):
+        from docassemble_simulator.execution import ExecutionOutcome, RenderSource
+        from docassemble_simulator.render import InterviewRenderer, RenderRequest
+
+        template = tmp_path / "docassemble" / "pkg" / "data" / "templates" / "form.docx"
+        template.parent.mkdir(parents=True)
+        template.write_bytes(b"docx")
+        monkeypatch.setattr(
+            "docassemble_simulator.render.prepare_docx_template",
+            lambda path: SimpleNamespace(_dasimulator_paragraphs=8),
+        )
+        monkeypatch.setattr(
+            "docassemble_simulator.render.render_template",
+            lambda prepared, namespace: (_ for _ in ()).throw(
+                RenderError("bad template", paragraph=7, error_type="UndefinedError")
             ),
         )
 
-        args = build_parser().parse_args(
-            ["render", "form.docx", "--fixture", str(fixture), "--json"]
-        )
-        assert cli.cmd_render(args, tmp_path) == 2
+        class FakeExecution:
+            def run(self, operation):
+                return ExecutionOutcome(True, operation.action({}))
 
-        assert json.loads(capsys.readouterr().out) == {
-            "template": "form.docx",
-            "ok": False,
+        result = InterviewRenderer(tmp_path, FakeExecution()).render(
+            RenderRequest("form.docx", RenderSource("fresh"), False)
+        )
+
+        assert result["ok"] is False
+        assert result["error"]["kind"] == "render"
+        assert result["error"]["details"] == {
             "error_type": "UndefinedError",
-            "message": "'M.missing' is undefined",
             "paragraph": 7,
         }
+
+    def test_exact_artifact_path_is_atomic(self, tmp_path):
+        class FakeTemplate:
+            def save(self, path):
+                Path(path).write_bytes(b"rendered")
+
+        target = tmp_path / "artifacts" / "named.docx"
+        assert write_artifact(FakeTemplate(), target) == target.resolve()
+        assert target.read_bytes() == b"rendered"
+        assert not list(target.parent.glob(".*"))

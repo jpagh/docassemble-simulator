@@ -1,10 +1,12 @@
 """Render docx templates through docassemble's real Jinja pipeline."""
+
 from __future__ import annotations
 
 import os
 import re
 import tempfile
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +44,7 @@ class RenderError(Exception):
     @classmethod
     def from_exception(
         cls, error: BaseException, *, paragraph: int | None = None
-    ) -> "RenderError":
+    ) -> RenderError:
         if paragraph is None:
             paragraph = _exception_line(error)
         message = str(error).strip() or type(error).__name__
@@ -94,9 +96,9 @@ def find_template(root: str | Path, filename: str) -> Path:
 def prepare_docx_template(path: str | Path):
     """Load and syntax-check a docx using the harness-compatible pipeline."""
     try:
-        from docxtpl import DocxTemplate
         from docassemble.base.helpers import fix_quotes
         from docassemble.base.jinja import custom_jinja_env
+        from docxtpl import DocxTemplate
 
         docx_template = DocxTemplate(path)
         docx_template.render_init()
@@ -109,8 +111,8 @@ def prepare_docx_template(path: str | Path):
         paragraphs = len(re.findall(r"\n<w:p(?:[ >])", xml))
         xml = docx_template.patch_xml(xml)
         custom_jinja_env().parse(xml)
-        docx_template._dasimulator_paragraphs = paragraphs
-        docx_template._dasimulator_prepared_xml = xml
+        setattr(docx_template, "_dasimulator_paragraphs", paragraphs)
+        setattr(docx_template, "_dasimulator_prepared_xml", xml)
         return docx_template
     except RenderError:
         raise
@@ -129,6 +131,8 @@ def render_template(docx_template, context: dict) -> Any:
     try:
         from docassemble.base.functions import (
             reset_context as reset_docx_context,
+        )
+        from docassemble.base.functions import (
             set_context,
             this_thread,
         )
@@ -148,7 +152,9 @@ def render_template(docx_template, context: dict) -> Any:
             if new_count <= old_count:
                 break
             if pass_number == 10:
-                raise RenderError("docx template includes exceeded the render pass limit")
+                raise RenderError(
+                    "docx template includes exceeded the render pass limit"
+                )
 
             from docxtpl import DocxTemplate
 
@@ -159,7 +165,7 @@ def render_template(docx_template, context: dict) -> Any:
                 current.save(str(temporary))
                 current = DocxTemplate(str(temporary))
                 current.render_init()
-                current._dasimulator_paragraphs = paragraphs
+                setattr(current, "_dasimulator_paragraphs", paragraphs)
             finally:
                 temporary.unlink(missing_ok=True)
         else:
@@ -167,8 +173,9 @@ def render_template(docx_template, context: dict) -> Any:
 
         subdocs = misc.get("docx_subdocs", [])
         if subdocs:
-            from docassemble.base.file_docx import fix_subdoc
+            from docassemble.base import file_docx
 
+            fix_subdoc = getattr(file_docx, "fix_subdoc")
             for subdoc in subdocs:
                 fix_subdoc(current.docx, subdoc)
         return current
@@ -193,18 +200,18 @@ def assert_missing(context: dict, var: str) -> None:
 def missing_error_matches(error: RenderError, var: str) -> bool:
     """Whether a render failure is the expected strict-undefined failure."""
     message = str(error)
-    return "undefined" in message and (
-        f"'{var}'" in message or f'"{var}"' in message
-    )
+    return "undefined" in message and (f"'{var}'" in message or f'"{var}"' in message)
 
 
-def write_artifact(docx_template, output_dir: str | Path, filename: str) -> Path:
-    """Save a rendered docx atomically in ``output_dir``."""
-    directory = Path(output_dir).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / Path(filename).name
+def write_artifact(
+    docx_template, output: str | Path, filename: str | None = None
+) -> Path:
+    """Save a rendered docx atomically to an exact target path."""
+    requested = Path(output).resolve()
+    target = requested / Path(filename).name if filename is not None else requested
+    target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.stem}.", suffix=target.suffix or ".docx", dir=directory
+        prefix=f".{target.stem}.", suffix=target.suffix or ".docx", dir=target.parent
     )
     os.close(fd)
     temporary = Path(temporary_name)
@@ -222,6 +229,108 @@ def paragraph_count(docx_template) -> int:
     return int(getattr(docx_template, "_dasimulator_paragraphs", 0))
 
 
+@dataclass(frozen=True)
+class RenderRequest:
+    template: str
+    source: Any
+    assemble: bool
+    save_snapshot: Path | None = None
+    output: Path | None = None
+    expect_missing: str | None = None
+
+
+class InterviewRenderer:
+    """Own render validation, evaluation, expectations, and artifact effects."""
+
+    def __init__(self, root: str | Path, execution):
+        self.root = Path(root).resolve()
+        self.execution = execution
+
+    def render(self, request: RenderRequest):
+        from docassemble_simulator.execution import PrepareRender
+
+        if request.source.kind == "fixture":
+            if request.assemble:
+                return _render_failure("input", "fixture rendering cannot assemble")
+            if request.source.path is None or not request.source.path.is_file():
+                return _render_failure(
+                    "input", f"fixture script not found: {request.source.path}"
+                )
+        try:
+            template_path = find_template(self.root, request.template)
+        except TemplateNotFoundError as error:
+            return _render_failure("input", str(error))
+
+        def action(namespace):
+            prepared = None
+            try:
+                prepared = prepare_docx_template(template_path)
+                rendered = render_template(prepared, namespace)
+                if request.expect_missing:
+                    raise RenderExpectationError(
+                        f"expected missing variable {request.expect_missing!r}, but render succeeded"
+                    )
+                result = {
+                    "template": request.template,
+                    "paragraphs": paragraph_count(rendered),
+                }
+                if request.output:
+                    result["artifact"] = str(write_artifact(rendered, request.output))
+                return {"ok": True, "result": result}
+            except RenderError as error:
+                if request.expect_missing and missing_error_matches(
+                    error, request.expect_missing
+                ):
+                    return {
+                        "ok": True,
+                        "result": {
+                            "template": request.template,
+                            "paragraphs": paragraph_count(prepared),
+                        },
+                    }
+                return {
+                    "ok": False,
+                    "error": {
+                        "kind": "render",
+                        "message": str(error),
+                        "details": {
+                            "error_type": error.error_type,
+                            "paragraph": error.paragraph,
+                        },
+                    },
+                }
+            except RenderExpectationError as error:
+                return {
+                    "ok": False,
+                    "error": {"kind": "render", "message": str(error), "details": {}},
+                }
+            except OSError as error:
+                return {
+                    "ok": False,
+                    "error": {"kind": "render", "message": str(error), "details": {}},
+                }
+
+        prepared = self.execution.run(
+            PrepareRender(
+                request.source, request.assemble, request.save_snapshot, action
+            )
+        )
+        if not prepared.ok:
+            return {
+                "ok": False,
+                "error": {
+                    "kind": prepared.error.kind,
+                    "message": prepared.error.message,
+                    "details": prepared.error.details or {},
+                },
+            }
+        return prepared.result
+
+
+def _render_failure(kind: str, message: str):
+    return {"ok": False, "error": {"kind": kind, "message": message, "details": {}}}
+
+
 def _exception_line(error: BaseException) -> int | None:
     line = getattr(error, "lineno", None)
     if isinstance(line, int) and line > 0:
@@ -234,8 +343,10 @@ def _exception_line(error: BaseException) -> int | None:
 
 
 __all__ = [
+    "InterviewRenderer",
     "RenderError",
     "RenderExpectationError",
+    "RenderRequest",
     "TemplateNotFoundError",
     "assert_missing",
     "find_template",
