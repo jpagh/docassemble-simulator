@@ -14,9 +14,12 @@ from docassemble_simulator.execution import (
     Execute,
     InterviewExecution,
     PrepareRender,
+    Refresh,
     RenderSource,
+    Seek,
     Start,
     Status,
+    Variables,
 )
 
 
@@ -141,6 +144,22 @@ def test_flow_error_is_committed_but_reported_as_failed_operation(
     assert execution._store.load()["namespace"]["debug_value"] == 42
 
 
+def test_sessions_are_isolated_by_canonical_interview_identity(
+    tmp_path, monkeypatch, da_stubs
+):
+    first, _ = _execution(tmp_path, monkeypatch, da_stubs)
+    second = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/another.yml")
+    monkeypatch.setattr(
+        second._catalog, "_compile", lambda identity=None: FakeInterview()
+    )
+
+    assert first.run(Start()).ok
+    assert second.run(Start()).ok
+
+    assert first._store.path != second._store.path
+    assert first._store.path.exists() and second._store.path.exists()
+
+
 def test_read_only_evaluation_rehydrates_callables_without_changing_session(
     tmp_path, monkeypatch, da_stubs
 ):
@@ -190,6 +209,46 @@ def test_every_render_source_rehydrates_before_the_context_action(
     assert outcome.result[0] == "$7"
     assert outcome.result[1] is (source_kind == "fixture")
     assert execution._store.path.read_bytes() == before
+
+
+def test_refresh_variables_exec_and_seek_follow_their_commit_policies(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _ = _execution(tmp_path, monkeypatch, da_stubs)
+    execution._store.save(
+        {
+            "_internal": {"tracker": 0, "objselections": {}},
+            "nav": SimpleNamespace(sections=None),
+            "counter": 1,
+        },
+        {"kind": "executed"},
+    )
+
+    before = execution._store.path.read_bytes()
+    variables = execution.run(Variables("counter"))
+    assert variables.ok and variables.result == {"counter": "1"}
+    assert execution._store.path.read_bytes() == before
+
+    executed = execution.run(Execute("counter += 1", assemble=False))
+    assert executed.ok and execution._store.load()["namespace"]["counter"] == 2
+
+    refreshed = execution.run(Refresh())
+    assert refreshed.ok and refreshed.result["kind"] == "finished"
+
+    class SeekingInterview(FakeInterview):
+        def askfor(self, variable, *args, **kwargs):
+            return {"type": "continue"}
+
+    monkeypatch.setattr(
+        execution._catalog, "_compile", lambda identity=None: SeekingInterview()
+    )
+    before_seek = execution._store.path.read_bytes()
+    isolated = execution.run(Seek("target", fresh=True))
+    assert isolated.ok and execution._store.path.read_bytes() == before_seek
+
+    activated = execution.run(Seek("target", activate=True))
+    assert activated.ok
+    assert execution.run(Status()).result["sought_variable"] == "target"
 
 
 def test_failed_atomic_replacement_preserves_the_previous_session(
