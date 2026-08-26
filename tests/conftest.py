@@ -3,6 +3,7 @@
 Only what the execution context and validation path touch at call time. Pure
 helpers (parse_value, field_visible, deep_merge, detect.*) need no stubs.
 """
+
 from __future__ import annotations
 
 import sys
