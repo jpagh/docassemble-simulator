@@ -174,13 +174,10 @@ def render_template(docx_template, context: dict) -> Any:
         else:
             raise RenderError("docx template did not complete rendering")
 
-        subdocs = misc.get("docx_subdocs", [])
-        if subdocs:
-            from docassemble.base import file_docx
-
-            fix_subdoc = getattr(file_docx, "fix_subdoc")
-            for subdoc in subdocs:
-                fix_subdoc(current.docx, subdoc)
+        # Current docassemble performs include integration through repeated
+        # DocxTemplate save/reload passes. Older versions exposed a separate
+        # fix_subdoc helper; invoking that optional legacy hook here breaks
+        # supported versions where it no longer exists.
         return current
     except RenderError:
         raise
