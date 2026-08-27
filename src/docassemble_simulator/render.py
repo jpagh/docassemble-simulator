@@ -33,6 +33,14 @@ class RenderExpectationError(Exception):
     """An ``expect-missing`` assertion did not hold."""
 
 
+class RenderBindingError(ValueError):
+    """A requested ephemeral template binding could not be evaluated."""
+
+    def __init__(self, name: str, message: str):
+        super().__init__(message)
+        self.name = name
+
+
 class RenderError(Exception):
     """A template preparation or evaluation error.
 
@@ -259,6 +267,7 @@ class RenderRequest:
     save_snapshot: Path | None = None
     output: Path | None = None
     expect_missing: str | None = None
+    bindings: tuple[tuple[str, str], ...] = ()
 
 
 RenderFailure = Failure
@@ -270,6 +279,30 @@ class RenderResult:
     template: str
     paragraphs: int
     artifact: Path | None = None
+
+
+def _apply_bindings(
+    namespace: dict[str, Any], bindings: tuple[tuple[str, str], ...]
+) -> None:
+    """Add explicit, ephemeral template variables to the render namespace."""
+    for name, expression in bindings:
+        if not isinstance(name, str) or not name.isidentifier():
+            raise RenderBindingError(
+                str(name),
+                f"invalid render binding name {name!r}; use a simple Python name",
+            )
+        if not isinstance(expression, str) or not expression.strip():
+            raise RenderBindingError(
+                name, f"invalid render binding {name}: expression is empty"
+            )
+        try:
+            namespace[name] = eval(expression, namespace)
+        except Exception as error:  # report the user-provided binding precisely
+            raise RenderBindingError(
+                name,
+                f"render binding {name}={expression!r} failed: "
+                f"{type(error).__name__}: {error}",
+            ) from error
 
 
 class InterviewRenderer:
@@ -309,6 +342,7 @@ class InterviewRenderer:
         def action(namespace):
             prepared = None
             try:
+                _apply_bindings(namespace, request.bindings)
                 prepared = prepare_docx_template(template_path)
                 rendered = render_template(
                     prepared, namespace, template=request.template
@@ -352,17 +386,21 @@ class InterviewRenderer:
                     False,
                     error=RenderFailure(ErrorKind.RENDER, str(error), details),
                 )
-            except (RenderExpectationError, OSError) as error:
+            except (RenderExpectationError, OSError, RenderBindingError) as error:
+                kind = (
+                    ErrorKind.INPUT
+                    if isinstance(error, RenderBindingError)
+                    else ErrorKind.RENDER
+                )
+                details = {
+                    "template": request.template,
+                    "error_type": type(error).__name__,
+                }
+                if isinstance(error, RenderBindingError):
+                    details["binding"] = error.name
                 return RenderOutcome(
                     False,
-                    error=RenderFailure(
-                        ErrorKind.RENDER,
-                        str(error),
-                        {
-                            "template": request.template,
-                            "error_type": type(error).__name__,
-                        },
-                    ),
+                    error=RenderFailure(kind, str(error), details),
                 )
 
         destinations = tuple(
@@ -441,6 +479,7 @@ __all__ = [
     "FixtureSource",
     "FreshSource",
     "InterviewRenderer",
+    "RenderBindingError",
     "RenderError",
     "RenderExpectationError",
     "RenderFailure",

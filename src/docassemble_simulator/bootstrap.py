@@ -25,7 +25,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import types
 from pathlib import Path
 
@@ -37,7 +36,62 @@ db:
   driver: sqlite
 redis: "redis://localhost:6399"
 debug: true
+host: localhost
+locale: en_US
+country: US
 """
+
+PDF_UNAVAILABLE_MESSAGE = (
+    "PDF output is unavailable in the simulator: generated PDF conversion is "
+    "not supported and no external converter is invoked; use a real "
+    "docassemble deployment for PDF downloads."
+)
+
+_BACKGROUND_ACTION_MODE = "foreground"
+_BACKGROUND_INSTALLED = False
+
+
+class PDFConversionUnavailable(RuntimeError):
+    """Raised instead of exposing a late missing-PDF file lookup."""
+
+
+class SimulatorTask:
+    """Small, pickleable task value for local foreground background actions."""
+
+    def __init__(self, value=None, error: BaseException | None = None, *, ready=True):
+        self._value = value
+        self._error_type = type(error).__name__ if error is not None else None
+        self._error_message = str(error) if error is not None else None
+        self._ready = ready
+        self.status = (
+            "SUCCESS"
+            if ready and error is None
+            else ("FAILURE" if error else "PENDING")
+        )
+        self.state = self.status
+
+    def ready(self):
+        return self._ready
+
+    def failed(self):
+        return self._error_message is not None
+
+    def wait(self):
+        return self._ready
+
+    def get(self, *args, **kwargs):
+        if self._error_message is not None:
+            raise RuntimeError(f"{self._error_type}: {self._error_message}")
+        return self._value
+
+    def result(self):
+        return self._value
+
+    def revoke(self, *args, **kwargs):
+        return None
+
+    def date_done(self):
+        return None
 
 
 class FakeRedis:
@@ -149,10 +203,14 @@ def prepare_environment(
     if extra_config is not None:
         import yaml
 
+        from docassemble_simulator.config import pass_through_config
+
         merged = yaml.safe_load(text) or {}
-        deep_merge(merged, extra_config)
+        deep_merge(merged, pass_through_config(extra_config))
         text = yaml.safe_dump(merged, sort_keys=False)
 
+    global _SIMULATOR_STORAGE_DIR
+    _SIMULATOR_STORAGE_DIR = config_path.parent / "files"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists() or extra_config is not None:
         config_path.write_text(text, encoding="utf-8")
@@ -234,6 +292,7 @@ def _configured_timezone() -> str:
 _ATTACHMENT_FALLBACK_INSTALLED = False
 _SIMULATOR_FILES: dict[int, dict] = {}
 _NEXT_SIMULATOR_FILE = 0
+_SIMULATOR_STORAGE_DIR = Path.cwd() / ".simulator" / "files"
 
 
 def _without_pdf_conversion(result: dict) -> None:
@@ -273,7 +332,16 @@ def install_attachment_filename_fallback() -> None:
         return
 
     def finalize_with_filename(self, attachment, result, user_dict):
+        had_pdf = "pdf" in (result.get("formats_to_use") or ()) or "pdf" in (
+            result.get("valid_formats") or ()
+        )
         _without_pdf_conversion(result)
+        if (
+            had_pdf
+            and not result.get("formats_to_use")
+            and not result.get("valid_formats")
+        ):
+            raise PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE)
         if result.get("filename") is None:
             name = result.get("name") or "attachment"
             filename = re.sub(r"[^\w.-]+", "_", str(name), flags=re.UNICODE).strip("._")
@@ -327,7 +395,7 @@ def register_hooks() -> None:
 
         @hookimpl
         def get_default_locale(self):
-            return ""
+            return "en_US"
 
         @hookimpl
         def get_default_timezone(self):
@@ -335,7 +403,7 @@ def register_hooks() -> None:
 
         @hookimpl
         def get_default_country(self):
-            return ""
+            return "US"
 
         @hookimpl
         def get_hostname(self):
@@ -361,7 +429,8 @@ def register_hooks() -> None:
             _NEXT_SIMULATOR_FILE += 1
             number = _NEXT_SIMULATOR_FILE
             suffix = Path(filename).suffix or Path(orig_path).suffix
-            destination = Path(tempfile.gettempdir()) / f"dasimulator-{number}{suffix}"
+            _SIMULATOR_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+            destination = _SIMULATOR_STORAGE_DIR / f"dasimulator-{number}{suffix}"
             shutil.copyfile(orig_path, destination)
             mimetype = (
                 mimetypes.guess_type(str(destination))[0] or "application/octet-stream"
@@ -390,6 +459,9 @@ def register_hooks() -> None:
 
             cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
             cfg.setdefault("debug", True)
+            cfg.setdefault("host", "localhost")
+            cfg.setdefault("locale", "en_US")
+            cfg.setdefault("country", "US")
             return cfg
 
     if pm.get_plugin("dasimulator.minimal") is None:
@@ -437,6 +509,106 @@ def _fake_defined(name) -> bool:
         logger.debug("defined check for %r failed: %s", name, exc)
         return False
     return True
+
+
+def _set_background_action_mode(mode: str | None) -> None:
+    """Select local background behavior before the runtime is driven."""
+    global _BACKGROUND_ACTION_MODE
+    if mode is None:
+        return
+    normalized = str(mode).lower()
+    if normalized in {"stub", "off", "none"}:
+        normalized = "disabled"
+    if normalized not in {"foreground", "disabled"}:
+        raise ValueError("background action mode must be foreground or disabled")
+    _BACKGROUND_ACTION_MODE = normalized
+
+
+def _foreground_background_action(action, ui_notification=None, **arguments):
+    """Run a supported event in the current request and return a task value."""
+    if _BACKGROUND_ACTION_MODE == "disabled":
+        return SimulatorTask(ready=False)
+    from docassemble.base.functions import this_thread
+
+    interview = getattr(this_thread, "interview", None)
+    namespace = getattr(this_thread, "current_dict", None)
+    status = getattr(this_thread, "interview_status", None)
+    if interview is None or not isinstance(namespace, dict) or status is None:
+        return SimulatorTask(
+            error=RuntimeError(
+                "foreground background_action requires an active interview context"
+            )
+        )
+    if not isinstance(action, str):
+        if not callable(action):
+            return SimulatorTask(error=TypeError("unsupported background action name"))
+        try:
+            return SimulatorTask(action(**arguments))
+        except BaseException as error:  # noqa: BLE001 - task must capture authored failures
+            return SimulatorTask(error=error)
+
+    info = getattr(this_thread, "current_info", {})
+    old = {key: info[key] for key in ("action", "arguments") if key in info}
+    try:
+        info["action"] = action
+        info["arguments"] = arguments
+        result = interview.askfor(
+            action,
+            namespace,
+            dict(namespace),
+            status,
+            seeking=[],
+            variable_stack=set(),
+            questions_tried={},
+        )
+        question = result.get("question") if isinstance(result, dict) else None
+        question_type = getattr(question, "question_type", None)
+        if question_type == "backgroundresponse":
+            return SimulatorTask(getattr(question, "backgroundresponse", None))
+        if question_type == "backgroundresponseaction":
+            next_action = getattr(question, "action", None)
+            if not isinstance(next_action, dict) or not next_action.get("action"):
+                return SimulatorTask(
+                    error=RuntimeError("background response action is invalid")
+                )
+            return _foreground_background_action(
+                next_action["action"],
+                **(next_action.get("arguments") or {}),
+            )
+        return SimulatorTask(
+            error=RuntimeError(
+                "background action did not finish with background_response(); "
+                "worker-only behavior is not supported by the simulator"
+            )
+        )
+    except BaseException as error:  # noqa: BLE001 - task must capture authored failures
+        return SimulatorTask(error=error)
+    finally:
+        for key in ("action", "arguments"):
+            info.pop(key, None)
+        info.update(old)
+
+
+def _install_background_action_fallback(mode: str | None = None) -> None:
+    """Replace Celery dispatch with a foreground task, unless explicitly disabled."""
+    global _BACKGROUND_INSTALLED
+    _set_background_action_mode(mode)
+    if _BACKGROUND_INSTALLED:
+        return
+    try:
+        from docassemble.base import background, functions, util
+    except ImportError:
+        return
+    # functions.background_action delegates through its module-global bg_action;
+    # util re-exports the function object, while background.bg_action is useful
+    # for runtimes that call the lower-level seam directly.
+    functions.bg_action = _foreground_background_action
+    functions.background_action = lambda *args, **kwargs: _foreground_background_action(
+        *args, **kwargs
+    )
+    util.background_action = functions.background_action
+    background.bg_action = _foreground_background_action
+    _BACKGROUND_INSTALLED = True
 
 
 def apply_session_stubs(*, stub_define_defined: bool = False) -> None:
@@ -496,6 +668,7 @@ def bootstrap(
     config_path: Path | None = None,
     extra_config: dict | None = None,
     stub_define_defined: bool = False,
+    background_action_mode: str | None = None,
 ) -> None:
     """Run every pre-import step in the required order."""
     prepare_environment(config_path=config_path, extra_config=extra_config)
@@ -504,3 +677,4 @@ def bootstrap(
     apply_session_stubs(stub_define_defined=stub_define_defined)
     register_hooks()
     install_attachment_filename_fallback()
+    _install_background_action_fallback(background_action_mode)

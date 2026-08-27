@@ -65,19 +65,7 @@ class InterviewCatalog:
                         ),
                     }
                 )
-            except (
-                ValueError,
-                TypeError,
-                RuntimeError,
-                ImportError,
-                AttributeError,
-                KeyError,
-                IndexError,
-                LookupError,
-                OSError,
-                SyntaxError,
-                NameError,
-            ) as error:
+            except Exception as error:  # noqa: BLE001 - DAError varies by runtime release
                 logger.debug("interview %r failed to compile: %s", identity, error)
                 rows.append(
                     {
@@ -146,19 +134,7 @@ class InterviewCatalog:
     def _compile_for_inspection(self):
         try:
             return self._compile()
-        except (
-            ValueError,
-            TypeError,
-            RuntimeError,
-            ImportError,
-            AttributeError,
-            KeyError,
-            IndexError,
-            LookupError,
-            OSError,
-            SyntaxError,
-            NameError,
-        ) as error:
+        except Exception as error:  # includes DAError/DAErrorMissingVariable
             raise CatalogFailure(f"{type(error).__name__}: {error}") from error
 
 

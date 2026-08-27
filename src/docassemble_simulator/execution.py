@@ -675,10 +675,21 @@ class InterviewExecution:
 
 
 def _fresh_namespace() -> dict[str, Any]:
-    from docassemble.base.parse import get_initial_dict
+    import copy
+
+    from docassemble.base import parse
     from docassemble.base.util import DAObject
 
-    initial = get_initial_dict()
+    # INITIAL_DICT is the server's contract.  get_initial_dict() is preferred
+    # by modern releases because it deep-copies that value, while older test
+    # and runtime shims expose only the constant.
+    if hasattr(parse, "INITIAL_DICT"):
+        initial = copy.deepcopy(parse.INITIAL_DICT)
+    else:
+        getter = getattr(parse, "get_initial_dict", None)
+        if getter is None:
+            raise RuntimeError("docassemble parse module has no INITIAL_DICT")
+        initial = getter()
     internal = initial["_internal"]
     defaults = {
         "gather": [],
@@ -746,8 +757,17 @@ def _interview_context(interview, namespace):
         if source is not None:
             this_thread.current_package = getattr(source, "package", None)
         this_thread.internal = namespace.get("_internal", {})
+        # The simulator-owned foreground background-action fallback uses this
+        # explicit marker; docassemble itself keeps the dict in a ContextVar.
+        this_thread.current_dict = namespace
         _register_global_roots(namespace)
-        yield status
+        try:
+            yield status
+        finally:
+            try:
+                del this_thread.current_dict
+            except AttributeError:
+                pass
 
 
 def _assemble(interview, namespace, status):

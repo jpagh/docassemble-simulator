@@ -93,6 +93,42 @@ class TestAttachmentFormats:
         assert seen["valid_formats"] == ["docx"]
 
 
+class TestForegroundBackgroundActions:
+    def test_foreground_task_runs_event_in_current_context(self, monkeypatch):
+        from docassemble_simulator import bootstrap
+
+        thread = types.SimpleNamespace(
+            current_dict={"value": 3},
+            current_info={},
+            interview_status=object(),
+            interview=types.SimpleNamespace(
+                askfor=lambda *args, **kwargs: {
+                    "question": types.SimpleNamespace(
+                        question_type="backgroundresponse", backgroundresponse=7
+                    )
+                }
+            ),
+        )
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.this_thread = thread
+        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_ACTION_MODE", "foreground")
+
+        task = bootstrap._foreground_background_action("event", answer=1)
+
+        assert task.ready() and not task.failed()
+        assert task.get() == 7
+        assert thread.current_info == {}
+
+    def test_disabled_mode_retains_pending_task(self, monkeypatch):
+        from docassemble_simulator import bootstrap
+
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_ACTION_MODE", "disabled")
+        task = bootstrap._foreground_background_action("event")
+        assert not task.ready()
+        assert not task.failed()
+
+
 class TestDeepMerge:
     def test_nested_merge_preserves_unrelated_keys(self):
         base = {"a": {"x": 1, "y": 2}, "keep": True}

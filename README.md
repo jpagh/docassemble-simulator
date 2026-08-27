@@ -7,12 +7,17 @@ agents.
 
 ## Install
 
-Run the simulator in an interpreter that can import both the target package and
-`docassemble.base`:
+Run the simulator in the target package's interpreter:
 
 ```sh
 uv pip install --python /path/to/package/.venv/bin/python docassemble-simulator
 ```
+
+If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
+missing fixed package names with `uv pip` (or the interpreter's `pip`) without
+upgrading installed packages. Use `--offline` or `[simulator].offline = true`
+to disable acquisition. An installed package that fails because of a native
+library is reported as an import failure, not silently reinstalled.
 
 ## Command model
 
@@ -123,23 +128,78 @@ rewritten or repaired.
 DOCX output is supported. Generated PDF conversion remains intentionally
 stubbed: the simulator does not invoke an external converter.
 
-## Workspace configuration and seeds
+## Workspace configuration and defaults
 
-Runtime files live under `.simulator/`. Authored simulator configuration lives
-under `.config/simulator/`:
+Runtime files are entirely ignored under `.simulator/` (sessions, generated
+YAML, and render output). Authored files live under `.config/simulator/`:
 
 ```text
-.config/simulator/config.toml
-.config/simulator/config.py
-.simulator/sessions/
+.config/simulator/config.toml       # committed declarative settings
+.config/simulator/config.local.toml # optional, ignored override
+.config/simulator/config.py         # optional authored seed code
+.config/simulator/fixture.py         # optional implicit render fixture
+.simulator/config-effective.yml     # generated TOML-to-YAML handoff
+.simulator/sessions/                # trusted-local pickle state
 ```
 
-`config.toml` is merged with discovered parent/global configuration and supplied
-to docassemble. Optional `config.py` is package runtime adapter code, executed
-after standard namespace rehydration and before authored flow, evaluation, or
-render work. Use it for deterministic substitutes for package/server
-requirements such as no-worker `background_action()` behavior and for seeded
-server-scoped data.
+When present, `.config/simulator/fixture.py` is the implicit fixture for a
+render with no explicit source; `--fixture` always wins. A zero-config run uses
+SQLite session/database settings, an in-process fake
+Redis, simulator-local file storage, `debug=true`, localhost, `en_US`, `US`,
+the local timezone (falling back to `America/New_York`), and foreground
+background actions. These are local substitutes, not PostgreSQL, Redis,
+Celery, or server storage. DOCX rendering is supported; PDF conversion is
+unavailable and no external converter is invoked.
+
+Configuration is merged from lowest to highest precedence: the global
+`$DOCASSEMBLE_SIMULATOR_CONFIG` (or
+`$XDG_CONFIG_HOME/docassemble-simulator/config.toml`), then every matching
+project file while walking from the filesystem root to the package root. At a
+level, local files win. Supported project candidates are:
+
+```text
+simulator.local.toml  .simulator.local.toml  simulator.toml  .simulator.toml
+simulator/config.toml .simulator/config.toml .config/simulator.toml
+.config/simulator/config.local.toml .config/simulator/config.toml
+```
+
+The effective file is generated at `.simulator/config-effective.yml`; TOML
+`jinja-data` is normalized to docassemble's `jinja data`. `--config PATH` adds
+a final YAML (or TOML) override. The `config` command prints redacted values
+and supports `--json`; credentials are never printed or committed.
+
+Simulator-owned settings belong under `[simulator]`, including
+`missing_runtime = "install"|"disabled"`, `background_actions =
+"foreground"|"disabled"`, `offline`, and `render_bindings` (the legacy
+top-level `[render-bindings]` table is also accepted). Docassemble pass-through
+settings such as `timezone`, `jinja data`, and supported database
+or Redis values are visible to interview code but do not change simulator
+policy. A package's `config.py` remains optional seed code and is not needed
+for the standard local substitutes.
+
+Example:
+
+```toml
+# .config/simulator/config.toml
+timezone = "America/Chicago"
+[jinja-data]
+my_label = "Family"
+[simulator]
+background_actions = "foreground"
+[simulator.render_bindings]
+x = "clients[0]"
+# Alternatively, the legacy top-level spelling is [render-bindings].
+```
+
+Use `render form.docx --bind x=clients[1]` to override a configured binding.
+A template-specific table such as `[render-bindings."poa.docx"]` overrides the
+default binding map for that template. Command-line bindings win over
+template-specific config, which wins over the default binding map. Bindings
+are simple names evaluated in an ephemeral render namespace and never saved.
+
+Optional `config.py` executes after namespace rehydration and before authored
+flow, evaluation, or render work. Use it for deterministic seed data and
+server-scoped objects, not to emulate external services.
 
 The simulator generically calls the compiled interview's non-pickleable
 population mechanism on every prepared namespace. This restores
@@ -158,9 +218,12 @@ objects stable `instanceName` values and seed all data their templates consume.
 The simulator preserves interview compilation, mandatory assembly, seeking,
 screen descriptions, answer coercion, validation order, marking, seed timing,
 docassemble context, template evaluation, include passes, and intentional PDF
-policy. It does not provide browser HTML, uploads, arbitrary server workers,
-Celery, or rollback of external filesystem/network effects caused by authored
-Python. Package-specific server dependency behavior belongs in authored seeds.
+policy. Supported `background_action()` events run immediately in the current
+foreground context by default; this does not simulate worker isolation, queue
+latency, retries, or process failures. `background_actions = "disabled"` retains
+a waiting/stub task for diagnosis. Browser HTML, uploads, external services,
+PostgreSQL, real Redis/Celery behavior, and PDF/download verification remain
+deployment or staging responsibilities.
 
 ## Development
 
@@ -179,4 +242,6 @@ scripts/test-real-runtime /path/to/target/package/.venv/bin/python
 
 The lane skips when no interpreter is configured and fails clearly when the
 supplied runtime cannot run the tests. The fast suite uses stubbed runtime
-modules and never requires `docassemble`.
+modules and never requires `docassemble`. PDF-only download screens are
+intentionally deferred to staging; the simulator gate is DOCX artifact
+rendering and content inspection.

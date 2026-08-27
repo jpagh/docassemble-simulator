@@ -19,7 +19,17 @@ from docassemble_simulator.bootstrap import (
     dyld_fallback_value,
     prepare_environment,
 )
-from docassemble_simulator.config import load_config
+from docassemble_simulator.config import (
+    DOCASSEMBLE_DEFAULTS,
+    SIMULATOR_DEFAULTS,
+    discover_config_files,
+    global_config_path,
+    load_config,
+    normalize_config,
+    pass_through_config,
+    redact_config,
+    simulator_settings,
+)
 from docassemble_simulator.detect import (
     ensure_importable,
     find_package_root,
@@ -125,14 +135,64 @@ def _execution(args, root):
     return InterviewExecution(root, args.interview)
 
 
+def _config_report(root, config):
+    settings = simulator_settings(config)
+    effective = pass_through_config(config)
+    return {
+        "files": [
+            *[str(path) for path in discover_config_files(root)],
+            *([str(global_config_path())] if global_config_path().is_file() else []),
+        ],
+        "effective_config": str(root / ".simulator" / "config-effective.yml"),
+        "simulator": {
+            "missing_runtime": settings["missing_runtime"],
+            "background_actions": settings["background_actions"],
+            "offline": settings["offline"],
+            "render_bindings": redact_config(settings["render_bindings"]),
+        },
+        "pass_through_keys": sorted(effective),
+        "defaults": {
+            "docassemble": DOCASSEMBLE_DEFAULTS,
+            "simulator": SIMULATOR_DEFAULTS,
+            "capabilities": {
+                "docx": "supported",
+                "pdf_conversion": "unavailable (no external converter invoked)",
+                "background_actions": "foreground by default; no Celery worker",
+            },
+        },
+    }
+
+
+def _configured_bindings(config, template, command_bindings):
+    settings = simulator_settings(config)
+    table = settings.get("render_bindings", {})
+    defaults = {}
+    specific = {}
+    if isinstance(table, dict):
+        defaults = {
+            key: value for key, value in table.items() if isinstance(value, str)
+        }
+        candidate = table.get(template, {})
+        if isinstance(candidate, dict):
+            specific = {
+                key: value for key, value in candidate.items() if isinstance(value, str)
+            }
+    merged = dict(defaults)
+    merged.update(specific)
+    merged.update(dict(command_bindings or ()))
+    return tuple((str(name), str(expression)) for name, expression in merged.items())
+
+
 def cmd_info(args, root):
     from docassemble_simulator.detect import list_packages
 
+    config = getattr(args, "_simulator_config", {})
     data = {
         "root": str(root),
         "packages": list_packages(root),
         "interview_count": len(list_interviews(root)),
         "interviews": list_interviews(root),
+        "config": _config_report(root, config),
     }
     try:
         import docassemble.base
@@ -143,7 +203,33 @@ def cmd_info(args, root):
     except (ImportError, AttributeError, ModuleNotFoundError) as exc:
         logger.debug("docassemble version lookup failed: %s", exc)
         data["docassemble_version"] = "unknown (docassemble not importable)"
+    from docassemble_simulator.bootstrap import PDF_UNAVAILABLE_MESSAGE
+
+    report = data["config"]
+    if getattr(args, "background_actions", None):
+        report["simulator"]["background_actions"] = args.background_actions
+    if getattr(args, "config", None):
+        report["config_override"] = str(Path(args.config).expanduser().resolve())
+    data["capabilities"] = {
+        "docx": "supported",
+        "pdf": "unavailable",
+        "pdf_message": PDF_UNAVAILABLE_MESSAGE,
+        "external_pdf_converter": False,
+        "background_worker": False,
+    }
     _emit(_envelope("info", data), args.json)
+    return 0
+
+
+def cmd_config(args, root):
+    config = getattr(args, "_simulator_config", {})
+    report = _config_report(root, config)
+    effective = dict(DOCASSEMBLE_DEFAULTS)
+    deep_merge(effective, pass_through_config(config))
+    report["effective"] = redact_config(effective)
+    report["overrides"] = redact_config(config)
+    report["source"] = "defaults plus discovered/--config overrides"
+    _emit(_envelope("config", report), args.json)
     return 0
 
 
@@ -250,7 +336,12 @@ def cmd_render(args, root):
     elif args.fresh:
         source = FreshSource()
     else:
-        source = SavedSessionSource()
+        implicit_fixture = root / ".config" / "simulator" / "fixture.py"
+        source = (
+            FixtureSource(implicit_fixture)
+            if implicit_fixture.is_file()
+            else SavedSessionSource()
+        )
     request = RenderRequest(
         args.template,
         source,
@@ -258,6 +349,11 @@ def cmd_render(args, root):
         Path(args.save_snapshot).expanduser().resolve() if args.save_snapshot else None,
         Path(args.output).expanduser().resolve() if args.output else None,
         args.expect_missing,
+        _configured_bindings(
+            getattr(args, "_simulator_config", {}),
+            args.template,
+            _parse_bindings(args.bind),
+        ),
     )
     outcome = InterviewRenderer(root, _execution(args, root)).render(request)
     payload = (
@@ -269,6 +365,23 @@ def cmd_render(args, root):
     if outcome.ok:
         return 0
     return _exit_for_error(outcome.error.kind)
+
+
+def _parse_bindings(pairs):
+    result = []
+    for pair in pairs:
+        if "=" not in pair:
+            raise InputFailure(f"expected NAME=EXPRESSION, got {pair!r}")
+        name, expression = pair.split("=", 1)
+        name = name.strip()
+        if not name.isidentifier():
+            raise InputFailure(
+                f"render binding name must be a simple Python name: {name!r}"
+            )
+        if not expression.strip():
+            raise InputFailure(f"render binding {name!r} has an empty expression")
+        result.append((name, expression))
+    return result
 
 
 def _parse_assignments(pairs):
@@ -284,13 +397,29 @@ def _parse_assignments(pairs):
 def build_parser():
     parser = UsageParser(
         prog="docassemble-simulator",
-        description="Run and render docassemble interviews locally. JSON uses a stable ok/command/result-or-error envelope.",
+        description=(
+            "Run and render docassemble interviews locally. Config is discovered "
+            "from global and walking-up project TOML files; defaults provide "
+            "SQLite, fake Redis, local storage, and foreground background actions. "
+            "DOCX is supported, but PDF conversion/downloads are deployment-only. "
+            "JSON uses a stable ok/command/result-or-error envelope."
+        ),
     )
     parser.add_argument("--root", default=None)
     parser.add_argument("--interview", default=None)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--stub-defined", action="store_true")
-    parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--config", default=None, help="override config file (YAML or TOML)"
+    )
+    parser.add_argument(
+        "--offline", action="store_true", help="do not acquire missing runtime packages"
+    )
+    parser.add_argument(
+        "--background-actions",
+        choices=("foreground", "disabled"),
+        help="background_action mode (default: foreground; no Celery worker)",
+    )
     common = argparse.ArgumentParser(add_help=False)
     for flag in ("root", "interview", "config"):
         common.add_argument(f"--{flag}", default=argparse.SUPPRESS)
@@ -298,14 +427,27 @@ def build_parser():
     common.add_argument(
         "--stub-defined", action="store_true", default=argparse.SUPPRESS
     )
+    common.add_argument("--offline", action="store_true", default=argparse.SUPPRESS)
+    common.add_argument(
+        "--background-actions",
+        choices=("foreground", "disabled"),
+        default=argparse.SUPPRESS,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add(name, **kwargs):
         return sub.add_parser(name, parents=[common], command_name=name, **kwargs)
 
-    add("info", help="inspect the workspace without runtime bootstrap").set_defaults(
-        func=cmd_info
-    )
+    add(
+        "info",
+        help="inspect workspace, config defaults, and DOCX/PDF capabilities",
+        description="Show config discovery, local service defaults, and capability boundaries. No runtime bootstrap is required.",
+    ).set_defaults(func=cmd_info)
+    add(
+        "config",
+        help="inspect effective simulator configuration (secrets redacted)",
+        description="Show discovered config, simulator settings, and redacted pass-through values.",
+    ).set_defaults(func=cmd_config)
     add("check", help="compile interview definitions").set_defaults(func=cmd_catalog)
     for name in ("questions", "index"):
         item = add(name, help=f"inspect interview {name}")
@@ -343,7 +485,15 @@ def build_parser():
     variables = add("vars", help="inspect saved variables without saving")
     variables.add_argument("--filter")
     variables.set_defaults(func=cmd_execution)
-    render = add("render", help="render a DOCX from one explicit state source")
+    render = add(
+        "render",
+        help="render a DOCX from one explicit state source",
+        description=(
+            "Render DOCX only. PDF conversion is unavailable and no external "
+            "converter is invoked. Use --bind NAME=EXPRESSION for explicit "
+            "ephemeral template bindings."
+        ),
+    )
     render.add_argument("template")
     render_source = render.add_mutually_exclusive_group()
     render_source.add_argument("--fresh", action="store_true")
@@ -353,6 +503,13 @@ def build_parser():
     render.add_argument("--save-snapshot")
     render.add_argument("--output", metavar="PATH")
     render.add_argument("--expect-missing")
+    render.add_argument(
+        "--bind",
+        action="append",
+        default=[],
+        metavar="NAME=EXPRESSION",
+        help="bind a template variable in the ephemeral render namespace (repeatable)",
+    )
     render.set_defaults(func=cmd_render)
     return parser
 
@@ -386,22 +543,46 @@ def main(argv=None):
         root = find_package_root(args.root)
         config = load_config(root)
         if getattr(args, "config", None):
-            import yaml
-
             source = Path(args.config).expanduser()
             if not source.exists():
                 raise ValueError(f"config {source} does not exist")
-            loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+            if source.suffix.lower() == ".toml":
+                import tomllib
+
+                loaded = tomllib.loads(source.read_text(encoding="utf-8"))
+            else:
+                import yaml
+
+                loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
             if not isinstance(loaded, dict):
-                raise ValueError(f"config {source} must be a YAML mapping")
-            deep_merge(config, loaded)
+                raise ValueError(f"config {source} must be a mapping")
+            deep_merge(config, normalize_config(loaded))
+        args._simulator_config = config
+        settings = simulator_settings(config)
+        mode = (
+            getattr(args, "background_actions", None) or settings["background_actions"]
+        )
+        install_missing = settings["missing_runtime"] == "install"
         prepare_environment(
             config_path=root / ".simulator" / "config-effective.yml",
             extra_config=config,
         )
-        if args.command not in {"info", "status"}:
-            ensure_importable(root)
-            bootstrap(stub_define_defined=args.stub_defined)
+        if args.command not in {"info", "status", "config"}:
+            if not config and not getattr(args, "offline", False):
+                # Preserve the small composition seam used by embedders that
+                # provide the legacy one-argument preflight callable.
+                ensure_importable(root)
+            else:
+                ensure_importable(
+                    root,
+                    install_missing=install_missing,
+                    offline=getattr(args, "offline", False) or settings["offline"],
+                )
+            bootstrap(
+                stub_define_defined=args.stub_defined,
+                background_action_mode=mode,
+                extra_config=config,
+            )
         return args.func(args, root)
     except (InputFailure, SystemExit, ValueError) as error:
         message = str(error)

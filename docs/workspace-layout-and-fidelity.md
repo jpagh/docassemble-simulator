@@ -1,6 +1,6 @@
 # Simulator Workspace Layout and Flow-Fidelity Fixes
 
-Status: proposal, ready for implementation
+Status: implemented
 Date: 2026-08-24
 Scope: two coupled pieces of work on `docassemble-simulator`:
 
@@ -78,14 +78,20 @@ simulator/config.toml
   layer; any project candidate overrides it. (This replaces the current
   `~/.config/docassemble-simulator/config.yml`, whose historic `jinja data`
   leak — see B5 — ends with this work.)
-- **Schema**: curated keys only (this tool's own): `jinja data`, `timezone`,
-  and any other docassemble server-config key you want to steer. Example:
+- **Schema**: simulator-owned policy is reserved under `[simulator]`:
+  `missing_runtime = "install"|"disabled"`, `background_actions =
+  "foreground"|"disabled"`, `offline`, and `render_bindings`. Docassemble
+  pass-through keys include `jinja data`, `timezone`, and supported database or
+  Redis settings. Example:
 
   ```toml
   timezone = "America/Chicago"
 
   [jinja-data]
   jinja_config_automatedpleading_document_categories = { family = "Family" }
+
+  [simulator]
+  background_actions = "foreground"
   ```
 
 - **Effective config is YAML**: docassemble reads `get_configuration()` from
@@ -99,7 +105,8 @@ simulator/config.toml
 ### A3. Setup script — `.config/simulator/config.py`
 
 The setup script lives at `.config/simulator/config.py`,
-paired with the TOML. It keeps its job: exec in the session namespace before
+paired with the TOML. It is optional because standard local service substitutes
+are built in. It keeps its job: exec in the session namespace before
 every flow pass to stub server-only dependencies (firm data, OAuth, matter
 lookups, …). It is authored and committed; the code resolves a single fixed
 path (no discovery needed for code, unlike the data config). `render`'s
@@ -161,7 +168,23 @@ fold them into one file — executing committed "config" code at load is the
 footgun `mise`/`jda` deliberately avoid. One-line docstring on `config.py`
 states the seed-session contract.
 
-### A5. Rollout (no migration machinery)
+### A5. Defaults and capability boundary
+
+With no configuration, the simulator uses SQLite, an in-process fake Redis,
+local file storage, generated effective YAML, debug mode, localhost, `en_US`,
+`US`, the local timezone (falling back to `America/New_York`), and foreground
+background actions. These are simulator stubs and are not PostgreSQL, Redis,
+Celery, or server storage. DOCX output is supported; generated PDF conversion
+is unavailable, no converter is invoked, and PDF-only download verification is
+deferred to a real deployment/staging environment. Run `info` for this report
+or `config --json` for redacted settings and pass-through keys. Render
+bindings may be written as `[simulator.render_bindings]` (or legacy top-level
+`[render-bindings]`), with optional `[render-bindings."poa.docx"]` entries.
+`--bind x=clients[1]` overrides a template-specific value, which overrides the
+default map. Bindings are evaluated only in the ephemeral render namespace and
+never mutate sessions or snapshots.
+
+### A6. Rollout (no migration machinery)
 
 The simulator has only ever run against `docassemble-automatedpleading`, so
 no generic migration code is needed:

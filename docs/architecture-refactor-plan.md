@@ -51,10 +51,11 @@ pytest green. It produced four inputs for this plan:
   repopulate the namespace. The current stream must perform docassemble's
   server-equivalent non-pickleable population for every prepared namespace; do
   not maintain a helper-by-helper seed list.
-- **Background work:** the package seed now supplies an immediate-completion
-  `background_action()` result because local simulation has no Celery worker.
-  Preserve this as a deterministic package adapter; do not add a worker or
-  package-specific task semantics to the simulator.
+- **Background work:** local simulation now supplies an immediate-completion
+  foreground `background_action()` task by default because it has no Celery
+  worker. This is a simulator-owned convenience, not worker parity: queue
+  latency, isolation, retries, and worker failures remain deployment concerns.
+  `background_actions = "disabled"` retains the waiting/stub behavior.
 - **Embedded DOCX structure:** shared templates that lacked a leading paragraph
   were fixed at their source after docassemble raised `IndexError`. Rendering
   should continue to report structural template failures, not silently rewrite

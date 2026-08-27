@@ -111,6 +111,23 @@ class TestPrepareDocxTemplate:
         assert result._dasimulator_paragraphs == 2
 
 
+class TestRenderBindings:
+    def test_bindings_are_explicit_and_ephemeral(self):
+        from docassemble_simulator.render import _apply_bindings
+
+        namespace = {
+            "clients": [SimpleNamespace(name="one"), SimpleNamespace(name="two")]
+        }
+        _apply_bindings(namespace, (("x", "clients[1]"),))
+        assert namespace["x"].name == "two"
+
+    def test_invalid_binding_reports_name_and_expression(self):
+        from docassemble_simulator.render import RenderBindingError, _apply_bindings
+
+        with pytest.raises(RenderBindingError, match="x=.*missing"):
+            _apply_bindings({}, (("x", "missing"),))
+
+
 class TestRenderErrors:
     def test_missing_error_matches_exact_variable_name(self):
         assert missing_error_matches(
