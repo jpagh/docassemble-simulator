@@ -58,10 +58,11 @@ compatible version set before evaluating simulator behavior.
 Then test a version matrix containing the selected `docassemble-base`,
 AssemblyLine, webapp, and Python versions. The `ql_baseline.yml` entries
 `alMonthLabel`, `alDayLabel`, and `alYearLabel` must be tested from the installed
-package without editing `site-packages`. If the parser rejects a released
-AssemblyLine package, pin a compatible pair or report the upstream
-incompatibility with the smallest reproduction. Do not carry local dependency
-edits as a workaround.
+package without editing `site-packages`. The known parser failure is consistent with the historical docassemble
+breaking release that AssemblyLine had not yet adapted to. Verify the selected
+versions against the current AssemblyLine release; pin a compatible pair or
+report the upstream incompatibility with the smallest reproduction. Do not
+carry local dependency edits as a workaround.
 
 The target should prefer compatible pins/constraints for tightly coupled
 `docassemble-*` packages over independent open-ended minimums. Add a clean
@@ -102,11 +103,59 @@ configuration file using:
 - default debug/host/locale/country/timezone behavior; and
 - foreground background actions.
 
-User configuration remains a deep-merge override. Document the default keys and
-only require config for package-specific seeds, Jinja data, credentials, or a
-changed service policy.
+User configuration remains a deep-merge override. Define and document two
+categories of settings:
 
-### C. Structured compile failures
+- **Simulator settings**, under a reserved simulator configuration table:
+  missing-runtime installation policy, background-action mode, render bindings,
+  and any future local-service modes.
+- **Docassemble/server-compatible settings**, passed through to the effective
+  configuration: `timezone`, `jinja data`, and other explicitly supported
+  values such as database/Redis configuration.
+
+The documentation must state which settings alter simulator behavior and which
+only affect the configuration visible to interview code. In particular, the
+default fake Redis, SQLite/session stubs, local file storage, and foreground
+worker behavior must not be mistaken for real PostgreSQL, Redis, Celery, or
+server storage. Configuration is not required for those defaults; it is only
+required for package-specific seeds, Jinja data, credentials, or a changed
+service policy.
+
+### C. Configuration reference and CLI discoverability
+
+The README and `docs/workspace-layout-and-fidelity.md` must contain one
+canonical configuration reference with:
+
+- all discovery locations and precedence, including global, parent, project,
+  and local override files;
+- the generated effective-config path and TOML-to-YAML normalization;
+- the complete default table and whether each default is an in-process stub,
+  local filesystem behavior, or a pass-through value;
+- simulator-owned settings and accepted values;
+- docassemble-compatible pass-through settings;
+- command-line/config precedence for render bindings and runtime modes;
+- secret handling and the rule that credentials are never printed or committed;
+- examples for a zero-config run and a package with `config.toml` plus
+  `config.py`.
+
+The CLI must make this discoverable without reading source code:
+
+1. Expand global `--help` and relevant command help to describe config
+   discovery, defaults, `--config`, and the no-worker/no-PDF boundaries.
+2. Extend `info` with non-secret config diagnostics: discovered config files in
+   precedence order, effective-config path, active simulator modes, and a
+   concise defaults/capabilities summary. Never emit passwords, API keys,
+   tokens, or raw credential-bearing values.
+3. Add a config inspection option or command that prints the effective,
+   redacted simulator settings and pass-through keys, with an explicit
+   `--json` form for automation. It must distinguish defaults from overrides.
+4. Add tests for help text, zero-config `info`, config precedence, redaction,
+   and JSON/human config inspection.
+
+Do not make a package's `config.py` necessary for standard local service
+substitutes. Keep it for package-specific seed data and behavior.
+
+### D. Structured compile failures
 
 `InterviewCatalog.check()` and `_compile_for_inspection()` currently catch a
 hand-maintained list of built-in exceptions but not docassemble's `DAError`
@@ -125,7 +174,7 @@ Plan:
    errors, and `--json` output. The output must be structured and must not
    contain a traceback on stdout.
 
-### D. Foreground background-action fallback
+### E. Foreground background-action fallback
 
 AssemblyLine's document bundle starts work with `background_action()` and then
 checks a task's readiness before exposing downloads. The local simulator has
@@ -166,7 +215,7 @@ Tests:
   package `config.py` workaround;
 - explicit disabled mode retains the waiting/stub behavior.
 
-### E. PDF capability messaging
+### F. PDF capability messaging
 
 The simulator must continue to omit PDF conversion, but the user-facing
 experience should explain that limitation instead of surfacing a raw missing
@@ -189,7 +238,7 @@ Plan:
 5. Update the target's runtime test instructions so its PDF download screen is
    explicitly deferred to staging rather than treated as a simulator pass.
 
-### F. Explicit generic-object template bindings
+### G. Explicit generic-object template bindings
 
 A direct template render cannot infer which object should be bound to `x`.
 That is an underspecified request, but the simulator can make the workflow
@@ -232,6 +281,7 @@ Tests:
 ### Fast/local
 
 - Runtime acquisition/defaults tests with a fake installer and no config file.
+- Configuration reference, precedence, redaction, help, and inspection tests.
 - Catalog tests for docassemble `DAError` conversion and JSON envelopes.
 - Background-action unit and synthetic-runtime tests.
 - DOCX capability/help and limitation-message tests.
@@ -268,7 +318,8 @@ After the target's compatible AssemblyLine dependency pins are restored:
    compile failures rather than tracebacks.
 4. Supported AssemblyLine background document generation completes in the
    foreground by default, without Celery or a package-specific workaround.
-5. README and CLI output clearly state that DOCX is supported but generated PDF
+5. README and CLI output clearly state the configuration defaults and that
+   DOCX is supported but generated PDF
    conversion and PDF downloads are deployment-only.
 6. Direct generic-object rendering works with an explicit `--bind` value or
    config binding and never mutates saved session state through that binding.
