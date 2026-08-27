@@ -95,9 +95,9 @@ def ensure_importable(
         sys.path.insert(0, root_path)
     root_object = Path(root).resolve()
     try:
-        from docassemble_simulator.bootstrap import install_fake_redis
+        from docassemble_simulator._runtime import SimulatorRuntime
 
-        install_fake_redis()
+        SimulatorRuntime().install_fake_redis()
     except ImportError:
         pass
     required = ["docassemble.base", "docassemble.webapp"]

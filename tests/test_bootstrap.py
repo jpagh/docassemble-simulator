@@ -9,11 +9,11 @@ from docassemble_simulator._artifacts import (
     LocalFileRegistry,
     capture_published_attachments,
 )
-from docassemble_simulator.bootstrap import (
+from docassemble_simulator._runtime import (
+    SimulatorRuntime,
     _configured_timezone,
     _without_pdf_conversion,
     install_attachment_filename_fallback,
-    prepare_environment,
 )
 from docassemble_simulator.config import deep_merge
 
@@ -37,21 +37,18 @@ class TestBootstrapConfig:
         assert _configured_timezone() == "America/Chicago"
 
     def test_prepare_environment_writes_effective_yaml(self, tmp_path, monkeypatch):
-        from docassemble_simulator import bootstrap
-
-        monkeypatch.setattr(bootstrap, "_PREPARED", False)
         target = tmp_path / ".simulator" / "config-effective.yml"
-        prepare_environment(
+        with SimulatorRuntime().activate(
+            tmp_path,
             config_path=target,
             extra_config={
                 "timezone": "America/Chicago",
                 "jinja data": {"category": {"family": "Family"}},
             },
-        )
+        ):
+            import yaml
 
-        import yaml
-
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+            loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
         assert loaded["timezone"] == "America/Chicago"
         assert loaded["jinja data"]["category"]["family"] == "Family"
 
@@ -161,8 +158,6 @@ class TestAttachmentFormats:
         assert result["valid_formats"] == []
 
     def test_finalizer_never_receives_generated_pdf(self, monkeypatch):
-        from docassemble_simulator import bootstrap
-
         seen = {}
 
         class FakeQuestion:
@@ -173,8 +168,6 @@ class TestAttachmentFormats:
         parse = types.ModuleType("docassemble.base.parse")
         parse.Question = FakeQuestion
         monkeypatch.setitem(sys.modules, "docassemble.base.parse", parse)
-        monkeypatch.setattr(bootstrap, "_ATTACHMENT_FALLBACK_INSTALLED", False)
-
         install_attachment_filename_fallback()
         result = {"formats_to_use": ["pdf", "docx"], "valid_formats": ["pdf", "docx"]}
         FakeQuestion().finalize_attachment(None, result, {})
@@ -184,8 +177,8 @@ class TestAttachmentFormats:
 
 
 class TestForegroundBackgroundActions:
-    def test_foreground_task_runs_event_in_current_context(self, monkeypatch):
-        from docassemble_simulator import bootstrap
+    def test_foreground_task_runs_event_in_current_context(self, monkeypatch, tmp_path):
+        from docassemble_simulator import _runtime as runtime_module
 
         thread = types.SimpleNamespace(
             current_dict={"value": 3},
@@ -202,16 +195,19 @@ class TestForegroundBackgroundActions:
         functions = types.ModuleType("docassemble.base.functions")
         functions.this_thread = thread
         monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_ACTION_MODE", "foreground")
-
-        task = bootstrap._foreground_background_action("event", answer=1)
+        with runtime_module.SimulatorRuntime().activate(
+            tmp_path, background_action_mode="foreground"
+        ):
+            task = runtime_module._foreground_background_action("event", answer=1)
 
         assert task.ready() and not task.failed()
         assert task.get() == 7
         assert thread.current_info == {}
 
-    def test_callable_background_response_becomes_completed_task(self, monkeypatch):
-        from docassemble_simulator import bootstrap
+    def test_callable_background_response_becomes_completed_task(
+        self, monkeypatch, tmp_path
+    ):
+        from docassemble_simulator import _runtime as runtime_module
 
         class BackgroundResponseError(Exception):
             def __init__(self, value):
@@ -232,22 +228,26 @@ class TestForegroundBackgroundActions:
         )
         monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
         monkeypatch.setitem(sys.modules, "docassemble.base.error", errors)
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_ACTION_MODE", "foreground")
 
         def action():
             raise BackgroundResponseError("done")
 
-        task = bootstrap._foreground_background_action(action)
+        with runtime_module.SimulatorRuntime().activate(
+            tmp_path, background_action_mode="foreground"
+        ):
+            task = runtime_module._foreground_background_action(action)
 
         assert task.ready() and not task.failed()
         assert task.get() == "done"
         assert thread.current_info == {}
 
-    def test_disabled_mode_retains_pending_task(self, monkeypatch):
-        from docassemble_simulator import bootstrap
+    def test_disabled_mode_retains_pending_task(self, tmp_path):
+        from docassemble_simulator import _runtime as runtime_module
 
-        monkeypatch.setattr(bootstrap, "_BACKGROUND_ACTION_MODE", "disabled")
-        task = bootstrap._foreground_background_action("event")
+        with runtime_module.SimulatorRuntime().activate(
+            tmp_path, background_action_mode="disabled"
+        ):
+            task = runtime_module._foreground_background_action("event")
         assert not task.ready()
         assert not task.failed()
 

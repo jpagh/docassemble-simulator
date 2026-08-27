@@ -13,10 +13,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from docassemble_simulator._outcomes import ErrorKind, Failure
-from docassemble_simulator.bootstrap import (
+from docassemble_simulator._runtime import (
+    SimulatorRuntime,
     bootstrap,
     dyld_fallback_value,
-    prepare_environment,
 )
 from docassemble_simulator.catalog import list_interviews
 from docassemble_simulator.config import (
@@ -240,7 +240,7 @@ def cmd_info(args, root):
     except (ImportError, AttributeError, ModuleNotFoundError) as exc:
         logger.debug("docassemble version lookup failed: %s", exc)
         data["docassemble_version"] = "unknown (docassemble not importable)"
-    from docassemble_simulator.bootstrap import PDF_UNAVAILABLE_MESSAGE
+    from docassemble_simulator._runtime import PDF_UNAVAILABLE_MESSAGE
 
     data["capabilities"] = {
         "docx": "supported",
@@ -615,34 +615,34 @@ def main(argv=None):
         args._resolved_configuration = resolved
         args._simulator_config = config
         settings = resolved.simulator
-        from docassemble_simulator._diagnostics import set_capture_enabled
-
-        set_capture_enabled(settings["seek_diagnostics"] == "capture")
         mode = (
             getattr(args, "background_actions", None) or settings["background_actions"]
         )
         install_missing = settings["missing_runtime"] == "install"
-        prepare_environment(
+        with SimulatorRuntime().activate(
+            root,
             config_path=resolved.effective_path,
             extra_config=config,
-        )
-        if args.command not in {"info", "status", "config"}:
-            if not config and not getattr(args, "offline", False):
-                # Preserve the small composition seam used by embedders that
-                # provide the legacy one-argument preflight callable.
-                ensure_importable(root)
-            else:
-                ensure_importable(
-                    root,
-                    install_missing=install_missing,
-                    offline=getattr(args, "offline", False) or settings["offline"],
+            background_action_mode=mode,
+            seek_diagnostics=settings["seek_diagnostics"],
+        ):
+            if args.command not in {"info", "status", "config"}:
+                if not config and not getattr(args, "offline", False):
+                    # Preserve the small composition seam used by embedders that
+                    # provide the legacy one-argument preflight callable.
+                    ensure_importable(root)
+                else:
+                    ensure_importable(
+                        root,
+                        install_missing=install_missing,
+                        offline=getattr(args, "offline", False) or settings["offline"],
+                    )
+                bootstrap(
+                    stub_define_defined=args.stub_defined,
+                    background_action_mode=mode,
+                    extra_config=config,
                 )
-            bootstrap(
-                stub_define_defined=args.stub_defined,
-                background_action_mode=mode,
-                extra_config=config,
-            )
-        return args.func(args, root)
+            return args.func(args, root)
     except (InputFailure, SystemExit, ValueError) as error:
         message = str(error)
         message = message.removeprefix("error: ")

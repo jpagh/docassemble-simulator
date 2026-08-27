@@ -12,6 +12,7 @@ import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,19 @@ from docassemble_simulator.describe import (
 
 STATE_SCHEMA = 1
 _MISSING = object()
+
+
+def _activate_runtime(method):
+    """Keep runtime resources scoped to each external execution operation."""
+
+    @wraps(method)
+    def run_with_runtime(self, *args, **kwargs):
+        from docassemble_simulator._runtime import SimulatorRuntime
+
+        with SimulatorRuntime().activate(self.root):
+            return method(self, *args, **kwargs)
+
+    return run_with_runtime
 
 
 ExecutionError = Failure
@@ -280,6 +294,7 @@ class InterviewExecution:
         self._identity = self._catalog.identity
         self._store = StateStore(self.root, self._identity)
 
+    @_activate_runtime
     def run(self, operation: Operation) -> ExecutionOutcome:
         with (
             capture_diagnostics() as diagnostics,
@@ -578,6 +593,7 @@ class InterviewExecution:
         )
         return outcome
 
+    @_activate_runtime
     def _with_render_state(
         self,
         preparation: _RenderPreparation,
