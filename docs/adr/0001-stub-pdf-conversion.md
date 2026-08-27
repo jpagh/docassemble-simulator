@@ -31,7 +31,9 @@ Implemented in `bootstrap.py`:
   `Question.finalize_attachment()` dispatches to `word_to_pdf` or another
   converter.
 - The simulator's attachment hooks persist DOCX outputs locally and expose
-  file metadata without requiring server storage.
+  file metadata without requiring server storage. Published DOCX downloads use
+  durable `file://` URIs; these are local artifact references, not fabricated
+  server or PDF URLs.
 - Nameless attachment filenames receive a safe fallback so a skipped PDF does
   not fail after DOCX rendering completes.
 

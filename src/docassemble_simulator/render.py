@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -424,9 +424,15 @@ class InterviewRenderer:
                     prepared.error.message,
                     prepared.error.details or {},
                 ),
+                diagnostics=prepared.diagnostics,
+                attachments=prepared.attachments,
             )
         if isinstance(prepared.result, RenderOutcome):
-            return prepared.result
+            return replace(
+                prepared.result,
+                diagnostics=prepared.diagnostics,
+                attachments=prepared.attachments,
+            )
         return _render_failure("fault", "render action returned an invalid outcome")
 
 

@@ -11,12 +11,14 @@ import re
 import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from docassemble_simulator._artifacts import capture_published_attachments
+from docassemble_simulator._diagnostics import capture_diagnostics, record_seeking
 from docassemble_simulator._files import (
     DestinationError,
     ProtectedDirectory,
@@ -28,11 +30,9 @@ from docassemble_simulator._files import (
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator.catalog import InterviewCatalog
 from docassemble_simulator.describe import (
+    describe_fields,
     describe_question_result,
     describe_seeking,
-    field_required,
-    field_variable,
-    field_visible,
 )
 
 STATE_SCHEMA = 1
@@ -277,50 +277,76 @@ class InterviewExecution:
         self._store = StateStore(self.root, self._identity)
 
     def run(self, operation: Operation) -> ExecutionOutcome:
-        try:
-            if isinstance(operation, Status):
-                return ExecutionOutcome(
-                    True, self._store.load(namespace=False)["outcome"]
+        with (
+            capture_diagnostics() as diagnostics,
+            capture_published_attachments() as attachments,
+        ):
+            try:
+                if isinstance(operation, Status):
+                    outcome = ExecutionOutcome(
+                        True, self._store.load(namespace=False)["outcome"]
+                    )
+                elif isinstance(operation, Start):
+                    outcome = self._mutate(lambda: self._start())
+                elif isinstance(operation, Refresh):
+                    outcome = self._mutate(lambda: self._refresh())
+                elif isinstance(operation, Answer):
+                    outcome = self._mutate(lambda: self._answer(operation))
+                elif isinstance(operation, Seek):
+                    outcome = self._seek_operation(operation)
+                elif isinstance(operation, Evaluate):
+                    outcome = self._evaluate(operation)
+                elif isinstance(operation, Variables):
+                    outcome = self._variables(operation)
+                elif isinstance(operation, Execute):
+                    outcome = self._mutate(lambda: self._execute(operation))
+                else:
+                    raise TypeError(f"unknown operation: {type(operation).__name__}")
+            except ExecutionFailure as error:
+                outcome = ExecutionOutcome(
+                    False, error=ExecutionError(error.kind, str(error), error.details)
                 )
-            if isinstance(operation, Start):
-                return self._mutate(lambda: self._start())
-            if isinstance(operation, Refresh):
-                return self._mutate(lambda: self._refresh())
-            if isinstance(operation, Answer):
-                return self._mutate(lambda: self._answer(operation))
-            if isinstance(operation, Seek):
-                return self._seek_operation(operation)
-            if isinstance(operation, Evaluate):
-                return self._evaluate(operation)
-            if isinstance(operation, Variables):
-                return self._variables(operation)
-            if isinstance(operation, Execute):
-                return self._mutate(lambda: self._execute(operation))
-            raise TypeError(f"unknown operation: {type(operation).__name__}")
-        except ExecutionFailure as error:
-            return ExecutionOutcome(
-                False, error=ExecutionError(error.kind, str(error), error.details)
-            )
-        except (
-            ValueError,
-            TypeError,
-            RuntimeError,
-            AttributeError,
-            KeyError,
-            IndexError,
-            ImportError,
-            OSError,
-            LookupError,
-            NameError,
-            SyntaxError,
-        ) as error:
-            logger.exception("unhandled execution fault")
-            return ExecutionOutcome(
-                False,
-                error=ExecutionError(
-                    ErrorKind.FAULT, f"{type(error).__name__}: {error}"
-                ),
-            )
+            except Exception as error:
+                unresolved = _unresolved_variable(error)
+                if unresolved is not None:
+                    outcome = ExecutionOutcome(
+                        False,
+                        error=ExecutionError(
+                            ErrorKind.UNRESOLVED_VARIABLE,
+                            str(error),
+                            {"sought_variable": unresolved},
+                        ),
+                    )
+                elif isinstance(
+                    error,
+                    (
+                        ValueError,
+                        TypeError,
+                        RuntimeError,
+                        AttributeError,
+                        KeyError,
+                        IndexError,
+                        ImportError,
+                        OSError,
+                        LookupError,
+                        NameError,
+                        SyntaxError,
+                    ),
+                ):
+                    logger.exception("unhandled execution fault")
+                    outcome = ExecutionOutcome(
+                        False,
+                        error=ExecutionError(
+                            ErrorKind.FAULT, f"{type(error).__name__}: {error}"
+                        ),
+                    )
+                else:
+                    raise
+        return replace(
+            outcome,
+            diagnostics=tuple(diagnostics),
+            attachments=tuple(attachments),
+        )
 
     def _mutate(self, action: Callable[[], Any]) -> ExecutionOutcome:
         with self._store.lock():
@@ -329,18 +355,32 @@ class InterviewExecution:
             return ExecutionOutcome(
                 False,
                 error=ExecutionError(
-                    ErrorKind.EXECUTION,
+                    result.get("failure_kind", ErrorKind.EXECUTION),
                     result.get("message", "interview assembly failed"),
                     result,
                 ),
             )
         return ExecutionOutcome(True, result)
 
-    def _start(self):
+    @contextmanager
+    def _prepared_operation(self, namespace: dict[str, Any]):
+        """Own compile, context entry, and namespace preparation once."""
         interview = self._catalog._compile()
+        previous_debug = getattr(interview, "debug", _MISSING)
+        interview.debug = True
+        try:
+            with _interview_context(interview, namespace) as status:
+                self._prepare(interview, namespace)
+                yield interview, status
+        finally:
+            if previous_debug is _MISSING:
+                del interview.debug
+            else:
+                interview.debug = previous_debug
+
+    def _start(self):
         namespace = _fresh_namespace()
-        with _interview_context(interview, namespace) as status:
-            self._prepare(interview, namespace)
+        with self._prepared_operation(namespace) as (interview, status):
             outcome = _assemble(interview, namespace, status)
         self._store.save(namespace, outcome)
         return outcome
@@ -348,9 +388,7 @@ class InterviewExecution:
     def _refresh(self):
         payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self._catalog._compile()
-        with _interview_context(interview, namespace) as status:
-            self._prepare(interview, namespace)
+        with self._prepared_operation(namespace) as (interview, status):
             active = payload.get("active_seek")
             outcome = (
                 _seek(interview, namespace, status, active, False)
@@ -372,11 +410,9 @@ class InterviewExecution:
             raise ExecutionFailure(
                 ErrorKind.INPUT, "the saved outcome is not an answerable screen"
             )
-        interview = self._catalog._compile()
-        with _interview_context(interview, namespace) as status:
-            self._prepare(interview, namespace)
+        with self._prepared_operation(namespace) as (interview, status):
             errors = _apply_assignments(
-                interview, namespace, screen, operation.assignments, operation.code
+                namespace, screen, operation.assignments, operation.code
             )
             if errors:
                 raise ExecutionFailure(
@@ -412,9 +448,7 @@ class InterviewExecution:
                 if operation.fresh
                 else self._store.load()["namespace"]
             )
-            interview = self._catalog._compile()
-            with _interview_context(interview, namespace) as status:
-                self._prepare(interview, namespace)
+            with self._prepared_operation(namespace) as (interview, status):
                 outcome = _seek(
                     interview, namespace, status, operation.variable, operation.trace
                 )
@@ -430,19 +464,26 @@ class InterviewExecution:
             return ExecutionOutcome(
                 False, error=ExecutionError(error.kind, str(error), error.details)
             )
-        except (
-            ValueError,
-            TypeError,
-            RuntimeError,
-            AttributeError,
-            KeyError,
-            IndexError,
-            ImportError,
-            OSError,
-            LookupError,
-            NameError,
-            SyntaxError,
-        ) as error:
+        except Exception as error:
+            if _unresolved_variable(error) is not None:
+                raise
+            if not isinstance(
+                error,
+                (
+                    ValueError,
+                    TypeError,
+                    RuntimeError,
+                    AttributeError,
+                    KeyError,
+                    IndexError,
+                    ImportError,
+                    OSError,
+                    LookupError,
+                    NameError,
+                    SyntaxError,
+                ),
+            ):
+                raise
             logger.exception("seek failed")
             return ExecutionOutcome(
                 False,
@@ -454,9 +495,7 @@ class InterviewExecution:
     def _evaluate(self, operation: Evaluate):
         payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self._catalog._compile()
-        with _interview_context(interview, namespace):
-            self._prepare(interview, namespace)
+        with self._prepared_operation(namespace):
             try:
                 value = eval(operation.expression, namespace)
             except Exception as error:
@@ -470,10 +509,8 @@ class InterviewExecution:
     def _variables(self, operation: Variables):
         payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self._catalog._compile()
         values = {}
-        with _interview_context(interview, namespace):
-            self._prepare(interview, namespace)
+        with self._prepared_operation(namespace):
             for name in sorted(
                 key for key in namespace if key not in {"_internal", "__builtins__"}
             ):
@@ -503,9 +540,7 @@ class InterviewExecution:
     def _execute(self, operation: Execute):
         payload = self._store.load()
         namespace = payload["namespace"]
-        interview = self._catalog._compile()
-        with _interview_context(interview, namespace) as status:
-            self._prepare(interview, namespace)
+        with self._prepared_operation(namespace) as (interview, status):
             try:
                 __builtins__["exec"](operation.code, namespace)
             except (
@@ -542,6 +577,22 @@ class InterviewExecution:
         action: Callable[[dict[str, Any]], Any],
     ) -> ExecutionOutcome:
         """Invoke render's private action while prepared context remains active."""
+        with (
+            capture_diagnostics() as diagnostics,
+            capture_published_attachments() as attachments,
+        ):
+            outcome = self._with_render_state_impl(preparation, action)
+        return replace(
+            outcome,
+            diagnostics=tuple(diagnostics),
+            attachments=tuple(attachments),
+        )
+
+    def _with_render_state_impl(
+        self,
+        preparation: _RenderPreparation,
+        action: Callable[[dict[str, Any]], Any],
+    ) -> ExecutionOutcome:
         try:
             protected = preparation.protected + (
                 ProtectedDirectory(
@@ -564,9 +615,7 @@ class InterviewExecution:
                 namespace = _fresh_namespace()
             else:
                 raise ExecutionFailure(ErrorKind.INPUT, "invalid render source")
-            interview = self._catalog._compile()
-            with _interview_context(interview, namespace) as status:
-                self._prepare(interview, namespace)
+            with self._prepared_operation(namespace) as (interview, status):
                 if isinstance(source, FixtureSource):
                     try:
                         __builtins__["exec"](
@@ -764,6 +813,7 @@ def _interview_context(interview, namespace):
         try:
             yield status
         finally:
+            record_seeking(getattr(status, "seeking", None))
             try:
                 del this_thread.current_dict
             except AttributeError:
@@ -778,7 +828,8 @@ def _assemble(interview, namespace, status):
 
         if isinstance(error, DAErrorNoEndpoint):
             return {"kind": "finished", "message": _first_line(error)}
-        return {
+        unresolved = _unresolved_variable(error)
+        result = {
             "kind": "error",
             "error_type": type(error).__name__,
             "message": _user_facing_error(error),
@@ -786,6 +837,10 @@ def _assemble(interview, namespace, status):
                 traceback.format_exc().strip().splitlines()[-8:]
             ),
         }
+        if unresolved is not None:
+            result["failure_kind"] = ErrorKind.UNRESOLVED_VARIABLE
+            result["sought_variable"] = unresolved
+        return result
     question = getattr(status, "question", None)
     if question is not None and getattr(question, "question_type", None) == "continue":
         return {
@@ -851,28 +906,16 @@ def _seek(interview, namespace, status, variable, trace):
     return outcome
 
 
-def _field_types(interview, screen):
-    result = {
+def _field_types(screen):
+    return {
         field.get("variable"): str(field.get("type", "")).lower()
         for field in screen.get("fields") or []
     }
-    question = (
-        interview.questions_by_name.get(screen.get("question_name"))
-        if screen.get("question_name")
-        else None
-    )
-    for field in getattr(question, "fields", None) or []:
-        name = field_variable(field)
-        if name:
-            result[name] = str(
-                getattr(field, "datatype", "") or result.get(name, "")
-            ).lower()
-    return result
 
 
-def _apply_assignments(interview, namespace, screen, assignments, use_code):
+def _apply_assignments(namespace, screen, assignments, use_code):
     errors = []
-    field_types = _field_types(interview, screen)
+    field_types = _field_types(screen)
     for variable, raw in assignments:
         temporary = "__dasimulator_value"
         previous = namespace.get(temporary, _MISSING)
@@ -976,29 +1019,16 @@ def _validate(interview, namespace, screen):
             errors.append(
                 f"validation code crashed ({type(error).__name__}): {_first_line(error)}"
             )
-    fields = getattr(question, "fields", None)
-    if fields is None:
-        described = [
-            f
-            for f in screen.get("fields") or []
-            if f.get("visible") is not False and f.get("required") is not False
-        ]
-        checks = [(f.get("variable"), f.get("type")) for f in described]
-    else:
-        checks = []
-        for field in fields:
-            if (
-                field_visible(field, namespace)[0] is False
-                or not field_required(field, namespace)
-                or getattr(field, "action", None)
-            ):
-                continue
-            checks.append(
-                (
-                    field_variable(field),
-                    getattr(field, "datatype", ""),
-                )
-            )
+    described = (
+        describe_fields(question, namespace)
+        if question is not None
+        else list(screen.get("fields") or [])
+    )
+    checks = [
+        (field.get("variable"), field.get("type"))
+        for field in described
+        if field.get("visible") is not False and field.get("required") is not False
+    ]
     for variable, datatype in checks:
         if not variable or "signature" in str(datatype).lower():
             continue
@@ -1183,6 +1213,21 @@ def _atomic_pickle(path, payload, *, lock_destination):
         write_pickle,
         lock_destination=lock_destination,
     )
+
+
+def _unresolved_variable(error: BaseException) -> str | None:
+    """Return the variable only for docassemble's exhausted-seek exception."""
+    try:
+        from docassemble.base.error import DAErrorMissingVariable
+    except ImportError:
+        DAErrorMissingVariable = ()
+    if not isinstance(error, DAErrorMissingVariable):
+        return None
+    variable = getattr(error, "variable", None)
+    if variable:
+        return str(variable)
+    match = re.search(r"variable ['\"]([^'\"]+)['\"]", str(error))
+    return match.group(1) if match else "<unknown>"
 
 
 def _first_line(error):

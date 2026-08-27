@@ -15,26 +15,24 @@ logger = logging.getLogger(__name__)
 from docassemble_simulator._outcomes import ErrorKind, Failure
 from docassemble_simulator.bootstrap import (
     bootstrap,
-    deep_merge,
     dyld_fallback_value,
     prepare_environment,
 )
+from docassemble_simulator.catalog import list_interviews
 from docassemble_simulator.config import (
     DOCASSEMBLE_DEFAULTS,
     SIMULATOR_DEFAULTS,
+    deep_merge,
     discover_config_files,
     global_config_path,
     load_config,
-    normalize_config,
     pass_through_config,
     redact_config,
+    resolve_configuration,
     simulator_settings,
 )
-from docassemble_simulator.detect import (
-    ensure_importable,
-    find_package_root,
-    list_interviews,
-)
+from docassemble_simulator.detect import find_package_root
+from docassemble_simulator.preflight import ensure_importable
 
 
 class InputFailure(Exception):
@@ -77,10 +75,22 @@ def _clean(value):
     return value
 
 
-def _envelope(command: str, result: Any = None, error: Any = None):
+def _envelope(
+    command: str,
+    result: Any = None,
+    error: Any = None,
+    diagnostics: Any = (),
+    attachments: Any = (),
+):
     if error is None:
-        return {"ok": True, "command": command, "result": result}
-    return {"ok": False, "command": command, "error": _clean(error)}
+        payload = {"ok": True, "command": command, "result": result}
+    else:
+        payload = {"ok": False, "command": command, "error": _clean(error)}
+    if diagnostics:
+        payload["diagnostics"] = _clean(diagnostics)
+    if attachments:
+        payload["attachments"] = _clean(attachments)
+    return payload
 
 
 def _emit(payload, as_json):
@@ -95,6 +105,14 @@ def _emit(payload, as_json):
         print(f"error: {error['message']}", file=sys.stderr)
         for key, value in (error.get("details") or {}).items():
             print(f"  {key}: {_human(value)}", file=sys.stderr)
+    diagnostics = payload.get("diagnostics") or []
+    if diagnostics:
+        print("diagnostics:")
+        print(_human(diagnostics, 1))
+    attachments = payload.get("attachments") or []
+    if attachments:
+        print("attachments:")
+        print(_human(attachments, 1))
 
 
 def _human(value, indent=0):
@@ -136,7 +154,29 @@ def _execution(args, root):
 
 
 def _config_report(root, config, args=None):
-    settings = simulator_settings(config)
+    resolved = getattr(args, "_resolved_configuration", None) if args else None
+    if resolved is not None:
+        report = resolved.report()
+        settings = resolved.simulator
+    else:
+        settings = simulator_settings(config)
+        report = {
+            "files": [
+                *[str(path) for path in discover_config_files(root)],
+                *(
+                    [str(global_config_path())]
+                    if global_config_path().is_file()
+                    else []
+                ),
+            ],
+            "effective_config": str(root / ".simulator" / "config-effective.yml"),
+            "simulator": redact_config(settings),
+            "pass_through_keys": sorted(pass_through_config(config)),
+            "defaults": {
+                "docassemble": DOCASSEMBLE_DEFAULTS,
+                "simulator": SIMULATOR_DEFAULTS,
+            },
+        }
     command_line = {}
     if args is not None:
         if getattr(args, "offline", False):
@@ -145,31 +185,13 @@ def _config_report(root, config, args=None):
         if getattr(args, "background_actions", None):
             settings["background_actions"] = args.background_actions
             command_line["background_actions"] = args.background_actions
-    effective = pass_through_config(config)
-    report = {
-        "files": [
-            *[str(path) for path in discover_config_files(root)],
-            *([str(global_config_path())] if global_config_path().is_file() else []),
-        ],
-        "effective_config": str(root / ".simulator" / "config-effective.yml"),
-        "simulator": {
-            "missing_runtime": settings["missing_runtime"],
-            "background_actions": settings["background_actions"],
-            "offline": settings["offline"],
-            "render_bindings": redact_config(settings["render_bindings"]),
-        },
-        "pass_through_keys": sorted(effective),
-        "defaults": {
-            "docassemble": DOCASSEMBLE_DEFAULTS,
-            "simulator": SIMULATOR_DEFAULTS,
-            "capabilities": {
-                "docx": "supported",
-                "pdf_conversion": "unavailable (no external converter invoked)",
-                "background_actions": "foreground by default; no Celery worker",
-            },
-        },
-        "command_line_overrides": command_line,
+    report["simulator"] = redact_config(settings)
+    report["defaults"]["capabilities"] = {
+        "docx": "supported",
+        "pdf_conversion": "unavailable (no external converter invoked)",
+        "background_actions": "foreground by default; no Celery worker",
     }
+    report["command_line_overrides"] = command_line
     if args is not None and getattr(args, "config", None):
         report["config_override"] = str(Path(args.config).expanduser().resolve())
     return report
@@ -196,7 +218,7 @@ def _configured_bindings(config, template, command_bindings):
 
 
 def cmd_info(args, root):
-    from docassemble_simulator.detect import list_packages
+    from docassemble_simulator.catalog import list_packages
 
     config = getattr(args, "_simulator_config", {})
     data = {
@@ -316,9 +338,19 @@ def cmd_execution(args, root):
         operation = Execute(code, not args.no_assemble)
     outcome = _execution(args, root).run(operation)
     payload = (
-        _envelope(args.command, outcome.result)
+        _envelope(
+            args.command,
+            outcome.result,
+            diagnostics=outcome.diagnostics,
+            attachments=outcome.attachments,
+        )
         if outcome.ok
-        else _envelope(args.command, error=outcome.error)
+        else _envelope(
+            args.command,
+            error=outcome.error,
+            diagnostics=outcome.diagnostics,
+            attachments=outcome.attachments,
+        )
     )
     _emit(payload, args.json)
     if not outcome.ok:
@@ -359,9 +391,19 @@ def cmd_render(args, root):
     )
     outcome = InterviewRenderer(root, _execution(args, root)).render(request)
     payload = (
-        _envelope("render", outcome.result)
+        _envelope(
+            "render",
+            outcome.result,
+            diagnostics=outcome.diagnostics,
+            attachments=outcome.attachments,
+        )
         if outcome.ok
-        else _envelope("render", error=outcome.error)
+        else _envelope(
+            "render",
+            error=outcome.error,
+            diagnostics=outcome.diagnostics,
+            attachments=outcome.attachments,
+        )
     )
     _emit(payload, args.json)
     if outcome.ok:
@@ -543,30 +585,27 @@ def main(argv=None):
         return 1
     try:
         root = find_package_root(args.root)
-        config = load_config(root)
-        if getattr(args, "config", None):
-            source = Path(args.config).expanduser()
-            if not source.exists():
-                raise ValueError(f"config {source} does not exist")
-            if source.suffix.lower() == ".toml":
-                import tomllib
-
-                loaded = tomllib.loads(source.read_text(encoding="utf-8"))
-            else:
-                import yaml
-
-                loaded = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
-            if not isinstance(loaded, dict):
-                raise ValueError(f"config {source} must be a mapping")
-            deep_merge(config, normalize_config(loaded))
+        command_overrides = {}
+        if getattr(args, "offline", False):
+            command_overrides["offline"] = True
+        if getattr(args, "background_actions", None):
+            command_overrides["background_actions"] = args.background_actions
+        resolved = resolve_configuration(
+            root,
+            override_path=getattr(args, "config", None),
+            base=load_config(root),
+            command_overrides=command_overrides,
+        )
+        config = resolved.values
+        args._resolved_configuration = resolved
         args._simulator_config = config
-        settings = simulator_settings(config)
+        settings = resolved.simulator
         mode = (
             getattr(args, "background_actions", None) or settings["background_actions"]
         )
         install_missing = settings["missing_runtime"] == "install"
         prepare_environment(
-            config_path=root / ".simulator" / "config-effective.yml",
+            config_path=resolved.effective_path,
             extra_config=config,
         )
         if args.command not in {"info", "status", "config"}:

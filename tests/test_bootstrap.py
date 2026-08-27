@@ -1,13 +1,21 @@
 import sys
 import types
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
+import pytest
+
+from docassemble_simulator._artifacts import (
+    LocalFileRegistry,
+    capture_published_attachments,
+)
 from docassemble_simulator.bootstrap import (
     _configured_timezone,
     _without_pdf_conversion,
-    deep_merge,
     install_attachment_filename_fallback,
     prepare_environment,
 )
+from docassemble_simulator.config import deep_merge
 
 
 class TestBootstrapConfig:
@@ -46,6 +54,70 @@ class TestBootstrapConfig:
         loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
         assert loaded["timezone"] == "America/Chicago"
         assert loaded["jinja data"]["category"]["family"] == "Family"
+
+
+class TestLocalAttachments:
+    def test_registry_survives_process_shaped_reconstruction_and_publishes_uri(
+        self, tmp_path
+    ):
+        source = tmp_path / "rendered.docx"
+        source.write_bytes(b"docx")
+        first = LocalFileRegistry(tmp_path / ".simulator" / "files")
+
+        number, extension, mimetype = first.save("Family Plan.docx", source)
+        second = LocalFileRegistry(tmp_path / ".simulator" / "files")
+        with capture_published_attachments() as published:
+            uri = second.url_for(types.SimpleNamespace(number=number))
+
+        found = second.find(number)
+        assert extension == "docx"
+        assert mimetype == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        assert found["filename"] == "Family Plan.docx"
+        assert Path(found["path"]).read_bytes() == b"docx"
+        assert uri == Path(found["path"]).resolve().as_uri()
+        assert len(published) == 1
+        assert published[0].filename == "Family Plan.docx"
+        assert published[0].uri == uri
+
+    def test_corrupt_registry_never_reuses_a_number_or_replaces_a_file(self, tmp_path):
+        directory = tmp_path / ".simulator" / "files"
+        directory.mkdir(parents=True)
+        existing = directory / "dasimulator-1.docx"
+        existing.write_bytes(b"keep")
+        (directory / "index.json").write_text("not json", encoding="utf-8")
+        source = tmp_path / "new.docx"
+        source.write_bytes(b"replace")
+
+        with pytest.raises(RuntimeError, match="file index"):
+            LocalFileRegistry(directory).save("new.docx", source)
+
+        assert existing.read_bytes() == b"keep"
+
+    def test_published_docx_reports_nested_paragraph_structure(self, tmp_path):
+        source = tmp_path / "nested.docx"
+        with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "word/document.xml",
+                """<?xml version="1.0" encoding="UTF-8"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:body><w:p><w:r><w:p><w:r/></w:p></w:r></w:p></w:body>
+                </w:document>""",
+            )
+        registry = LocalFileRegistry(tmp_path / ".simulator" / "files")
+        number, _, _ = registry.save("nested.docx", source)
+
+        with capture_published_attachments() as published:
+            registry.url_for(types.SimpleNamespace(number=number))
+
+        assert len(published) == 1
+        assert published[0].diagnostics[0].kind == "docx-structure"
+        assert published[0].diagnostics[0].details == {
+            "part": "word/document.xml",
+            "problem": "nested-paragraph",
+            "count": 1,
+        }
 
 
 class TestAttachmentFormats:

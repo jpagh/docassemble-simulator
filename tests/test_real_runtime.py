@@ -64,6 +64,28 @@ def real_workspace(tmp_path, real_python):
         "  - Caption: caption\n"
         "    required: False\n"
     )
+    (questions / "download.yml").write_text(
+        "---\n"
+        "modules:\n"
+        "  - docassemble.regression.helpers\n"
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  final_document\n"
+        "---\n"
+        "attachment:\n"
+        "  name: Local document\n"
+        "  filename: local_document\n"
+        "  variable name: final_document\n"
+        "  docx template file: helpers.docx\n"
+        "  valid formats:\n"
+        "    - docx\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Done\n"
+        "subquestion: |\n"
+        '  <a href="${ final_document.docx.url_for() }">Download</a>\n'
+    )
     generator = """
 import sys
 from pathlib import Path
@@ -198,6 +220,39 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
 
     for artifact in (fresh, fixture, from_snapshot, saved):
         _assert_helper_output(artifact)
+
+
+def test_generated_attachment_has_durable_local_uri_and_manifest(
+    real_python, real_workspace
+):
+    payload = _run(
+        real_python,
+        real_workspace,
+        "start",
+        "--interview",
+        "download.yml",
+    )
+
+    assert payload["ok"]
+    assert 'href="None"' not in payload["result"]["subquestion_text"]
+    assert 'href="file://' in payload["result"]["subquestion_text"]
+    assert len(payload["attachments"]) == 1
+    attachment = payload["attachments"][0]
+    assert attachment["filename"].lower() == "local_document.docx"
+    assert Path(attachment["path"]).is_file()
+    assert attachment["uri"] == Path(attachment["path"]).resolve().as_uri()
+    index = real_workspace / ".simulator" / "files" / "index.json"
+    assert index.is_file()
+
+    refreshed = _run(
+        real_python,
+        real_workspace,
+        "refresh",
+        "--interview",
+        "download.yml",
+    )
+    assert refreshed["ok"]
+    assert refreshed["attachments"][0]["uri"] == attachment["uri"]
 
 
 def test_real_date_answer_formats_and_rejections_roll_back(real_python, real_workspace):

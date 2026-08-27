@@ -4,7 +4,8 @@ import sys
 from types import SimpleNamespace
 
 from docassemble_simulator import cli
-from docassemble_simulator._outcomes import ErrorKind, Failure
+from docassemble_simulator._diagnostics import Diagnostic
+from docassemble_simulator._outcomes import ErrorKind, Failure, PublishedAttachment
 
 
 def _run_cli(*arguments):
@@ -100,7 +101,19 @@ def test_command_contract_uses_new_names_and_flags():
 
 
 def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
-    outcome = SimpleNamespace(ok=True, result={"kind": "finished"}, error=None)
+    outcome = SimpleNamespace(
+        ok=True,
+        result={"kind": "finished"},
+        error=None,
+        diagnostics=(
+            Diagnostic(
+                "variable-seek",
+                "seeking M.value",
+                {"variable": "M.value"},
+            ),
+        ),
+        attachments=(),
+    )
     monkeypatch.setattr(
         cli,
         "_execution",
@@ -113,7 +126,42 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
         "ok": True,
         "command": "start",
         "result": {"kind": "finished"},
+        "diagnostics": [
+            {
+                "kind": "variable-seek",
+                "message": "seeking M.value",
+                "details": {"variable": "M.value"},
+            }
+        ],
     }
+
+
+def test_human_output_labels_published_attachment_diagnostics(tmp_path, capsys):
+    attachment = PublishedAttachment(
+        "plan.docx",
+        "docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        tmp_path / "plan.docx",
+        (tmp_path / "plan.docx").as_uri(),
+        (
+            Diagnostic(
+                "docx-structure",
+                "document contains a nested paragraph",
+                {"problem": "nested-paragraph"},
+            ),
+        ),
+    )
+
+    cli._emit(
+        cli._envelope("start", {"kind": "finished"}, attachments=(attachment,)),
+        False,
+    )
+
+    output = capsys.readouterr().out
+    assert "attachments:" in output
+    assert "filename: plan.docx" in output
+    assert "docx-structure" in output
+    assert "nested-paragraph" in output
 
 
 def test_config_report_includes_command_line_runtime_overrides(tmp_path):

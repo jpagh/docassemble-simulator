@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Generic, TypeVar
+
+from docassemble_simulator._diagnostics import Diagnostic
 
 
 class ErrorKind(StrEnum):
@@ -19,6 +22,7 @@ class ErrorKind(StrEnum):
     FAULT = "fault"
     WORKSPACE = "workspace"
     CONFIGURATION = "configuration"
+    UNRESOLVED_VARIABLE = "unresolved-variable"
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,16 @@ class Failure:
             object.__setattr__(self, "details", {})
 
 
+@dataclass(frozen=True)
+class PublishedAttachment:
+    filename: str
+    extension: str
+    mimetype: str
+    path: Path
+    uri: str
+    diagnostics: tuple[Diagnostic, ...] = ()
+
+
 T = TypeVar("T")
 
 
@@ -41,3 +55,5 @@ class Outcome(Generic[T]):
     ok: bool
     result: T | None = None
     error: Failure | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
+    attachments: tuple[PublishedAttachment, ...] = ()

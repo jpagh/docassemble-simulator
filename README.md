@@ -49,6 +49,9 @@ docassemble-simulator seek M.family --activate
   reassembles saved state.
 - `seek` starts from saved state by default. `--fresh` is isolated and
   `--activate` persists the sought screen as the active screen.
+- Lazy variable seeking is reported as ordered `variable-seek` diagnostics,
+  not as errors. A seek fails only when docassemble exhausts its definitions;
+  that produces an `unresolved-variable` error containing the sought variable.
 - `eval` and `vars` rehydrate the namespace but never save it.
 - `exec` assembles and saves by default. `--no-assemble` performs a state-only
   commit after successful Python execution.
@@ -67,7 +70,9 @@ per-interview advisory lock and commit with atomic replacement.
 
 ## JSON and exit codes
 
-Every command accepts `--json` and returns one envelope:
+Every command accepts `--json` and returns one envelope. Successful variable
+seeking may add a top-level `diagnostics` list, and generated download results
+may add a top-level `attachments` manifest:
 
 ```json
 {"ok": true, "command": "answer", "result": {}}
@@ -81,11 +86,12 @@ Every command accepts `--json` and returns one envelope:
 }
 ```
 
-Exit codes are `0` for success (including interview completion), `1` for usage,
-workspace, configuration, or missing-state failures, `2` for validation,
-execution, seek, compile, or render failures, and `3` for unexpected simulator
-faults. Argument-parsing failures follow the same envelope when `--json` is
-present and exit `1`; normal `--help` output remains a successful exit.
+Exit codes are `0` for success (including interview completion and resolved
+lazy seeks), `1` for usage, workspace, configuration, or missing-state
+failures, `2` for validation, unresolved-variable, execution, seek, compile, or
+render failures, and `3` for unexpected simulator faults. Argument-parsing
+failures follow the same envelope when `--json` is present and exit `1`; normal
+`--help` output remains a successful exit.
 
 ## Rendering
 
@@ -125,8 +131,15 @@ type, and available paragraph/line; an included filename is reported only when
 the runtime preserves it reliably. Source and included templates are never
 rewritten or repaired.
 
-DOCX output is supported. Generated PDF conversion remains intentionally
-stubbed: the simulator does not invoke an external converter.
+DOCX output is supported. Generated interview attachments are stored under
+`.simulator/files/`; completion links use real local `file://` URIs and JSON
+includes only files actually published as download results. Intermediate
+numbered files are not counted as published attachments. Published DOCX files
+are checked for nested WordprocessingML paragraphs and any strict-structure
+finding appears on the attachment as a non-mutating diagnostic.
+
+Generated PDF conversion remains intentionally stubbed: the simulator does not
+invoke an external converter or advertise a skipped PDF link.
 
 ## Workspace configuration and defaults
 

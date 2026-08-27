@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,84 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from docassemble_simulator.detect import list_interviews, resolve_interview
+
+def list_packages(root: str | Path) -> list[str]:
+    """Return package names from a docassemble source workspace."""
+    directory = Path(root).resolve() / "docassemble"
+    return [
+        path.name
+        for path in sorted(directory.iterdir())
+        if path.is_dir() and (path / "__init__.py").exists()
+    ]
+
+
+def list_interviews(root: str | Path, package: str | None = None) -> list[str]:
+    """Return canonical interview identities discovered in the catalog."""
+    da_dir = Path(root).resolve() / "docassemble"
+    results: list[str] = []
+    packages = [package] if package else list_packages(root)
+    for package_name in packages:
+        base = da_dir / package_name / "data" / "questions"
+        if not base.is_dir():
+            continue
+        for yaml_path in sorted(base.rglob("*.yml")) + sorted(base.rglob("*.yaml")):
+            relative = yaml_path.relative_to(da_dir / package_name)
+            if any(
+                part.startswith(".") or part == "__pycache__" for part in relative.parts
+            ):
+                continue
+            results.append(f"docassemble.{package_name}:{relative.as_posix()}")
+    return results
+
+
+def guess_main_interview(interviews: list[str]) -> str | None:
+    """Prefer a top-level main interview, then any main, then the first."""
+    mains = [
+        identity
+        for identity in interviews
+        if re.match(r"^docassemble\.[^:]+:data/questions/main\.ya?ml$", identity)
+    ]
+    if mains:
+        return mains[0]
+    others = [
+        identity
+        for identity in interviews
+        if identity.endswith(("main.yml", "main.yaml"))
+    ]
+    return others[0] if others else (interviews[0] if interviews else None)
+
+
+def resolve_interview(
+    root: str | Path, requested: str | None = None
+) -> tuple[str, list[str]]:
+    """Resolve a selector to one canonical Interview definition identity."""
+    interviews = list_interviews(root)
+    if requested is None:
+        chosen = guess_main_interview(interviews)
+        if chosen is None:
+            raise SystemExit(
+                "error: no interview YAML files found under data/questions; "
+                "pass one explicitly with --interview"
+            )
+        return chosen, interviews
+    if ":" in requested and not requested.startswith("/"):
+        return requested, interviews
+    matches = [
+        identity
+        for identity in interviews
+        if identity.rsplit(":", 1)[1] == requested
+        or identity.rsplit(":", 1)[1].endswith("/" + requested)
+    ]
+    if len(matches) == 1:
+        return matches[0], interviews
+    if len(matches) > 1:
+        raise SystemExit(
+            "error: '" + requested + "' is ambiguous:\n  " + "\n  ".join(matches)
+        )
+    raise SystemExit(
+        f"error: interview '{requested}' not found. Available:\n  "
+        + "\n  ".join(interviews[:50])
+    )
 
 
 class CatalogFailure(Exception):
@@ -138,4 +216,12 @@ class InterviewCatalog:
             raise CatalogFailure(f"{type(error).__name__}: {error}") from error
 
 
-__all__ = ["CatalogFailure", "CatalogOutcome", "InterviewCatalog"]
+__all__ = [
+    "CatalogFailure",
+    "CatalogOutcome",
+    "InterviewCatalog",
+    "guess_main_interview",
+    "list_interviews",
+    "list_packages",
+    "resolve_interview",
+]

@@ -138,6 +138,117 @@ def test_start_commits_versioned_per_interview_state_and_status_is_pure(
     assert "main.yml" in next(iter(before))
 
 
+def test_variable_seek_diagnostics_do_not_depend_on_server_debug_mode(
+    tmp_path, monkeypatch, da_stubs
+):
+    class SeekingInterview(FakeInterview):
+        debug = False
+
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = []
+            if self.debug:
+                interview_status.seeking.append({"variable": "M.value"})
+            raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+
+    outcome = execution.run(Start())
+
+    assert outcome.ok
+    assert outcome.diagnostics[0].details == {"variable": "M.value"}
+
+
+def test_resolved_variable_seeking_is_diagnostic_not_failure(
+    tmp_path, monkeypatch, da_stubs
+):
+    class SeekingInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [
+                {"variable": "M.children[0].name"},
+                {
+                    "question": SimpleNamespace(name="children_name"),
+                    "reason": "considering",
+                },
+                {
+                    "question": SimpleNamespace(name="children_name"),
+                    "reason": "asking",
+                },
+            ]
+            raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+
+    outcome = execution.run(Start())
+
+    assert outcome.ok
+    assert [item.kind for item in outcome.diagnostics] == [
+        "variable-seek",
+        "variable-seek",
+        "variable-seek",
+    ]
+    assert outcome.diagnostics[0].details == {"variable": "M.children[0].name"}
+    assert outcome.diagnostics[1].details == {
+        "question": "children_name",
+        "reason": "considering",
+    }
+
+
+def test_exhausted_variable_seeking_is_one_typed_failure(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+
+    class MissingInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [{"variable": "M.unknown"}]
+            raise DAErrorMissingVariable("M.unknown")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, MissingInterview)
+
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.kind == "unresolved-variable"
+    assert outcome.error.details["sought_variable"] == "M.unknown"
+    assert len(outcome.diagnostics) == 1
+    assert outcome.diagnostics[0].details["variable"] == "M.unknown"
+
+
+@pytest.mark.parametrize("activate", [False, True])
+def test_explicit_exhausted_seek_uses_unresolved_variable_failure(
+    tmp_path, monkeypatch, da_stubs, activate
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+
+    class MissingInterview(FakeInterview):
+        def askfor(self, variable, *args, **kwargs):
+            args[2].seeking = [{"variable": variable}]
+            raise DAErrorMissingVariable(variable)
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, MissingInterview)
+    assert execution.run(Start()).ok
+
+    outcome = execution.run(Seek("M.unknown", activate=activate))
+
+    assert not outcome.ok
+    assert outcome.error.kind == "unresolved-variable"
+    assert outcome.error.details["sought_variable"] == "M.unknown"
+
+
 def test_flow_error_is_committed_but_reported_as_failed_operation(
     tmp_path, monkeypatch, da_stubs
 ):
@@ -156,7 +267,7 @@ def test_flow_error_is_committed_but_reported_as_failed_operation(
 
 
 def test_explicit_dependency_pin_wins_over_stale_uv_lock(tmp_path):
-    from docassemble_simulator.detect import _locked_runtime_specs
+    from docassemble_simulator.preflight import _locked_runtime_specs
 
     (tmp_path / "pyproject.toml").write_text(
         '[project]\ndependencies = ["docassemble-base==1.0"]\n',

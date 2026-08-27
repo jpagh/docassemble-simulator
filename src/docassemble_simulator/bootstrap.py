@@ -20,10 +20,8 @@ library assumes a running webapp; these pieces are stubbed:
 from __future__ import annotations
 
 import logging
-import mimetypes
 import os
 import re
-import shutil
 import sys
 import types
 from pathlib import Path
@@ -49,6 +47,7 @@ PDF_UNAVAILABLE_MESSAGE = (
 
 _BACKGROUND_ACTION_MODE = "foreground"
 _BACKGROUND_INSTALLED = False
+_DIAGNOSTIC_LOGGING_INSTALLED = False
 
 
 class PDFConversionUnavailable(RuntimeError):
@@ -189,6 +188,16 @@ def prepare_environment(
     back to the shared home config.
     """
     global _PREPARED
+    if config_path is None:
+        configured = os.environ.get("DA_CONFIG_FILE") if _PREPARED else None
+        config_path = (
+            Path(configured)
+            if configured
+            else Path.cwd() / ".simulator" / "config-effective.yml"
+        )
+    from docassemble_simulator._artifacts import activate_file_registry
+
+    activate_file_registry(config_path.parent / "files")
     if _PREPARED:
         return
     _PREPARED = True
@@ -196,21 +205,16 @@ def prepare_environment(
     if sys.platform == "darwin":
         _append_dyld_fallback()
 
-    if config_path is None:
-        config_path = Path.cwd() / ".simulator" / "config-effective.yml"
-
     text = DEFAULT_CONFIG_TEXT
     if extra_config is not None:
         import yaml
 
-        from docassemble_simulator.config import pass_through_config
+        from docassemble_simulator.config import deep_merge, pass_through_config
 
         merged = yaml.safe_load(text) or {}
         deep_merge(merged, pass_through_config(extra_config))
         text = yaml.safe_dump(merged, sort_keys=False)
 
-    global _SIMULATOR_STORAGE_DIR
-    _SIMULATOR_STORAGE_DIR = config_path.parent / "files"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists() or extra_config is not None:
         config_path.write_text(text, encoding="utf-8")
@@ -237,14 +241,6 @@ def dyld_fallback_value() -> str:
 
 def _append_dyld_fallback() -> None:
     os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = dyld_fallback_value()
-
-
-def deep_merge(base: dict, override: dict) -> None:
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            deep_merge(base[key], value)
-        else:
-            base[key] = value
 
 
 def install_fake_redis() -> None:
@@ -290,9 +286,6 @@ def _configured_timezone() -> str:
 
 
 _ATTACHMENT_FALLBACK_INSTALLED = False
-_SIMULATOR_FILES: dict[int, dict] = {}
-_NEXT_SIMULATOR_FILE = 0
-_SIMULATOR_STORAGE_DIR = Path.cwd() / ".simulator" / "files"
 
 
 def _without_pdf_conversion(result: dict) -> None:
@@ -351,6 +344,35 @@ def install_attachment_filename_fallback() -> None:
     finalize_with_filename._dasimulator_filename_fallback = True
     Question.finalize_attachment = finalize_with_filename
     _ATTACHMENT_FALLBACK_INSTALLED = True
+
+
+def install_diagnostic_logging() -> None:
+    """Route expected lazy-seek logs through operation diagnostics, not stderr."""
+    global _DIAGNOSTIC_LOGGING_INSTALLED
+    if _DIAGNOSTIC_LOGGING_INSTALLED:
+        return
+    try:
+        from docassemble.base import logger as da_logger
+    except ImportError:
+        return
+    previous = da_logger.the_logmessage
+    if getattr(previous, "_dasimulator_diagnostic_dispatch", False):
+        _DIAGNOSTIC_LOGGING_INSTALLED = True
+        return
+
+    def dispatch(message):
+        from docassemble_simulator._diagnostics import (
+            is_collecting,
+            is_lazy_seek_log,
+        )
+
+        if is_collecting() and is_lazy_seek_log(message):
+            return None
+        return previous(message)
+
+    dispatch._dasimulator_diagnostic_dispatch = True
+    da_logger.set_logmessage(dispatch)
+    _DIAGNOSTIC_LOGGING_INSTALLED = True
 
 
 def register_hooks() -> None:
@@ -425,31 +447,28 @@ def register_hooks() -> None:
         def save_numbered_file(
             self, filename, orig_path, yaml_file_name=None, uid=None
         ):
-            global _NEXT_SIMULATOR_FILE
-            _NEXT_SIMULATOR_FILE += 1
-            number = _NEXT_SIMULATOR_FILE
-            suffix = Path(filename).suffix or Path(orig_path).suffix
-            _SIMULATOR_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-            destination = _SIMULATOR_STORAGE_DIR / f"dasimulator-{number}{suffix}"
-            shutil.copyfile(orig_path, destination)
-            mimetype = (
-                mimetypes.guess_type(str(destination))[0] or "application/octet-stream"
-            )
-            _SIMULATOR_FILES[number] = {
-                "path": str(destination),
-                "filename": Path(filename).name,
-                "extension": suffix.lstrip("."),
-                "mimetype": mimetype,
-                "persistent": False,
-                "private": True,
-            }
-            return number, suffix.lstrip("."), mimetype
+            from docassemble_simulator._artifacts import active_file_registry
+
+            registry = active_file_registry()
+            if registry is None:
+                raise RuntimeError("simulator local file registry is not active")
+            return registry.save(filename, orig_path)
 
         @hookimpl
         def file_number_finder(
             self, file_number, filename=None, uids=None, privileged=False
         ):
-            return _SIMULATOR_FILES.get(file_number)
+            from docassemble_simulator._artifacts import active_file_registry
+
+            registry = active_file_registry()
+            return None if registry is None else registry.find(file_number, filename)
+
+        @hookimpl(tryfirst=True)
+        def url_finder(self, file_reference, kwargs):
+            from docassemble_simulator._artifacts import active_file_registry
+
+            registry = active_file_registry()
+            return None if registry is None else registry.url_for(file_reference)
 
         @hookimpl
         def get_configuration(self):
@@ -690,5 +709,6 @@ def bootstrap(
     neutralize_argv()
     apply_session_stubs(stub_define_defined=stub_define_defined)
     register_hooks()
+    install_diagnostic_logging()
     install_attachment_filename_fallback()
     _install_background_action_fallback(background_action_mode)

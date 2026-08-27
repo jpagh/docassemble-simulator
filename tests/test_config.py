@@ -5,6 +5,7 @@ from docassemble_simulator.config import (
     load_config,
     normalize_config,
     redact_config,
+    resolve_configuration,
     simulator_settings,
 )
 
@@ -54,6 +55,29 @@ class TestConfigDiscovery:
         assert normalize_config({"jinja-data": {"category": {"family": "Family"}}}) == {
             "jinja data": {"category": {"family": "Family"}}
         }
+
+    def test_resolved_configuration_owns_override_and_command_precedence(
+        self, tmp_path
+    ):
+        override = tmp_path / "override.yml"
+        override.write_text(
+            "timezone: America/Chicago\nsimulator:\n  background_actions: disabled\n",
+            encoding="utf-8",
+        )
+
+        resolved = resolve_configuration(
+            tmp_path,
+            override_path=override,
+            base={"timezone": "UTC"},
+            command_overrides={"background_actions": "foreground"},
+        )
+
+        assert resolved.pass_through["timezone"] == "America/Chicago"
+        assert resolved.simulator["background_actions"] == "foreground"
+        assert resolved.effective_path == (
+            tmp_path / ".simulator" / "config-effective.yml"
+        )
+        assert resolved.report()["config_override"] == str(override.resolve())
 
     def test_simulator_settings_and_secret_redaction(self):
         settings = simulator_settings(

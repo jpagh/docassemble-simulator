@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from docassemble_simulator.bootstrap import deep_merge
+import yaml
+
+
+def deep_merge(base: dict, override: dict) -> None:
+    """Merge one configuration layer into another in place."""
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_merge(base[key], value)
+        else:
+            base[key] = value
+
 
 PROJECT_CANDIDATES = (
     # Keep this order in descending precedence.  The local form is listed
@@ -177,6 +189,87 @@ def redact_config(value: Any, *, key: str = "") -> Any:
     return value
 
 
+@dataclass(frozen=True)
+class ResolvedConfiguration:
+    """One resolved simulator/docassemble configuration handoff."""
+
+    root: Path
+    values: dict[str, Any]
+    files: tuple[Path, ...]
+    override_path: Path | None = None
+
+    @property
+    def effective_path(self) -> Path:
+        return self.root / ".simulator" / "config-effective.yml"
+
+    @property
+    def simulator(self) -> dict[str, Any]:
+        return simulator_settings(self.values)
+
+    @property
+    def pass_through(self) -> dict[str, Any]:
+        return pass_through_config(self.values)
+
+    def report(self) -> dict[str, Any]:
+        report = {
+            "files": [str(path) for path in self.files],
+            "effective_config": str(self.effective_path),
+            "simulator": redact_config(self.simulator),
+            "pass_through_keys": sorted(self.pass_through),
+            "defaults": {
+                "docassemble": DOCASSEMBLE_DEFAULTS,
+                "simulator": SIMULATOR_DEFAULTS,
+            },
+        }
+        if self.override_path is not None:
+            report["config_override"] = str(self.override_path)
+        return report
+
+
+def _read_override(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(f"config {path} does not exist")
+    if path.suffix.lower() == ".toml":
+        loaded = tomllib.loads(path.read_text(encoding="utf-8"))
+    else:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        raise TypeError(f"config {path} must be a mapping")
+    return normalize_config(loaded)
+
+
+def resolve_configuration(
+    package_root: str | Path,
+    *,
+    override_path: str | Path | None = None,
+    base: dict[str, Any] | None = None,
+    command_overrides: dict[str, Any] | None = None,
+) -> ResolvedConfiguration:
+    """Resolve every source and command policy through one configuration owner."""
+    root = Path(package_root).resolve()
+    values = copy.deepcopy(load_config(root) if base is None else base)
+    selected_override = None
+    if override_path is not None:
+        selected_override = Path(override_path).expanduser().resolve()
+        deep_merge(values, _read_override(selected_override))
+    if command_overrides:
+        simulator = values.setdefault("simulator", {})
+        if not isinstance(simulator, dict):
+            raise TypeError("simulator config must be a table")
+        deep_merge(simulator, command_overrides)
+    global_file = global_config_path().expanduser()
+    files = [
+        *reversed(discover_config_files(root, global_path=global_file)),
+    ]
+    if global_file.is_file():
+        files.insert(0, global_file.resolve())
+    if selected_override is not None:
+        files.append(selected_override)
+    return ResolvedConfiguration(
+        root, normalize_config(values), tuple(files), selected_override
+    )
+
+
 def load_config(
     package_root: str | Path, *, global_path: str | Path | None = None
 ) -> dict[str, Any]:
@@ -201,11 +294,14 @@ __all__ = [
     "DOCASSEMBLE_DEFAULTS",
     "PROJECT_CANDIDATES",
     "SIMULATOR_DEFAULTS",
+    "ResolvedConfiguration",
+    "deep_merge",
     "discover_config_files",
     "global_config_path",
     "load_config",
     "normalize_config",
     "pass_through_config",
     "redact_config",
+    "resolve_configuration",
     "simulator_settings",
 ]

@@ -360,13 +360,13 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
                 out["fields"].append(entry)
         return out
     if qtype == "signature":
-        fields = _describe_all_fields(question, user_dict)
+        fields = describe_fields(question, user_dict)
         for f in fields:
             f["type"] = "signature"
         out["fields"] = fields
         return out
     with _screen_variable_context(result.get("sought") or result.get("orig_sought")):
-        out["fields"] = _describe_all_fields(
+        out["fields"] = describe_fields(
             question, user_dict, result.get("selectcompute") or {}
         )
     return out
@@ -376,9 +376,10 @@ def _raw_fields(question: Any) -> list[Any]:
     return list(getattr(question, "fields", None) or [])
 
 
-def _describe_all_fields(
+def describe_fields(
     question: Any, user_dict: dict, selectcompute: dict | None = None
 ) -> list[dict]:
+    """Return the single live field-facts view used by screen callers."""
     fields = []
     selectcompute = selectcompute or {}
     for field in _raw_fields(question):
@@ -409,6 +410,7 @@ def _describe_all_fields(
 __all__ = [
     "describe_choices",
     "describe_field",
+    "describe_fields",
     "describe_question_result",
     "describe_seeking",
     "field_required",
