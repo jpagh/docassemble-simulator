@@ -80,6 +80,7 @@ class TestLocalAttachments:
         assert len(published) == 1
         assert published[0].filename == "Family Plan.docx"
         assert published[0].uri == uri
+        assert published[0].structure == "ok"
 
     def test_registry_adopts_existing_pre_index_numbered_files(self, tmp_path):
         directory = tmp_path / ".simulator" / "files"

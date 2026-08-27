@@ -93,15 +93,24 @@ class LocalFileRegistry:
         if not path.is_file():
             return None
         uri = path.as_uri()
+        diagnostics = (
+            tuple(validate_docx_structure(path))
+            if str(metadata["extension"]).lower() == "docx"
+            else ()
+        )
+        structure = (
+            "n/a"
+            if str(metadata["extension"]).lower() != "docx"
+            else ("warning" if diagnostics else "ok")
+        )
         attachment = PublishedAttachment(
             str(metadata["filename"]),
             str(metadata["extension"]),
             str(metadata["mimetype"]),
             path,
             uri,
-            tuple(validate_docx_structure(path))
-            if str(metadata["extension"]).lower() == "docx"
-            else (),
+            diagnostics,
+            structure,
         )
         published = _PUBLISHED.get()
         if published is not None and all(item.path != path for item in published):

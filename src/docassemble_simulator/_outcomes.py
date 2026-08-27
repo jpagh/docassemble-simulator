@@ -45,6 +45,7 @@ class PublishedAttachment:
     path: Path
     uri: str
     diagnostics: tuple[Diagnostic, ...] = ()
+    structure: str | None = None
 
 
 T = TypeVar("T")
