@@ -20,6 +20,29 @@ Verified against the retained Family workflow session in
 The repository suite passes with 122 tests, including a real-runtime generated
 attachment and cross-process refresh regression.
 
+Post-review amendments (2026-08-27):
+
+- **Seek-trace switch:** `[simulator] seek_diagnostics = "capture"|"off"` (and
+  `--seek-diagnostics` on every command) disables structured trace capture for
+  completion-check-only runs; lazy-seek log noise stays off in both modes.
+- **Render-seam kind:** render preparation now lifts docassemble's exhausted-
+  seek `failure_kind` to the outer failure kind, so `render` reports
+  `unresolved-variable` exactly like `start`/`seek`.
+- **Bug report:** exact-observations-only report written at
+  `docs/bug-report-nested-paragraphs.md`; not filed upstream or in the target
+  package tracker.
+
+## Follow-up streams
+
+1. **Root-scoped runtime adapter** (architecture finding 03): extract the
+   remaining process-global installation state in `bootstrap.py` (`_PREPARED`,
+   `_BACKGROUND_ACTION_MODE`, `_BACKGROUND_INSTALLED`,
+   `_DIAGNOSTIC_LOGGING_INSTALLED`, `_ATTACHMENT_FALLBACK_INSTALLED`,
+   `_STUBBED`) into one package-private runtime module owning installation,
+   root activation, and runtime policy, per “Selected module shape §4”.
+2. **Triage the nested-paragraph bug report** in the target package's tracker
+   once the report's reproduction is confirmed there.
+
 ## Goal
 
 Turn the successful Family interview run into a reliable simulator contract:

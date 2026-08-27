@@ -91,9 +91,32 @@ class TestConfigDiscovery:
         )
         assert settings["background_actions"] == "disabled"
         assert settings["render_bindings"]["x"] == "clients[0]"
+        assert settings["seek_diagnostics"] == "capture"
         assert redact_config(
             {"password": "dont-print", "nested": {"token": "secret"}}
         ) == {
             "password": "<redacted>",
             "nested": {"token": "<redacted>"},
         }
+
+    def test_seek_diagnostics_mode_normalization_and_validation(self):
+        assert (
+            simulator_settings({"simulator": {"seek_diagnostics": "off"}})[
+                "seek_diagnostics"
+            ]
+            == "off"
+        )
+        assert (
+            simulator_settings({"simulator": {"seek-diagnostics": "disabled"}})[
+                "seek_diagnostics"
+            ]
+            == "off"
+        )
+        assert (
+            simulator_settings({"simulator": {"seek_diagnostics": "true"}})[
+                "seek_diagnostics"
+            ]
+            == "capture"
+        )
+        with pytest.raises(ValueError, match="seek_diagnostics"):
+            simulator_settings({"simulator": {"seek_diagnostics": "sometimes"}})

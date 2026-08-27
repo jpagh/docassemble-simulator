@@ -18,7 +18,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from docassemble_simulator._artifacts import capture_published_attachments
-from docassemble_simulator._diagnostics import capture_diagnostics, record_seeking
+from docassemble_simulator._diagnostics import (
+    capture_diagnostics,
+    is_capture_enabled,
+    record_seeking,
+)
 from docassemble_simulator._files import (
     DestinationError,
     ProtectedDirectory,
@@ -367,16 +371,19 @@ class InterviewExecution:
         """Own compile, context entry, and namespace preparation once."""
         interview = self._catalog._compile()
         previous_debug = getattr(interview, "debug", _MISSING)
-        interview.debug = True
+        forced_debug = is_capture_enabled() and previous_debug is not True
+        if forced_debug:
+            interview.debug = True
         try:
             with _interview_context(interview, namespace) as status:
                 self._prepare(interview, namespace)
                 yield interview, status
         finally:
-            if previous_debug is _MISSING:
-                del interview.debug
-            else:
-                interview.debug = previous_debug
+            if forced_debug:
+                if previous_debug is _MISSING:
+                    del interview.debug
+                else:
+                    interview.debug = previous_debug
 
     def _start(self):
         namespace = _fresh_namespace()
@@ -642,7 +649,7 @@ class InterviewExecution:
                     outcome = _assemble(interview, namespace, status)
                     if outcome.get("kind") == "error":
                         raise ExecutionFailure(
-                            ErrorKind.EXECUTION,
+                            outcome.get("failure_kind", ErrorKind.EXECUTION),
                             outcome.get("message", "assembly failed"),
                             outcome,
                         )

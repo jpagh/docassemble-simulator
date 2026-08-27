@@ -1,11 +1,12 @@
 import sys
 import types
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
 import docassemble_simulator.execution as execution_module
-from docassemble_simulator.execution import InterviewExecution
+from docassemble_simulator.execution import InterviewExecution, Start
 from docassemble_simulator.render import (
     FixtureSource,
     FreshSource,
@@ -114,6 +115,48 @@ def test_render_effects_cannot_target_saved_session_storage(tmp_path):
     assert outcome.error.kind == "input"
     assert "saved-session" in outcome.error.message
     assert not destination.exists()
+
+
+def test_render_assembly_reports_exhausted_seek_as_unresolved_variable(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+    sys.modules["docassemble.base.error"].DAErrorNoEndpoint = type(
+        "DAErrorNoEndpoint", (Exception,), {}
+    )
+    _install_fake_runtime(monkeypatch)
+
+    class MissingInterview:
+        source = SimpleNamespace(path="main.yml", package="docassemble.pkg")
+        questions_by_name: ClassVar[dict] = {}
+
+        def populate_non_pickleable(self, namespace):
+            namespace["name"] = "Alice"
+
+        def assemble(self, namespace, interview_status):
+            raise DAErrorMissingVariable("M.orphan")
+
+    cache = types.ModuleType("docassemble.base.interview_cache")
+    cache.get_interview = lambda identity: MissingInterview()
+    monkeypatch.setitem(sys.modules, "docassemble.base.interview_cache", cache)
+    execution = _workspace(tmp_path)
+    started = execution.run(Start())
+    assert not started.ok and started.error.kind == "unresolved-variable"
+
+    outcome = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest("form.docx", SavedSessionSource(), assemble=True)
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "unresolved-variable"
+    assert outcome.error.details.get("sought_variable") == "M.orphan"
 
 
 def test_destination_validation_precedes_fixture_execution(tmp_path):

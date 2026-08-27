@@ -20,6 +20,17 @@ class Diagnostic:
 _ACTIVE: ContextVar[list[Diagnostic] | None] = ContextVar(
     "docassemble_simulator_diagnostics", default=None
 )
+_ENABLED = True
+
+
+def set_capture_enabled(enabled: bool) -> None:
+    """Turn seek-trace capture on or off for this process."""
+    global _ENABLED
+    _ENABLED = bool(enabled)
+
+
+def is_capture_enabled() -> bool:
+    return _ENABLED
 
 
 @contextmanager
@@ -40,7 +51,7 @@ def is_collecting() -> bool:
 def record_seeking(stages: list[Any] | None) -> None:
     """Convert docassemble's native seeking trace into typed diagnostics."""
     collected = _ACTIVE.get()
-    if collected is None:
+    if collected is None or not _ENABLED:
         return
     for stage in stages or ():
         if not isinstance(stage, dict) or stage.get("done"):
@@ -81,7 +92,9 @@ def is_lazy_seek_log(message: Any) -> bool:
 __all__ = [
     "Diagnostic",
     "capture_diagnostics",
+    "is_capture_enabled",
     "is_collecting",
     "is_lazy_seek_log",
     "record_seeking",
+    "set_capture_enabled",
 ]

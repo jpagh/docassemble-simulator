@@ -185,6 +185,9 @@ def _config_report(root, config, args=None):
         if getattr(args, "background_actions", None):
             settings["background_actions"] = args.background_actions
             command_line["background_actions"] = args.background_actions
+        if getattr(args, "seek_diagnostics", None):
+            settings["seek_diagnostics"] = args.seek_diagnostics
+            command_line["seek_diagnostics"] = args.seek_diagnostics
     report["simulator"] = redact_config(settings)
     report["defaults"]["capabilities"] = {
         "docx": "supported",
@@ -464,6 +467,11 @@ def build_parser():
         choices=("foreground", "disabled"),
         help="background_action mode (default: foreground; no Celery worker)",
     )
+    parser.add_argument(
+        "--seek-diagnostics",
+        choices=("capture", "off"),
+        help="capture the variable-seeking trace (default: capture; off suppresses the trace)",
+    )
     common = argparse.ArgumentParser(add_help=False)
     for flag in ("root", "interview", "config"):
         common.add_argument(f"--{flag}", default=argparse.SUPPRESS)
@@ -475,6 +483,11 @@ def build_parser():
     common.add_argument(
         "--background-actions",
         choices=("foreground", "disabled"),
+        default=argparse.SUPPRESS,
+    )
+    common.add_argument(
+        "--seek-diagnostics",
+        choices=("capture", "off"),
         default=argparse.SUPPRESS,
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -590,6 +603,8 @@ def main(argv=None):
             command_overrides["offline"] = True
         if getattr(args, "background_actions", None):
             command_overrides["background_actions"] = args.background_actions
+        if getattr(args, "seek_diagnostics", None):
+            command_overrides["seek_diagnostics"] = args.seek_diagnostics
         resolved = resolve_configuration(
             root,
             override_path=getattr(args, "config", None),
@@ -600,6 +615,9 @@ def main(argv=None):
         args._resolved_configuration = resolved
         args._simulator_config = config
         settings = resolved.simulator
+        from docassemble_simulator._diagnostics import set_capture_enabled
+
+        set_capture_enabled(settings["seek_diagnostics"] == "capture")
         mode = (
             getattr(args, "background_actions", None) or settings["background_actions"]
         )

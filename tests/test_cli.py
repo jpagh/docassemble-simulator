@@ -165,16 +165,31 @@ def test_human_output_labels_published_attachment_diagnostics(tmp_path, capsys):
 
 
 def test_config_report_includes_command_line_runtime_overrides(tmp_path):
-    args = SimpleNamespace(offline=True, background_actions="disabled", config=None)
+    args = SimpleNamespace(
+        offline=True,
+        background_actions="disabled",
+        seek_diagnostics="off",
+        config=None,
+    )
 
     report = cli._config_report(tmp_path, {}, args)
 
     assert report["simulator"]["offline"] is True
     assert report["simulator"]["background_actions"] == "disabled"
+    assert report["simulator"]["seek_diagnostics"] == "off"
     assert report["command_line_overrides"] == {
         "offline": True,
         "background_actions": "disabled",
+        "seek_diagnostics": "off",
     }
+
+
+def test_seek_diagnostics_flag_is_accepted_on_subcommands():
+    parser = cli.build_parser()
+    start = parser.parse_args(["start", "--seek-diagnostics", "off"])
+    render = parser.parse_args(["render", "form.docx", "--seek-diagnostics", "off"])
+    assert start.seek_diagnostics == "off"
+    assert render.seek_diagnostics == "off"
 
 
 def test_render_requires_explicit_fixture_source(monkeypatch, tmp_path, capsys):

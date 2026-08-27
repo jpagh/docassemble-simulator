@@ -158,6 +158,26 @@ def test_variable_seek_diagnostics_do_not_depend_on_server_debug_mode(
     assert outcome.diagnostics[0].details == {"variable": "M.value"}
 
 
+def test_disabled_seek_diagnostics_captures_nothing_and_keeps_debug_unchanged(
+    tmp_path, monkeypatch, da_stubs
+):
+    from docassemble_simulator import _diagnostics as diagnostics_module
+
+    monkeypatch.setattr(diagnostics_module, "_ENABLED", False)
+
+    class SeekingInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [{"variable": "M.children[0].name"}]
+            raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+
+    outcome = execution.run(Start())
+
+    assert outcome.ok
+    assert outcome.diagnostics == ()
+
+
 def test_resolved_variable_seeking_is_diagnostic_not_failure(
     tmp_path, monkeypatch, da_stubs
 ):

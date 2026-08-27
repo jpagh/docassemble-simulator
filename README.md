@@ -171,6 +171,7 @@ unavailable and no external converter is invoked.
 | `debug`, host, locale, country | `true`, `localhost`, `en_US`, `US` | pass-through defaults |
 | timezone | local timezone, then `America/New_York` | pass-through default |
 | background actions | foreground, no Celery worker | stub |
+| seek diagnostics | `capture` (default), structured `variable-seek` trace | local capture |
 | DOCX/PDF | DOCX supported; PDF conversion unavailable | capability boundary |
 
 Configuration is merged from lowest to highest precedence: the global
@@ -192,8 +193,13 @@ and supports `--json`; credentials are never printed or committed.
 
 Simulator-owned settings belong under `[simulator]`, including
 `missing_runtime = "install"|"disabled"`, `background_actions =
-"foreground"|"disabled"`, `offline`, and `render_bindings` (the legacy
-top-level `[render-bindings]` table is also accepted). Docassemble pass-through
+"foreground"|"disabled"`, `seek_diagnostics = "capture"|"off"`, `offline`,
+and `render_bindings` (the legacy top-level `[render-bindings]` table is also
+accepted). Capture is on by default; `seek_diagnostics = "off"` (or
+`--seek-diagnostics off` on any command) suppresses the structured seeking
+trace and skips forcing the interview's debug trace for runs whose only goal
+is to verify the interview completes end to end. Lazy-seek log noise stays off
+stdout/stderr in both modes. Docassemble pass-through
 settings such as `timezone`, `jinja data`, and supported database
 or Redis values are visible to interview code but do not change simulator
 policy. A package's `config.py` remains optional seed code and is not needed
@@ -208,6 +214,7 @@ timezone = "America/Chicago"
 my_label = "Family"
 [simulator]
 background_actions = "foreground"
+seek_diagnostics = "capture"
 [simulator.render_bindings]
 x = "clients[0]"
 # Alternatively, the legacy top-level spelling is [render-bindings].

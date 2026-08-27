@@ -42,6 +42,7 @@ SIMULATOR_DEFAULTS: dict[str, Any] = {
     "missing_runtime": "install",
     "background_actions": "foreground",
     "render_bindings": {},
+    "seek_diagnostics": "capture",
     "offline": False,
 }
 
@@ -136,6 +137,8 @@ def simulator_settings(config: dict[str, Any] | None) -> dict[str, Any]:
             "background_actions": "background_actions",
             "render-bindings": "render_bindings",
             "render_bindings": "render_bindings",
+            "seek-diagnostics": "seek_diagnostics",
+            "seek_diagnostics": "seek_diagnostics",
             "offline": "offline",
         }
         for key, value in source.items():
@@ -161,6 +164,13 @@ def simulator_settings(config: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("simulator.missing_runtime must be 'install' or 'disabled'")
     if not isinstance(settings["render_bindings"], dict):
         raise TypeError("simulator.render_bindings must be a TOML table")
+    seek = str(settings.get("seek_diagnostics")).lower()
+    if seek in {"capture", "on", "true", "yes", "enabled"}:
+        settings["seek_diagnostics"] = "capture"
+    elif seek in {"off", "disabled", "none", "false", "no"}:
+        settings["seek_diagnostics"] = "off"
+    else:
+        raise ValueError("simulator.seek_diagnostics must be 'capture' or 'off'")
     return settings
 
 
