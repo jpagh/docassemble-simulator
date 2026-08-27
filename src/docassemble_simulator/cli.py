@@ -135,10 +135,18 @@ def _execution(args, root):
     return InterviewExecution(root, args.interview)
 
 
-def _config_report(root, config):
+def _config_report(root, config, args=None):
     settings = simulator_settings(config)
+    command_line = {}
+    if args is not None:
+        if getattr(args, "offline", False):
+            settings["offline"] = True
+            command_line["offline"] = True
+        if getattr(args, "background_actions", None):
+            settings["background_actions"] = args.background_actions
+            command_line["background_actions"] = args.background_actions
     effective = pass_through_config(config)
-    return {
+    report = {
         "files": [
             *[str(path) for path in discover_config_files(root)],
             *([str(global_config_path())] if global_config_path().is_file() else []),
@@ -160,7 +168,11 @@ def _config_report(root, config):
                 "background_actions": "foreground by default; no Celery worker",
             },
         },
+        "command_line_overrides": command_line,
     }
+    if args is not None and getattr(args, "config", None):
+        report["config_override"] = str(Path(args.config).expanduser().resolve())
+    return report
 
 
 def _configured_bindings(config, template, command_bindings):
@@ -192,7 +204,7 @@ def cmd_info(args, root):
         "packages": list_packages(root),
         "interview_count": len(list_interviews(root)),
         "interviews": list_interviews(root),
-        "config": _config_report(root, config),
+        "config": _config_report(root, config, args),
     }
     try:
         import docassemble.base
@@ -205,11 +217,6 @@ def cmd_info(args, root):
         data["docassemble_version"] = "unknown (docassemble not importable)"
     from docassemble_simulator.bootstrap import PDF_UNAVAILABLE_MESSAGE
 
-    report = data["config"]
-    if getattr(args, "background_actions", None):
-        report["simulator"]["background_actions"] = args.background_actions
-    if getattr(args, "config", None):
-        report["config_override"] = str(Path(args.config).expanduser().resolve())
     data["capabilities"] = {
         "docx": "supported",
         "pdf": "unavailable",
@@ -223,7 +230,7 @@ def cmd_info(args, root):
 
 def cmd_config(args, root):
     config = getattr(args, "_simulator_config", {})
-    report = _config_report(root, config)
+    report = _config_report(root, config, args)
     effective = dict(DOCASSEMBLE_DEFAULTS)
     deep_merge(effective, pass_through_config(config))
     report["effective"] = redact_config(effective)
@@ -336,12 +343,7 @@ def cmd_render(args, root):
     elif args.fresh:
         source = FreshSource()
     else:
-        implicit_fixture = root / ".config" / "simulator" / "fixture.py"
-        source = (
-            FixtureSource(implicit_fixture)
-            if implicit_fixture.is_file()
-            else SavedSessionSource()
-        )
+        source = SavedSessionSource()
     request = RenderRequest(
         args.template,
         source,

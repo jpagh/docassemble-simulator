@@ -177,8 +177,9 @@ template-only checks carry over unchanged. Document that mode B is for template-
 checks where the flow cannot reach the needed data; mode A is the default and better.
 
 Implementation simplification: fixture mode follows the workspace convention —
-`render` also honors a `<root>/.config/simulator/fixture.py` if present. Default when
-no session and no fixture: a fresh flow (mode A).
+`render --fixture PATH` explicitly selects a fixture. The default remains the saved
+session source (or an explicitly selected fresh flow); a fixture file's presence
+alone does not change render mode.
 
 ### 4.5 Where it wires in
 

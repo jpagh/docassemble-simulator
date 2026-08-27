@@ -14,10 +14,12 @@ import pytest
 def real_python():
     # Run against the interpreter executing pytest by default.  The override
     # remains useful for a separately provisioned target package.
-    configured = os.environ.get("DASIMULATOR_REAL_PYTHON") or sys.executable
-    interpreter = Path(configured).expanduser().absolute()
+    configured = os.environ.get("DASIMULATOR_REAL_PYTHON")
+    interpreter = Path(configured or sys.executable).expanduser().absolute()
     if not interpreter.is_file():
-        pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
+        if configured:
+            pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
+        pytest.skip("set DASIMULATOR_REAL_PYTHON to a target-package interpreter")
     probe = subprocess.run(
         [str(interpreter), "-c", "import docassemble.base, docassemble.webapp"],
         capture_output=True,
@@ -25,9 +27,14 @@ def real_python():
         check=False,
     )
     if probe.returncode:
-        pytest.fail(
-            "the pytest interpreter cannot import the real docassemble runtime: "
-            + (probe.stderr or probe.stdout).strip()
+        message = (probe.stderr or probe.stdout).strip()
+        if configured:
+            pytest.fail(
+                "the configured real-runtime interpreter cannot import the "
+                "docassemble runtime: " + message
+            )
+        pytest.skip(
+            "docassemble runtime is not installed in the pytest interpreter: " + message
         )
     return interpreter
 

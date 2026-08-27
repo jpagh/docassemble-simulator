@@ -137,19 +137,28 @@ YAML, and render output). Authored files live under `.config/simulator/`:
 .config/simulator/config.toml       # committed declarative settings
 .config/simulator/config.local.toml # optional, ignored override
 .config/simulator/config.py         # optional authored seed code
-.config/simulator/fixture.py         # optional implicit render fixture
+.config/simulator/fixture.py         # optional fixture for explicit --fixture
 .simulator/config-effective.yml     # generated TOML-to-YAML handoff
 .simulator/sessions/                # trusted-local pickle state
 ```
 
-When present, `.config/simulator/fixture.py` is the implicit fixture for a
-render with no explicit source; `--fixture` always wins. A zero-config run uses
-SQLite session/database settings, an in-process fake
+A fixture is used only when selected explicitly with `--fixture`. A
+zero-config run uses SQLite session/database settings, an in-process fake
 Redis, simulator-local file storage, `debug=true`, localhost, `en_US`, `US`,
 the local timezone (falling back to `America/New_York`), and foreground
 background actions. These are local substitutes, not PostgreSQL, Redis,
 Celery, or server storage. DOCX rendering is supported; PDF conversion is
 unavailable and no external converter is invoked.
+
+| Default | Behavior | Category |
+| --- | --- | --- |
+| SQLite database/session settings | simulator-local database substitute | stub |
+| Redis | in-process `FakeRedis` | stub |
+| File storage | files under `.simulator/files/` | local filesystem |
+| `debug`, host, locale, country | `true`, `localhost`, `en_US`, `US` | pass-through defaults |
+| timezone | local timezone, then `America/New_York` | pass-through default |
+| background actions | foreground, no Celery worker | stub |
+| DOCX/PDF | DOCX supported; PDF conversion unavailable | capability boundary |
 
 Configuration is merged from lowest to highest precedence: the global
 `$DOCASSEMBLE_SIMULATOR_CONFIG` (or
@@ -240,9 +249,10 @@ target package's interpreter (which supplies `docassemble` and `python-docx`):
 scripts/test-real-runtime /path/to/target/package/.venv/bin/python
 ```
 
-The real-runtime tests use the current pytest interpreter by default; set
-`DASIMULATOR_REAL_PYTHON` to use a separate target environment. They fail
-clearly when that interpreter cannot run the tests. The fast suite's stubbed
-runtime tests never require `docassemble`. PDF-only download screens are
+The real-runtime tests use the current pytest interpreter when the runtime
+is installed; set `DASIMULATOR_REAL_PYTHON` to use a separate target
+environment. Without either runtime, they skip; a configured target that
+cannot run the tests fails clearly. The fast suite's stubbed runtime tests
+never require `docassemble`. PDF-only download screens are
 intentionally deferred to staging; the simulator gate is DOCX artifact
 rendering and content inspection.

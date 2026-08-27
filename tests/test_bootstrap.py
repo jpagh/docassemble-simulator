@@ -120,6 +120,39 @@ class TestForegroundBackgroundActions:
         assert task.get() == 7
         assert thread.current_info == {}
 
+    def test_callable_background_response_becomes_completed_task(self, monkeypatch):
+        from docassemble_simulator import bootstrap
+
+        class BackgroundResponseError(Exception):
+            def __init__(self, value):
+                self.backgroundresponse = value
+
+        thread = types.SimpleNamespace(
+            current_dict={},
+            current_info={},
+            interview_status=object(),
+            interview=object(),
+        )
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.this_thread = thread
+        errors = types.ModuleType("docassemble.base.error")
+        errors.BackgroundResponseError = BackgroundResponseError
+        errors.BackgroundResponseActionError = type(
+            "BackgroundResponseActionError", (Exception,), {}
+        )
+        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
+        monkeypatch.setitem(sys.modules, "docassemble.base.error", errors)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_ACTION_MODE", "foreground")
+
+        def action():
+            raise BackgroundResponseError("done")
+
+        task = bootstrap._foreground_background_action(action)
+
+        assert task.ready() and not task.failed()
+        assert task.get() == "done"
+        assert thread.current_info == {}
+
     def test_disabled_mode_retains_pending_task(self, monkeypatch):
         from docassemble_simulator import bootstrap
 

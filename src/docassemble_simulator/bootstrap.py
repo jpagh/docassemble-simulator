@@ -524,6 +524,18 @@ def _set_background_action_mode(mode: str | None) -> None:
     _BACKGROUND_ACTION_MODE = normalized
 
 
+def _continue_background_response_action(response):
+    """Follow a response action in the same foreground interview context."""
+    if not isinstance(response, dict) or not response.get("action"):
+        return SimulatorTask(
+            error=RuntimeError("background response action is invalid")
+        )
+    return _foreground_background_action(
+        response["action"],
+        **(response.get("arguments") or {}),
+    )
+
+
 def _foreground_background_action(action, ui_notification=None, **arguments):
     """Run a supported event in the current request and return a task value."""
     if _BACKGROUND_ACTION_MODE == "disabled":
@@ -539,19 +551,27 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
                 "foreground background_action requires an active interview context"
             )
         )
-    if not isinstance(action, str):
-        if not callable(action):
-            return SimulatorTask(error=TypeError("unsupported background action name"))
-        try:
-            return SimulatorTask(action(**arguments))
-        except BaseException as error:  # noqa: BLE001 - task must capture authored failures
-            return SimulatorTask(error=error)
+    if not isinstance(action, str) and not callable(action):
+        return SimulatorTask(error=TypeError("unsupported background action name"))
 
     info = getattr(this_thread, "current_info", {})
     old = {key: info[key] for key in ("action", "arguments") if key in info}
     try:
         info["action"] = action
         info["arguments"] = arguments
+        if callable(action):
+            from docassemble.base.error import (
+                BackgroundResponseActionError,
+                BackgroundResponseError,
+            )
+
+            try:
+                return SimulatorTask(action(**arguments))
+            except BackgroundResponseError as error:
+                return SimulatorTask(error.backgroundresponse)
+            except BackgroundResponseActionError as error:
+                return _continue_background_response_action(error.action)
+
         result = interview.askfor(
             action,
             namespace,
@@ -566,14 +586,8 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
         if question_type == "backgroundresponse":
             return SimulatorTask(getattr(question, "backgroundresponse", None))
         if question_type == "backgroundresponseaction":
-            next_action = getattr(question, "action", None)
-            if not isinstance(next_action, dict) or not next_action.get("action"):
-                return SimulatorTask(
-                    error=RuntimeError("background response action is invalid")
-                )
-            return _foreground_background_action(
-                next_action["action"],
-                **(next_action.get("arguments") or {}),
+            return _continue_background_response_action(
+                getattr(question, "action", None)
             )
         return SimulatorTask(
             error=RuntimeError(

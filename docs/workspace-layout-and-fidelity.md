@@ -62,6 +62,7 @@ simulator.toml
 simulator/config.toml
 .simulator/config.toml
 .config/simulator.toml
+.config/simulator/config.local.toml
 .config/simulator/config.toml
 ```
 
@@ -106,12 +107,12 @@ simulator/config.toml
 
 The setup script lives at `.config/simulator/config.py`,
 paired with the TOML. It is optional because standard local service substitutes
-are built in. It keeps its job: exec in the session namespace before
+are built in. It is executed only as authored seed code; a render fixture must
+be selected explicitly with `--fixture`. It keeps its job: exec in the session namespace before
 every flow pass to stub server-only dependencies (firm data, OAuth, matter
 lookups, …). It is authored and committed; the code resolves a single fixed
-path (no discovery needed for code, unlike the data config). `render`'s
-implicit fixture default follows the same convention
-(`.config/simulator/fixture.py`); an explicit `--fixture` always wins.
+path (no discovery needed for code, unlike the data config). A render fixture is selected explicitly with `--fixture`; the presence of
+`.config/simulator/fixture.py` does not change the default saved-session source.
 
 **The seed contract — pre-create server-scoped globals.** Some docassemble
 globals are defined outside a package's main flow: account-scoped, backed by
@@ -177,7 +178,11 @@ background actions. These are simulator stubs and are not PostgreSQL, Redis,
 Celery, or server storage. DOCX output is supported; generated PDF conversion
 is unavailable, no converter is invoked, and PDF-only download verification is
 deferred to a real deployment/staging environment. Run `info` for this report
-or `config --json` for redacted settings and pass-through keys. Render
+or `config --json` for redacted settings and pass-through keys. The default
+categories are: SQLite, fake Redis, and foreground actions are in-process
+stubs; generated files are local filesystem behavior; debug/host/locale/country
+and timezone are pass-through defaults; DOCX/PDF is a capability boundary.
+Render
 bindings may be written as `[simulator.render_bindings]` (or legacy top-level
 `[render-bindings]`), with optional `[render-bindings."poa.docx"]` entries.
 `--bind x=clients[1]` overrides a template-specific value, which overrides the

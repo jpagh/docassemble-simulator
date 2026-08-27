@@ -155,6 +155,23 @@ def test_flow_error_is_committed_but_reported_as_failed_operation(
     assert execution.run(Evaluate("debug_value")).result["value"] == "42"
 
 
+def test_explicit_dependency_pin_wins_over_stale_uv_lock(tmp_path):
+    from docassemble_simulator.detect import _locked_runtime_specs
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\ndependencies = ["docassemble-base==1.0"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "docassemble-base"\nversion = "2.0"\n',
+        encoding="utf-8",
+    )
+
+    assert _locked_runtime_specs(tmp_path, ["docassemble.base"]) == [
+        "docassemble-base==1.0"
+    ]
+
+
 def test_sessions_are_isolated_by_canonical_interview_identity(
     tmp_path, monkeypatch, da_stubs
 ):

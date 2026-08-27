@@ -116,6 +116,44 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
     }
 
 
+def test_config_report_includes_command_line_runtime_overrides(tmp_path):
+    args = SimpleNamespace(offline=True, background_actions="disabled", config=None)
+
+    report = cli._config_report(tmp_path, {}, args)
+
+    assert report["simulator"]["offline"] is True
+    assert report["simulator"]["background_actions"] == "disabled"
+    assert report["command_line_overrides"] == {
+        "offline": True,
+        "background_actions": "disabled",
+    }
+
+
+def test_render_requires_explicit_fixture_source(monkeypatch, tmp_path, capsys):
+    from docassemble_simulator import render as render_module
+
+    (tmp_path / ".config" / "simulator").mkdir(parents=True)
+    (tmp_path / ".config" / "simulator" / "fixture.py").write_text(
+        "value = 1\n", encoding="utf-8"
+    )
+    captured = []
+    monkeypatch.setattr(cli, "_execution", lambda args, root: object())
+    monkeypatch.setattr(
+        render_module.InterviewRenderer,
+        "render",
+        lambda self, request: (
+            captured.append(request)
+            or render_module.RenderOutcome(
+                True, render_module.RenderResult("form.docx", 0)
+            )
+        ),
+    )
+    args = cli.build_parser().parse_args(["render", "form.docx"])
+
+    assert cli.cmd_render(args, tmp_path) == 0
+    assert isinstance(captured[0].source, render_module.SavedSessionSource)
+
+
 def test_render_json_presents_a_typed_outcome(monkeypatch, tmp_path, capsys):
     from docassemble_simulator import render as render_module
 

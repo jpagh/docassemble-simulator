@@ -84,7 +84,9 @@ def _locked_runtime_specs(root: Path, missing: list[str]) -> list[str]:
             data = tomllib.loads(lock.read_text(encoding="utf-8"))
             for package in data.get("package", []):
                 name = str(package.get("name", "")).lower()
-                if name in wanted and package.get("version"):
+                # An explicit target pin is authoritative even when an old lock
+                # file still records a different resolved version.
+                if name in wanted and name not in specs and package.get("version"):
                     specs[name] = f"{name}=={package['version']}"
         except (OSError, ValueError, tomllib.TOMLDecodeError):
             pass
