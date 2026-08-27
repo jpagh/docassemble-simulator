@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import shutil
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
@@ -71,10 +72,14 @@ class LocalFileRegistry:
         return number, extension, mimetype
 
     def find(self, file_number: int, filename: str | None = None) -> dict | None:
-        del filename
         with flock(self.lock_path):
             value = self._read_index().get("files", {}).get(str(file_number))
-        return dict(value) if isinstance(value, dict) else None
+        if not isinstance(value, dict):
+            return None
+        found = dict(value)
+        if filename:
+            found["filename"] = Path(filename).name
+        return found
 
     def url_for(self, file_reference: Any) -> str | None:
         file_reference = self._first_file(file_reference)
@@ -105,7 +110,25 @@ class LocalFileRegistry:
 
     def _read_index(self) -> dict[str, Any]:
         if not self.index_path.is_file():
-            return {"schema": 1, "next": 1, "files": {}}
+            files = {}
+            highest = 0
+            for path in self.directory.glob("dasimulator-*.*"):
+                match = re.fullmatch(r"dasimulator-(\d+)(\.[^.]+)", path.name)
+                if match is None:
+                    continue
+                number = int(match.group(1))
+                highest = max(highest, number)
+                extension = match.group(2).lstrip(".").lower()
+                files[str(number)] = {
+                    "path": str(path.resolve()),
+                    "filename": path.name,
+                    "extension": extension,
+                    "mimetype": mimetypes.guess_type(path.name)[0]
+                    or "application/octet-stream",
+                    "persistent": False,
+                    "private": True,
+                }
+            return {"schema": 1, "next": highest + 1, "files": files}
         try:
             value = json.loads(self.index_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as error:

@@ -81,6 +81,23 @@ class TestLocalAttachments:
         assert published[0].filename == "Family Plan.docx"
         assert published[0].uri == uri
 
+    def test_registry_adopts_existing_pre_index_numbered_files(self, tmp_path):
+        directory = tmp_path / ".simulator" / "files"
+        directory.mkdir(parents=True)
+        existing = directory / "dasimulator-22.docx"
+        existing.write_bytes(b"old")
+        source = tmp_path / "new.docx"
+        source.write_bytes(b"new")
+        registry = LocalFileRegistry(directory)
+
+        found = registry.find(22, "Family Plan.docx")
+        number, _, _ = registry.save("Next Plan.docx", source)
+
+        assert found["filename"] == "Family Plan.docx"
+        assert Path(found["path"]) == existing
+        assert number == 23
+        assert existing.read_bytes() == b"old"
+
     def test_corrupt_registry_never_reuses_a_number_or_replaces_a_file(self, tmp_path):
         directory = tmp_path / ".simulator" / "files"
         directory.mkdir(parents=True)

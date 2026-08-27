@@ -1,8 +1,24 @@
 # Family-flow feedback and architecture deepening plan
 
-Status: proposal
+Status: implemented
 Date: 2026-08-26
 Depends on: ADR-0001, ADR-0002, ADR-0003
+
+## Implementation verification
+
+Verified against the retained Family workflow session in
+`docassemble-automatedpleading` after implementation:
+
+- `check`: 33 interviews, 0 failures;
+- refresh reached the saved final question with no raw seek output on stderr;
+- 20 current-operation seek stages were reported as structured diagnostics;
+- 14 published DOCX attachments were reported with existing `file://` links;
+- no final link contained `href="None"`; and
+- strict structural checks attributed nested paragraphs to 7 of the 14 logical
+  attachments (the earlier count of 11 included repeated/intermediate files).
+
+The repository suite passes with 122 tests, including a real-runtime generated
+attachment and cross-process refresh regression.
 
 ## Goal
 
