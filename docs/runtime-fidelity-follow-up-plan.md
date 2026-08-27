@@ -10,10 +10,11 @@ Interview in `/Users/jack/Lemma/docassemble-walkup`, while preserving the
 boundary between behavior the simulator can provide locally and behavior that
 requires a real docassemble deployment.
 
-The target package's accidental removal of `docassemble.AssemblyLine` from its
-local dependency configuration is a prerequisite fix in that package, not a
-simulator feature. The target must restore that dependency and use a tested,
-compatible version pair with `docassemble-base`.
+The target package has restored its AssemblyLine dependency; this plan
+assumes the target pins a compatible `docassemble-base`/AssemblyLine/webapp
+set. The simulator should still make missing core runtime dependencies easy to
+recover locally, without silently changing an installed or explicitly pinned
+set.
 
 ## Decisions and boundaries
 
@@ -22,6 +23,14 @@ compatible version pair with `docassemble-base`.
 - The simulator will provide a default foreground implementation of
   `background_action()` for local runs. It will not start Celery or require a
   broker.
+- The simulator will automatically acquire missing `docassemble-base` and
+  `docassemble-webapp` packages when the current interpreter cannot import
+  them. It uses an active project lock/pin when one exists and otherwise asks
+  for the latest available version. It will not upgrade packages that are
+  already installed, and explicit target dependency pins remain authoritative.
+- SQLite, fake Redis, local file storage, debug settings, and other server
+  substitutes have simulator-owned defaults. Configuration is for overrides and
+  package-specific data, not mandatory boilerplate.
 - Foreground background work is a local convenience, not a claim of server
   parity. It may eliminate waiting/reload screens and does not reproduce worker
   isolation, queue latency, retries, or process-level failures.
@@ -42,9 +51,9 @@ include:
   - docassemble.AssemblyLine:assembly_line.yml
 ```
 
-but its current local dependency file must explicitly install AssemblyLine.
-A clean target environment currently reports that the included interview cannot
-be found. Restore the dependency before evaluating parser compatibility.
+and the target dependency configuration must explicitly install AssemblyLine.
+The accidental omission has been corrected. Assume the target now pins a tested
+compatible version set before evaluating simulator behavior.
 
 Then test a version matrix containing the selected `docassemble-base`,
 AssemblyLine, webapp, and Python versions. The `ql_baseline.yml` entries
@@ -58,7 +67,46 @@ The target should prefer compatible pins/constraints for tightly coupled
 `docassemble-*` packages over independent open-ended minimums. Add a clean
 installation smoke test that imports AssemblyLine and runs simulator `check`.
 
-### B. Structured compile failures
+### B. Missing runtime dependency acquisition and simulator defaults
+
+The simulator package intentionally does not declare docassemble as a normal
+Python dependency because it must run inside the target interpreter. When that
+interpreter lacks a core package, however, the failure should be recoverable.
+
+Plan:
+
+1. Extend the preflight import check to distinguish missing
+   `docassemble-base`/`docassemble-webapp` from an import failure caused by an
+   installed package or native library.
+2. If either core package is absent, invoke the available package installer for
+   the current interpreter (`uv pip` first, then a clearly reported `pip`
+   fallback) with fixed package names. Use the active project lock/pin when
+   available; otherwise request the latest versions. Never install based on an
+   import name supplied by the interview, never upgrade an installed package by
+   default, and never overwrite an explicit project lock.
+3. Re-run the imports after installation and report the exact command and
+   actionable failure if acquisition is unavailable or unsuccessful. Provide an
+   opt-out for offline/CI use.
+4. Keep this behavior at the CLI/bootstrap composition boundary; the execution
+   and render modules must not know how packages are installed.
+5. Test missing-base, missing-webapp, already-installed, installer-failure,
+   offline opt-out, and native-library/import-error cases with a fake installer.
+
+Move the current bootstrap defaults into an explicit simulator-defaults model
+(or equivalent private constants) and test that a package works without a
+configuration file using:
+
+- SQLite for server database settings;
+- an in-process fake Redis connection;
+- simulator-local file storage and generated effective configuration;
+- default debug/host/locale/country/timezone behavior; and
+- foreground background actions.
+
+User configuration remains a deep-merge override. Document the default keys and
+only require config for package-specific seeds, Jinja data, credentials, or a
+changed service policy.
+
+### C. Structured compile failures
 
 `InterviewCatalog.check()` and `_compile_for_inspection()` currently catch a
 hand-maintained list of built-in exceptions but not docassemble's `DAError`
@@ -77,7 +125,7 @@ Plan:
    errors, and `--json` output. The output must be structured and must not
    contain a traceback on stdout.
 
-### C. Foreground background-action fallback
+### D. Foreground background-action fallback
 
 AssemblyLine's document bundle starts work with `background_action()` and then
 checks a task's readiness before exposing downloads. The local simulator has
@@ -118,7 +166,7 @@ Tests:
   package `config.py` workaround;
 - explicit disabled mode retains the waiting/stub behavior.
 
-### D. PDF capability messaging
+### E. PDF capability messaging
 
 The simulator must continue to omit PDF conversion, but the user-facing
 experience should explain that limitation instead of surfacing a raw missing
@@ -141,7 +189,7 @@ Plan:
 5. Update the target's runtime test instructions so its PDF download screen is
    explicitly deferred to staging rather than treated as a simulator pass.
 
-### E. Explicit generic-object template bindings
+### F. Explicit generic-object template bindings
 
 A direct template render cannot infer which object should be bound to `x`.
 That is an underspecified request, but the simulator can make the workflow
@@ -151,16 +199,23 @@ Plan:
 
 1. Extend the render request with repeated private bindings such as:
    `--bind x=clients[0]`.
-2. Parse the left side as a simple name and evaluate the right side only after
+2. Accept the same bindings from simulator config, for example a
+   `render-bindings` table keyed by template or a default binding map. For
+   example, `[render-bindings] x = "clients[0]"` supplies a default and
+   `[render-bindings."poa.docx"] x = "clients[1]"` supplies a template-specific
+   value. Define precedence explicitly: command-line bindings override
+   template-specific config, which overrides defaults; neither changes the
+   package's interview namespace.
+3. Parse the left side as a simple name and evaluate the right side only after
    source preparation, rehydration, and authored seed execution.
-3. Apply bindings only to the ephemeral render namespace, immediately before
+4. Apply bindings only to the ephemeral render namespace, immediately before
    template evaluation. Do not write them into saved state or a snapshot unless
    a future option explicitly requests that behavior.
-4. Support saved, fresh, and snapshot sources; fixture rendering remains an
+5. Support saved, fresh, and snapshot sources; fixture rendering remains an
    alternative for fully custom namespaces.
-5. Report invalid expressions and missing roots as input/render errors with the
+6. Report invalid expressions and missing roots as input/render errors with the
    binding name and expression.
-6. Document the generic-object example and explain that `x` is an explicit
+7. Document the generic-object example and explain that `x` is an explicit
    template context variable, not an inferable object identity.
 
 Tests:
@@ -176,6 +231,7 @@ Tests:
 
 ### Fast/local
 
+- Runtime acquisition/defaults tests with a fake installer and no config file.
 - Catalog tests for docassemble `DAError` conversion and JSON envelopes.
 - Background-action unit and synthetic-runtime tests.
 - DOCX capability/help and limitation-message tests.
@@ -184,7 +240,7 @@ Tests:
 
 ### Real target runtime
 
-After restoring and pinning AssemblyLine in the target package:
+After the target's compatible AssemblyLine dependency pins are restored:
 
 - clean environment install;
 - simulator `info`, `check --json`, and question/index commands;
@@ -206,15 +262,17 @@ After restoring and pinning AssemblyLine in the target package:
 
 1. A clean target install has AssemblyLine available and a compatible parser;
    no `site-packages` edits are required.
-2. `check --json` converts missing includes and parser errors into structured
+2. A target interpreter missing core runtime packages can acquire them by
+   default, while installed/pinned packages are not silently upgraded.
+3. `check --json` converts missing includes and parser errors into structured
    compile failures rather than tracebacks.
-3. Supported AssemblyLine background document generation completes in the
+4. Supported AssemblyLine background document generation completes in the
    foreground by default, without Celery or a package-specific workaround.
-4. README and CLI output clearly state that DOCX is supported but generated PDF
+5. README and CLI output clearly state that DOCX is supported but generated PDF
    conversion and PDF downloads are deployment-only.
-5. Direct generic-object rendering works with an explicit `--bind` value and
-   never mutates saved session state through that binding.
-6. The automated suite and real-runtime target smoke tests pass, while the
+6. Direct generic-object rendering works with an explicit `--bind` value or
+   config binding and never mutates saved session state through that binding.
+7. The automated suite and real-runtime target smoke tests pass, while the
    deployment-only matrix remains explicitly identified rather than silently
    substituted.
 
