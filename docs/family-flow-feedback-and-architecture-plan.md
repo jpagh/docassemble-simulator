@@ -34,7 +34,8 @@ Post-review amendments (2026-08-27):
 
 ## Follow-up streams
 
-1. **Root-scoped runtime adapter** (architecture finding 03): extract the
+1. **Root-scoped runtime adapter** (architecture finding 03; recorded in
+   ADR-0005): extract the
    remaining process-global installation state in `bootstrap.py` (`_PREPARED`,
    `_BACKGROUND_ACTION_MODE`, `_BACKGROUND_INSTALLED`,
    `_DIAGNOSTIC_LOGGING_INSTALLED`, `_ATTACHMENT_FALLBACK_INSTALLED`,
