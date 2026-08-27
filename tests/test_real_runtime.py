@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -11,12 +12,23 @@ import pytest
 
 @pytest.fixture
 def real_python():
-    configured = os.environ.get("DASIMULATOR_REAL_PYTHON")
-    if not configured:
-        pytest.skip("set DASIMULATOR_REAL_PYTHON to a target-package interpreter")
+    # Run against the interpreter executing pytest by default.  The override
+    # remains useful for a separately provisioned target package.
+    configured = os.environ.get("DASIMULATOR_REAL_PYTHON") or sys.executable
     interpreter = Path(configured).expanduser().absolute()
     if not interpreter.is_file():
         pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
+    probe = subprocess.run(
+        [str(interpreter), "-c", "import docassemble.base, docassemble.webapp"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode:
+        pytest.fail(
+            "the pytest interpreter cannot import the real docassemble runtime: "
+            + (probe.stderr or probe.stdout).strip()
+        )
     return interpreter
 
 

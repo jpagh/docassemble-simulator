@@ -240,8 +240,9 @@ target package's interpreter (which supplies `docassemble` and `python-docx`):
 scripts/test-real-runtime /path/to/target/package/.venv/bin/python
 ```
 
-The lane skips when no interpreter is configured and fails clearly when the
-supplied runtime cannot run the tests. The fast suite uses stubbed runtime
-modules and never requires `docassemble`. PDF-only download screens are
+The real-runtime tests use the current pytest interpreter by default; set
+`DASIMULATOR_REAL_PYTHON` to use a separate target environment. They fail
+clearly when that interpreter cannot run the tests. The fast suite's stubbed
+runtime tests never require `docassemble`. PDF-only download screens are
 intentionally deferred to staging; the simulator gate is DOCX artifact
 rendering and content inspection.
