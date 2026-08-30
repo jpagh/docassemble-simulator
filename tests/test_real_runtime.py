@@ -248,6 +248,7 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
             str(real_python),
             "--compile",
             "--start",
+            "--prepare-runtime-data",
             "--match",
             r"^(yesno|fields|attachment-simple|objects-from-file|age_in_years|sections(-horizontal|-auto-open)?|path-and-mimetype|device(-ip)?|relationships)\.yml$",
             "--output",

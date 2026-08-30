@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,10 +15,12 @@ from docassemble_simulator.demo_corpus import (
     Expectation,
     FixtureCase,
     RuntimePackage,
+    _network_sandbox_command,
     apply_expectations,
     discover_fixture_cases,
     load_expectations,
     resolve_provenance,
+    run_case,
     run_subprocess,
     select_cases,
     stage_corpus,
@@ -62,7 +67,10 @@ def test_resolve_provenance_uses_exact_runtime_content(tmp_path: Path) -> None:
     case = resolve_provenance(discover_fixture_cases(fixtures)[0], packages)
 
     assert case.package == "demo"
-    assert case.identity == "docassemble.demo:data/questions/examples/sample.yml"
+    assert (
+        case.canonical_package_path
+        == "docassemble.demo:data/questions/examples/sample.yml"
+    )
     assert case.runtime_drift is False
 
 
@@ -110,6 +118,7 @@ def test_stage_corpus_overlays_fixture_without_mutating_runtime(tmp_path: Path) 
         target = staged.root / "docassemble/base/data/questions/examples/sample.yml"
         assert target.read_text() == "question: Fixture\n"
         assert staged.root / "docassemble/base/__init__.py"
+        assert (target.stat().st_mode & 0o222) == 0
 
     assert (
         package.path / "data/questions/examples/sample.yml"
@@ -118,7 +127,12 @@ def test_stage_corpus_overlays_fixture_without_mutating_runtime(tmp_path: Path) 
 
 def test_select_cases_shards_stably_and_covers_the_input() -> None:
     cases = tuple(
-        FixtureCase(Path(f"{name}.yml"), Path(f"{name}.yml"), name, identity=name)
+        FixtureCase(
+            Path(f"{name}.yml"),
+            Path(f"{name}.yml"),
+            name,
+            canonical_package_path=name,
+        )
         for name in ("a", "b", "c", "d", "e")
     )
     shards = [set(select_cases(cases, shard=(index, 2))) for index in (1, 2)]
@@ -126,6 +140,76 @@ def test_select_cases_shards_stably_and_covers_the_input() -> None:
     assert shards[0].isdisjoint(shards[1])
     assert shards[0] | shards[1] == set(cases)
     assert select_cases(cases, matcher=re.compile(r"^[ab]")) == cases[:2]
+
+
+def _envelope_interpreter(tmp_path: Path, envelope: dict) -> Path:
+    interpreter = tmp_path / "envelope-python"
+    interpreter.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        f"print({json.dumps(json.dumps(envelope))})\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def test_start_rejects_unknown_outcome_kind(tmp_path: Path) -> None:
+    case = FixtureCase(
+        tmp_path / "sample.yml",
+        Path("sample.yml"),
+        "hash",
+        package="base",
+        canonical_package_path="docassemble.base:data/questions/examples/sample.yml",
+    )
+    staged_root = tmp_path / "staged"
+    (staged_root / "docassemble/base").mkdir(parents=True)
+
+    result = run_case(
+        case,
+        staged_root,
+        _envelope_interpreter(tmp_path, {"ok": True, "result": {"kind": "mystery"}}),
+        "start",
+    )
+
+    assert result.classification == "protocol_error"
+    assert result.error_kind == "protocol"
+    assert "outcome kind" in (result.message or "")
+
+
+def test_runtime_drift_is_reported_without_running_interview(tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    interpreter = tmp_path / "interpreter"
+    interpreter.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    case = FixtureCase(
+        tmp_path / "sample.yml",
+        Path("sample.yml"),
+        "hash",
+        package="base",
+        canonical_package_path="docassemble.base:data/questions/examples/sample.yml",
+        runtime_drift=True,
+    )
+
+    result = run_case(case, tmp_path, interpreter, "start")
+
+    assert result.classification == "runtime_drift"
+    assert not marker.exists()
+    assert "docassemble-demo-case-" not in result.as_dict()["reproduction"]
+
+
+def test_network_sandbox_denies_socket_access() -> None:
+    if sys.platform != "darwin" and shutil.which("bwrap") is None:
+        with pytest.raises(CorpusError, match="network-denial sandbox"):
+            _network_sandbox_command(["python3", "-c", "pass"])
+        return
+    command = _network_sandbox_command(
+        ["python3", "-c", "import socket; socket.socket().connect(('127.0.0.1', 1))"]
+    )
+    result = run_subprocess(command, timeout=5)
+
+    assert result.returncode != 0
+    assert "Operation not permitted" in result.stderr
 
 
 def test_run_subprocess_terminates_the_process_group_on_timeout() -> None:
@@ -164,13 +248,26 @@ def test_expectations_are_narrow_and_mark_only_matching_failures(
 
     matched = apply_expectations([result], [expectation])
     assert matched[0].expectation == expectation.reason
+    assert matched[0].expectation_category == expectation.category
 
-    with pytest.raises(CorpusError, match="must constrain"):
+    with pytest.raises(CorpusError, match="returncode, error_kind, and message"):
         apply_expectations(
-            [result], [Expectation(result.interview, result.phase, reason="too broad")]
+            [result],
+            [
+                Expectation(
+                    result.interview,
+                    result.phase,
+                    error_kind="compile",
+                    reason="too broad",
+                )
+            ],
         )
 
     report = write_reports(matched, tmp_path / "report")
+    assert report["error_kinds"] == {"compile": 1}
+    assert report["outcome_kinds"] == {}
+    assert report["expectation_categories"] == {"capability-boundary": 1}
+    assert "reproduction" in (tmp_path / "report/results.jsonl").read_text()
     assert report["unexpected"] == 0
     assert (tmp_path / "report/results.jsonl").read_text().count("\n") == 1
 

@@ -287,9 +287,14 @@ scripts/test-demo-corpus \
 ```
 
 The runner stages `docassemble.base` and `docassemble.demo`, overlays all 966
-`examples/*.yml` fixtures, runs each phase in a subprocess with a timeout, and
-writes `results.jsonl`, `summary.json`, and `summary.md`. Use `--match`,
-`--shard INDEX/COUNT`, and `--expectations tests/demo_corpus_expectations.toml`
-for focused or reviewed runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default
-fixture root and `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the
-script itself.
+`examples/*.yml` fixtures, runs each phase in a subprocess with a timeout and a
+network-denial sandbox, and writes `results.jsonl`, `summary.json`, and
+`summary.md`. Reviewed canonical provenance is checked from
+`tests/demo_corpus_provenance.toml`; regenerate it with
+`--write-provenance-manifest PATH` when the fixture/runtime pair is intentionally
+updated. Missing optional NLTK corpora remain a dependency boundary by default;
+use `--prepare-runtime-data` explicitly when provisioning them is intended. Use
+`--match`, `--shard INDEX/COUNT`, and
+`--expectations tests/demo_corpus_expectations.toml` for focused or reviewed
+runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
+`DASIMULATOR_DEMO_PYTHON` for the interpreter used by the script itself.

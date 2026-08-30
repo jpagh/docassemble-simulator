@@ -49,6 +49,28 @@ PDF_UNAVAILABLE_MESSAGE = (
     "docassemble deployment for PDF downloads."
 )
 
+
+def _file_metadata(reference, *, resolved_path: Path | None = None) -> dict:
+    """Build the common docassemble file-reference metadata shape."""
+    if resolved_path is None:
+        value = str(reference)
+        parsed = urlparse(value)
+        filename = Path(parsed.path).name or "download"
+        path = value
+    else:
+        filename = resolved_path.name
+        path = str(resolved_path)
+    extension = Path(filename).suffix.removeprefix(".")
+    mimetype, _ = mimetypes.guess_type(filename)
+    return {
+        "path": path,
+        "fullpath": path,
+        "filename": filename,
+        "extension": extension,
+        "mimetype": mimetype,
+    }
+
+
 _BACKGROUND_ACTION_MODE = "foreground"
 _BACKGROUND_INSTALLED = False
 _DIAGNOSTIC_LOGGING_INSTALLED = False
@@ -483,10 +505,8 @@ def register_hooks() -> None:
         # unmarked methods are silently ignored.
         @hookimpl(tryfirst=True)
         def get_ext_and_mimetype(self, filename):
-            path = Path(str(filename))
-            extension = path.suffix.removeprefix(".").lower() or None
-            mimetype, _ = mimetypes.guess_type(path.name)
-            return extension, mimetype
+            metadata = _file_metadata(filename)
+            return metadata["extension"].lower() or None, metadata["mimetype"]
 
         @hookimpl
         def get_default_voice(self):
@@ -553,16 +573,7 @@ def register_hooks() -> None:
             if isinstance(file_reference, str) and file_reference.startswith(
                 ("http://", "https://")
             ):
-                parsed = urlparse(file_reference)
-                filename = Path(parsed.path).name or "download"
-                mimetype, _ = mimetypes.guess_type(filename)
-                return {
-                    "path": file_reference,
-                    "fullpath": file_reference,
-                    "filename": filename,
-                    "extension": Path(filename).suffix.removeprefix("."),
-                    "mimetype": mimetype,
-                }
+                return _file_metadata(file_reference)
             path = _authored_file_path(
                 file_reference, question=question, folder=folder, package=package
             )
@@ -572,14 +583,7 @@ def register_hooks() -> None:
                 return None
             if path is None:
                 return None
-            mimetype, _ = mimetypes.guess_type(path.name)
-            return {
-                "path": str(path),
-                "fullpath": str(path),
-                "filename": path.name,
-                "extension": path.suffix.removeprefix("."),
-                "mimetype": mimetype,
-            }
+            return _file_metadata(path, resolved_path=path)
 
         @hookimpl(tryfirst=True)
         def file_number_finder(
