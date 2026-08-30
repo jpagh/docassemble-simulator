@@ -249,7 +249,7 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
             "--compile",
             "--start",
             "--match",
-            r"^(yesno|fields|attachment-simple|objects-from-file)\.yml$",
+            r"^(yesno|fields|attachment-simple|objects-from-file|age_in_years)\.yml$",
             "--output",
             str(output),
         ],
@@ -262,7 +262,7 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     summary = json.loads((output / "summary.json").read_text())
-    assert summary["total"] == 8
+    assert summary["total"] == 10
     assert summary["unexpected"] == 0
 
 

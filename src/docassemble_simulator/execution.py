@@ -782,7 +782,10 @@ def _fresh_namespace() -> dict[str, Any]:
     nav = initial.get("nav") or DAObject(instanceName="nav", sections=None)
     return {
         "_internal": internal,
-        "user": {"is_authenticated": True, "roles": ["user"]},
+        # ``user`` is an interview namespace root, not the server's
+        # authentication record. The latter lives in InterviewStatus.current_info;
+        # pre-seeding this name as a dict prevents ``objects: user`` from creating
+        # its declared DAObject.
         "session": DAObject(instanceName="session"),
         "M": DAObject(instanceName="M"),
         "nav": nav,
