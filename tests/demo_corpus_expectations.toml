@@ -1,0 +1,6 @@
+# Reviewed expectations for deliberate interview failures and simulator capability
+# boundaries belong here. Each entry must identify a canonical interview and phase,
+# constrain the observed failure, and explain why it is expected.
+#
+# This baseline is intentionally empty: optional dependencies that happen to be
+# unavailable must be reviewed against the runtime before being whitelisted.

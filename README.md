@@ -276,3 +276,20 @@ cannot run the tests fails clearly. The fast suite's stubbed runtime tests
 never require `docassemble`. PDF-only download screens are
 intentionally deferred to staging; the simulator gate is DOCX artifact
 rendering and content inspection.
+
+The sibling docassemble-yaml example corpus has an isolated compile/start lane:
+
+```sh
+scripts/test-demo-corpus \
+  --fixtures /path/to/docassemble-yaml/lsp/tests/fixtures \
+  --python /path/to/package/.venv/bin/python \
+  --compile --start --output .simulator/demo-corpus-results
+```
+
+The runner stages `docassemble.base` and `docassemble.demo`, overlays all 966
+`examples/*.yml` fixtures, runs each phase in a subprocess with a timeout, and
+writes `results.jsonl`, `summary.json`, and `summary.md`. Use `--match`,
+`--shard INDEX/COUNT`, and `--expectations tests/demo_corpus_expectations.toml`
+for focused or reviewed runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default
+fixture root and `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the
+script itself.

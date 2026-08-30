@@ -20,6 +20,7 @@ library assumes a running webapp; these pieces are stubbed:
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import re
 import sys
@@ -397,6 +398,43 @@ def install_diagnostic_logging() -> None:
     _DIAGNOSTIC_LOGGING_INSTALLED = True
 
 
+def _authored_file_path(
+    file_reference,
+    *,
+    question=None,
+    folder=None,
+    package=None,
+):
+    """Resolve a package data reference inside the active simulator root."""
+    if not isinstance(file_reference, str):
+        return None
+    reference = file_reference.strip()
+    if ":" in reference:
+        package, reference = reference.split(":", 1)
+    if package is None and question is not None:
+        package = getattr(question, "package", None)
+    if package is None:
+        from docassemble.base.functions import this_thread
+
+        package = getattr(this_thread, "current_package", None)
+    if not package:
+        return None
+    package_path = str(package).removeprefix("docassemble.").replace(".", "/")
+    relative = reference.lstrip("/")
+    if not relative.startswith("data/"):
+        relative = f"data/{folder or 'static'}/{relative}"
+    relative_path = Path(relative)
+    if any(part in {"", ".", ".."} for part in relative_path.parts):
+        return None
+    root = _ACTIVE_ROOT.get()
+    if root is None:
+        return None
+    # The corpus runner uses package symlinks in per-case workspaces, so use
+    # the validated lexical path here rather than comparing resolved paths.
+    candidate = root / "docassemble" / package_path / relative_path
+    return candidate if candidate.is_file() else None
+
+
 def register_hooks() -> None:
     """Register the webapp hook modules plus a minimal local implementation.
 
@@ -476,7 +514,36 @@ def register_hooks() -> None:
                 raise RuntimeError("simulator local file registry is not active")
             return registry.save(filename, orig_path)
 
-        @hookimpl
+        @hookimpl(tryfirst=True)
+        def file_finder(
+            self,
+            file_reference,
+            question=None,
+            folder=None,
+            package=None,
+            filename=None,
+            return_nonexistent=False,
+            uids=None,
+        ):
+            path = _authored_file_path(
+                file_reference, question=question, folder=folder, package=package
+            )
+            if path is None and return_nonexistent and isinstance(file_reference, str):
+                # Preserve the standard hook's missing-file semantics while
+                # keeping path construction confined to the active workspace.
+                return None
+            if path is None:
+                return None
+            mimetype, _ = mimetypes.guess_type(path.name)
+            return {
+                "path": str(path),
+                "fullpath": str(path),
+                "filename": path.name,
+                "extension": path.suffix.removeprefix("."),
+                "mimetype": mimetype,
+            }
+
+        @hookimpl(tryfirst=True)
         def file_number_finder(
             self, file_number, filename=None, uids=None, privileged=False
         ):
@@ -490,7 +557,12 @@ def register_hooks() -> None:
             from docassemble_simulator._artifacts import active_file_registry
 
             registry = active_file_registry()
-            return None if registry is None else registry.url_for(file_reference)
+            if registry is not None:
+                url = registry.url_for(file_reference)
+                if url is not None:
+                    return url
+            path = _authored_file_path(file_reference)
+            return None if path is None else path.resolve().as_uri()
 
         @hookimpl
         def get_configuration(self):

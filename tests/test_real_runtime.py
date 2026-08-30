@@ -222,6 +222,74 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         _assert_helper_output(artifact)
 
 
+def test_demo_corpus_runner_canary(real_python, tmp_path):
+    fixture_root = Path(
+        os.environ.get(
+            "DASIMULATOR_DEMO_FIXTURES",
+            Path(__file__).resolve().parents[2]
+            / "docassemble-yaml"
+            / "lsp"
+            / "tests"
+            / "fixtures",
+        )
+    )
+    if not fixture_root.is_dir():
+        pytest.skip("demo corpus checkout is not available")
+    repository = Path(__file__).resolve().parents[1]
+    output = tmp_path / "demo-corpus"
+    completed = subprocess.run(
+        [
+            str(real_python),
+            "-m",
+            "docassemble_simulator.demo_corpus",
+            "--fixtures",
+            str(fixture_root),
+            "--python",
+            str(real_python),
+            "--compile",
+            "--start",
+            "--match",
+            r"^(yesno|fields|attachment-simple|objects-from-file)\.yml$",
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repository,
+        env=_environment(),
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["total"] == 8
+    assert summary["unexpected"] == 0
+
+
+def test_demo_package_compiles_with_all_includes(real_python):
+    package_root = (
+        Path(
+            os.environ.get(
+                "DASIMULATOR_DEMO_FIXTURES",
+                Path(__file__).resolve().parents[2]
+                / "docassemble-yaml"
+                / "lsp"
+                / "tests"
+                / "fixtures",
+            )
+        )
+        / "demo_package"
+    )
+    if not package_root.is_dir():
+        pytest.skip("demo package fixture is not available")
+
+    payload = _run(real_python, package_root, "check")
+
+    assert payload["ok"]
+    assert payload["result"]["checked"] == 3
+    assert payload["result"]["failures"] == 0
+
+
 def test_generated_attachment_has_durable_local_uri_and_manifest(
     real_python, real_workspace
 ):
