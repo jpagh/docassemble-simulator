@@ -44,6 +44,36 @@ For every corpus file:
    successful first screen alone is not treated as proof of end-to-end flow
    fidelity.
 
+## Exploratory findings
+
+The first fresh-start sweep is exploratory, not a green baseline. The following
+failures were confirmed as simulator gaps and fixed with focused canaries:
+
+- declared interview objects named `user` were shadowed by the authentication
+  dictionary;
+- `sections.yml`, `sections-horizontal.yml`, and `sections-auto-open.yml` need
+  the simulated request method;
+- `device.yml` and `device-ip.yml` need deterministic request metadata;
+- package-local `path_and_mimetype()` lookups need the base-package fallback and
+  URL metadata; and
+- documented `Individual` spouse convenience methods are absent from the
+  installed base runtime even though the relationship demo uses them.
+
+The following remain deliberate boundaries or environment-dependent cases and
+must not be hidden by broad expectations: generated PDF conversion and PDF
+field/signature operations, browser/session/authentication behavior, network or
+OAuth services, database-backed services, machine-learning integrations,
+optional Python dependencies, LibreOffice, and interviews that intentionally
+raise an error or contain an infinite loop. `DAFile` image creation still needs
+an explicit local numbered-file storage adapter before its demos can be called
+supported. Incomplete interviews that reference undefined variables should stay
+visible as authored-flow failures rather than being treated as simulator
+successes.
+
+The current corpus reports should therefore be read case-by-case: a nonzero
+exploratory count is not evidence by itself that all cases are simulator bugs,
+and missing shards/timeouts are not a completed baseline.
+
 ## Proposed implementation
 
 ### 1. Add a corpus runner

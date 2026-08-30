@@ -806,7 +806,12 @@ def _build_status():
                 "email": "agent@localhost",
                 "device_id": "dasimulator",
                 "the_user_id": "1",
-            }
+                "theid": "1",
+            },
+            "session": "dasimulator",
+            "method": "GET",
+            "clientip": "127.0.0.1",
+            "headers": {"User-Agent": "Mozilla/5.0 (Simulator; X11; Linux x86_64)"},
         }
     )
 

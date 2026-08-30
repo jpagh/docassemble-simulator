@@ -28,6 +28,7 @@ import types
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -418,7 +419,7 @@ def _authored_file_path(
 
         package = getattr(this_thread, "current_package", None)
     if not package:
-        return None
+        package = "docassemble.base"
     package_path = str(package).removeprefix("docassemble.").replace(".", "/")
     relative = reference.lstrip("/")
     if not relative.startswith("data/"):
@@ -456,6 +457,23 @@ def register_hooks() -> None:
     ):
         if pm.get_plugin(name) is None:
             pm.register(module, name=name)
+    from docassemble.base.util import Individual
+
+    # These convenience relationship methods are present in the documented
+    # interview API but are commented out in the installed base package.
+    if not hasattr(Individual, "get_spouse"):
+        Individual.get_spouse = lambda self, tree, create=False: self.get_peer_relation(
+            "spouse", tree, create=create
+        )
+    if not hasattr(Individual, "set_spouse"):
+        Individual.set_spouse = lambda self, target, tree: self.set_peer_relationship(
+            target, "spouse", tree, replace=True
+        )
+    if not hasattr(Individual, "is_spouse_of"):
+        Individual.is_spouse_of = lambda self, target, tree: self.is_peer_relation(
+            target, "spouse", tree
+        )
+
     import pluggy
 
     hookimpl = pluggy.HookimplMarker("docassemble")
@@ -463,6 +481,13 @@ def register_hooks() -> None:
     class MinimalHooks:
         # pluggy >=1.0 requires the project's HookimplMarker on every method;
         # unmarked methods are silently ignored.
+        @hookimpl(tryfirst=True)
+        def get_ext_and_mimetype(self, filename):
+            path = Path(str(filename))
+            extension = path.suffix.removeprefix(".").lower() or None
+            mimetype, _ = mimetypes.guess_type(path.name)
+            return extension, mimetype
+
         @hookimpl
         def get_default_voice(self):
             return ""
@@ -525,6 +550,19 @@ def register_hooks() -> None:
             return_nonexistent=False,
             uids=None,
         ):
+            if isinstance(file_reference, str) and file_reference.startswith(
+                ("http://", "https://")
+            ):
+                parsed = urlparse(file_reference)
+                filename = Path(parsed.path).name or "download"
+                mimetype, _ = mimetypes.guess_type(filename)
+                return {
+                    "path": file_reference,
+                    "fullpath": file_reference,
+                    "filename": filename,
+                    "extension": Path(filename).suffix.removeprefix("."),
+                    "mimetype": mimetype,
+                }
             path = _authored_file_path(
                 file_reference, question=question, folder=folder, package=package
             )
