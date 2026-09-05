@@ -458,13 +458,132 @@ def _authored_file_path(
     return candidate if candidate.is_file() else None
 
 
-def register_hooks() -> None:
-    """Register the webapp hook modules plus a minimal local implementation.
+class _SimulatorRuntimeBindings:
+    """Shared simulator behavior behind the docassemble runtime adapters."""
 
-    The webapp default implementations of several hooks raise
-    NotImplementedError when no server is running; MinimalHooks overrides
-    exactly those.
-    """
+    def get_ext_and_mimetype(self, filename):
+        metadata = _file_metadata(filename)
+        return metadata["extension"].lower() or None, metadata["mimetype"]
+
+    def get_default_voice(self):
+        return ""
+
+    def get_default_dialect(self):
+        return ""
+
+    def get_default_language(self):
+        return "en"
+
+    def get_default_locale(self):
+        return "en_US"
+
+    def get_default_timezone(self):
+        return _configured_timezone()
+
+    def get_default_country(self):
+        return "US"
+
+    def get_hostname(self):
+        return "localhost"
+
+    def get_debug_status(self):
+        return True
+
+    def get_main_page_parts(self):
+        return {}
+
+    def get_button_class_prefix(self):
+        return "btn"
+
+    def save_numbered_file(self, filename, orig_path, yaml_file_name=None, uid=None):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        registry = active_file_registry()
+        if registry is None:
+            raise RuntimeError("simulator local file registry is not active")
+        return registry.save(filename, orig_path)
+
+    def file_finder(
+        self,
+        file_reference,
+        question=None,
+        folder=None,
+        package=None,
+        filename=None,
+        return_nonexistent=False,
+        uids=None,
+    ):
+        if isinstance(file_reference, str) and file_reference.startswith(
+            ("http://", "https://")
+        ):
+            return _file_metadata(file_reference)
+        path = _authored_file_path(
+            file_reference, question=question, folder=folder, package=package
+        )
+        if path is None and return_nonexistent and isinstance(file_reference, str):
+            # Preserve the standard hook's missing-file semantics while
+            # keeping path construction confined to the active workspace.
+            return None
+        if path is None:
+            return None
+        return _file_metadata(path, resolved_path=path)
+
+    def file_number_finder(
+        self, file_number, filename=None, uids=None, privileged=False
+    ):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        registry = active_file_registry()
+        return None if registry is None else registry.find(file_number, filename)
+
+    def url_finder(self, file_reference, kwargs=None):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        options = dict(kwargs or {})
+        question = options.get("question", options.get("_question"))
+        package = options.get("package", options.get("_package"))
+        registry = active_file_registry()
+        if registry is not None:
+            url = registry.url_for(file_reference)
+            if url is not None:
+                return url
+        path = _authored_file_path(file_reference, question=question, package=package)
+        return None if path is None else path.resolve().as_uri()
+
+    def get_configuration(self):
+        # Return the live server config (not a stub): interviews read
+        # `jinja data` and package settings through this hook.
+        import docassemble.base.config as da_config_mod
+
+        cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
+        cfg.setdefault("debug", True)
+        cfg.setdefault("host", "localhost")
+        cfg.setdefault("locale", "en_US")
+        cfg.setdefault("country", "US")
+        return cfg
+
+
+def _install_relationship_methods() -> None:
+    from docassemble.base.util import Individual
+
+    # These convenience relationship methods are present in the documented
+    # interview API but are commented out in some installed base packages.
+    if not hasattr(Individual, "get_spouse"):
+        Individual.get_spouse = lambda self, tree, create=False: self.get_peer_relation(
+            "spouse", tree, create=create
+        )
+    if not hasattr(Individual, "set_spouse"):
+        Individual.set_spouse = lambda self, target, tree: self.set_peer_relationship(
+            target, "spouse", tree, replace=True
+        )
+    if not hasattr(Individual, "is_spouse_of"):
+        Individual.is_spouse_of = lambda self, target, tree: self.is_peer_relation(
+            target, "spouse", tree
+        )
+
+
+def _register_pluggy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
+    """Register simulator bindings through the docassemble 1.10 hook API."""
     from docassemble.base.plugin_manager import pm
     from docassemble.webapp import main as webapp_main
     from docassemble.webapp.interview import hooks as interview_hooks
@@ -479,22 +598,6 @@ def register_hooks() -> None:
     ):
         if pm.get_plugin(name) is None:
             pm.register(module, name=name)
-    from docassemble.base.util import Individual
-
-    # These convenience relationship methods are present in the documented
-    # interview API but are commented out in the installed base package.
-    if not hasattr(Individual, "get_spouse"):
-        Individual.get_spouse = lambda self, tree, create=False: self.get_peer_relation(
-            "spouse", tree, create=create
-        )
-    if not hasattr(Individual, "set_spouse"):
-        Individual.set_spouse = lambda self, target, tree: self.set_peer_relationship(
-            target, "spouse", tree, replace=True
-        )
-    if not hasattr(Individual, "is_spouse_of"):
-        Individual.is_spouse_of = lambda self, target, tree: self.is_peer_relation(
-            target, "spouse", tree
-        )
 
     import pluggy
 
@@ -505,59 +608,55 @@ def register_hooks() -> None:
         # unmarked methods are silently ignored.
         @hookimpl(tryfirst=True)
         def get_ext_and_mimetype(self, filename):
-            metadata = _file_metadata(filename)
-            return metadata["extension"].lower() or None, metadata["mimetype"]
+            return bindings.get_ext_and_mimetype(filename)
 
         @hookimpl
         def get_default_voice(self):
-            return ""
+            return bindings.get_default_voice()
 
         @hookimpl
         def get_default_dialect(self):
-            return ""
+            return bindings.get_default_dialect()
 
         @hookimpl
         def get_default_language(self):
-            return "en"
+            return bindings.get_default_language()
 
         @hookimpl
         def get_default_locale(self):
-            return "en_US"
+            return bindings.get_default_locale()
 
         @hookimpl
         def get_default_timezone(self):
-            return _configured_timezone()
+            return bindings.get_default_timezone()
 
         @hookimpl
         def get_default_country(self):
-            return "US"
+            return bindings.get_default_country()
 
         @hookimpl
         def get_hostname(self):
-            return "localhost"
+            return bindings.get_hostname()
 
         @hookimpl
         def get_debug_status(self):
-            return True
+            return bindings.get_debug_status()
 
         @hookimpl
         def get_main_page_parts(self):
-            return {}
+            return bindings.get_main_page_parts()
 
         @hookimpl
         def get_button_class_prefix(self):
-            return "btn"
+            return bindings.get_button_class_prefix()
 
         @hookimpl
         def save_numbered_file(
             self, filename, orig_path, yaml_file_name=None, uid=None
         ):
-            from docassemble_simulator._artifacts import active_file_registry
-
-            registry = active_file_registry()
-            if registry is None:
-                raise RuntimeError("simulator local file registry is not active")
-            return registry.save(filename, orig_path)
+            return bindings.save_numbered_file(
+                filename, orig_path, yaml_file_name=yaml_file_name, uid=uid
+            )
 
         @hookimpl(tryfirst=True)
         def file_finder(
@@ -570,57 +669,116 @@ def register_hooks() -> None:
             return_nonexistent=False,
             uids=None,
         ):
-            if isinstance(file_reference, str) and file_reference.startswith(
-                ("http://", "https://")
-            ):
-                return _file_metadata(file_reference)
-            path = _authored_file_path(
-                file_reference, question=question, folder=folder, package=package
+            return bindings.file_finder(
+                file_reference,
+                question=question,
+                folder=folder,
+                package=package,
+                filename=filename,
+                return_nonexistent=return_nonexistent,
+                uids=uids,
             )
-            if path is None and return_nonexistent and isinstance(file_reference, str):
-                # Preserve the standard hook's missing-file semantics while
-                # keeping path construction confined to the active workspace.
-                return None
-            if path is None:
-                return None
-            return _file_metadata(path, resolved_path=path)
 
         @hookimpl(tryfirst=True)
         def file_number_finder(
             self, file_number, filename=None, uids=None, privileged=False
         ):
-            from docassemble_simulator._artifacts import active_file_registry
-
-            registry = active_file_registry()
-            return None if registry is None else registry.find(file_number, filename)
+            return bindings.file_number_finder(
+                file_number, filename=filename, uids=uids, privileged=privileged
+            )
 
         @hookimpl(tryfirst=True)
         def url_finder(self, file_reference, kwargs):
-            from docassemble_simulator._artifacts import active_file_registry
-
-            registry = active_file_registry()
-            if registry is not None:
-                url = registry.url_for(file_reference)
-                if url is not None:
-                    return url
-            path = _authored_file_path(file_reference)
-            return None if path is None else path.resolve().as_uri()
+            return bindings.url_finder(file_reference, kwargs)
 
         @hookimpl
         def get_configuration(self):
-            # Return the live server config (not a stub): interviews read
-            # `jinja data` and package settings through this hook.
-            import docassemble.base.config as da_config_mod
-
-            cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
-            cfg.setdefault("debug", True)
-            cfg.setdefault("host", "localhost")
-            cfg.setdefault("locale", "en_US")
-            cfg.setdefault("country", "US")
-            return cfg
+            return bindings.get_configuration()
 
     if pm.get_plugin("dasimulator.minimal") is None:
         pm.register(MinimalHooks(), name="dasimulator.minimal")
+
+
+def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
+    """Install simulator bindings on docassemble 1.9's server object."""
+    from docassemble.base import functions
+
+    server = functions.server
+    server.get_ext_and_mimetype = bindings.get_ext_and_mimetype
+    server.get_default_voice = bindings.get_default_voice
+    server.get_default_dialect = bindings.get_default_dialect
+    server.get_default_language = bindings.get_default_language
+    server.get_default_locale = bindings.get_default_locale
+    server.get_default_timezone = bindings.get_default_timezone
+    server.get_default_country = bindings.get_default_country
+    server.default_voice = bindings.get_default_voice()
+    server.default_dialect = bindings.get_default_dialect()
+    server.default_language = bindings.get_default_language()
+    server.default_locale = bindings.get_default_locale()
+    server.default_timezone = bindings.get_default_timezone()
+    server.default_country = bindings.get_default_country()
+    server.hostname = bindings.get_hostname()
+    server.debug = bindings.get_debug_status()
+    server.debug_status = bindings.get_debug_status()
+    server.main_page_parts = bindings.get_main_page_parts()
+    server.button_class_prefix = bindings.get_button_class_prefix()
+    server.daconfig = bindings.get_configuration()
+
+    def file_finder(
+        file_reference,
+        question=None,
+        folder=None,
+        package=None,
+        filename=None,
+        return_nonexistent=False,
+        uids=None,
+        **kwargs,
+    ):
+        question = kwargs.pop("_question", question)
+        package = kwargs.pop("_package", package)
+        return bindings.file_finder(
+            file_reference,
+            question=question,
+            folder=folder,
+            package=package,
+            filename=filename,
+            return_nonexistent=return_nonexistent,
+            uids=uids,
+        )
+
+    def file_number_finder(
+        file_number, filename=None, uids=None, privileged=False, **kwargs
+    ):
+        return bindings.file_number_finder(
+            file_number,
+            filename=filename,
+            uids=uids,
+            privileged=privileged,
+        )
+
+    def url_finder(file_reference, options=None, **kwargs):
+        normalized = dict(options or {})
+        normalized.update(kwargs)
+        return bindings.url_finder(file_reference, normalized)
+
+    server.file_finder = file_finder
+    server.file_number_finder = file_number_finder
+    server.url_finder = url_finder
+    server.save_numbered_file = bindings.save_numbered_file
+
+
+def register_hooks() -> None:
+    """Install simulator hooks through either supported docassemble interface."""
+    _install_relationship_methods()
+    bindings = _SimulatorRuntimeBindings()
+    try:
+        from docassemble.base.plugin_manager import pm  # noqa: F401
+    except ModuleNotFoundError as error:
+        if error.name != "docassemble.base.plugin_manager":
+            raise
+        _register_legacy_runtime_bindings(bindings)
+    else:
+        _register_pluggy_runtime_bindings(bindings)
 
 
 _STUBBED = False

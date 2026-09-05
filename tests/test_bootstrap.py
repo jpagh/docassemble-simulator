@@ -14,8 +14,128 @@ from docassemble_simulator._runtime import (
     _configured_timezone,
     _without_pdf_conversion,
     install_attachment_filename_fallback,
+    register_hooks,
 )
 from docassemble_simulator.config import deep_merge
+
+
+class TestRuntimeBindings:
+    def test_legacy_runtime_installs_file_metadata_on_existing_server(
+        self, monkeypatch
+    ):
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        functions = types.ModuleType("docassemble.base.functions")
+        original_server = types.SimpleNamespace()
+        functions.server = original_server
+        config = types.ModuleType("docassemble.base.config")
+        config.daconfig = {}
+        util = types.ModuleType("docassemble.base.util")
+        util.Individual = type("Individual", (), {})
+        da.base = base
+        base.functions = functions
+        base.config = config
+        base.util = util
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.functions": functions,
+            "docassemble.base.config": config,
+            "docassemble.base.util": util,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+
+        register_hooks()
+
+        assert functions.server is original_server
+        assert original_server.get_ext_and_mimetype("pleading.docx") == (
+            "docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    def test_legacy_runtime_normalizes_server_keywords_and_defaults(
+        self, monkeypatch, tmp_path
+    ):
+        from docassemble_simulator import _runtime as runtime_module
+
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.server = types.SimpleNamespace()
+        config = types.ModuleType("docassemble.base.config")
+        config.daconfig = {
+            "jinja data": {"category": "Family"},
+            "timezone": "America/New_York",
+        }
+        util = types.ModuleType("docassemble.base.util")
+        util.Individual = type("Individual", (), {})
+        da.base = base
+        base.config = config
+        base.functions = functions
+        base.util = util
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.config": config,
+            "docassemble.base.functions": functions,
+            "docassemble.base.util": util,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+
+        seen = {}
+        authored = tmp_path / "authored-file"
+
+        def fake_authored_file_path(reference, **kwargs):
+            seen.update(reference=reference, **kwargs)
+            return authored
+
+        monkeypatch.setattr(
+            runtime_module, "_authored_file_path", fake_authored_file_path
+        )
+        register_hooks()
+        server = functions.server
+
+        assert server.get_default_voice() == ""
+        assert server.get_default_dialect() == ""
+        assert server.get_default_language() == "en"
+        assert server.get_default_locale() == "en_US"
+        assert server.get_default_timezone() == "America/New_York"
+        assert server.get_default_country() == "US"
+        assert server.default_voice == ""
+        assert server.default_dialect == ""
+        assert server.default_language == "en"
+        assert server.default_locale == "en_US"
+        assert server.default_timezone == "America/New_York"
+        assert server.default_country == "US"
+        assert server.hostname == "localhost"
+        assert server.debug is True
+        assert server.debug_status is True
+        assert server.main_page_parts == {}
+        assert server.button_class_prefix == "btn"
+        assert server.daconfig["jinja data"] == {"category": "Family"}
+
+        assert server.file_finder(
+            "template.docx",
+            _question="question",
+            _package="docassemble.package",
+            folder="templates",
+            ignored=True,
+        )["path"] == str(authored)
+        assert seen == {
+            "reference": "template.docx",
+            "question": "question",
+            "folder": "templates",
+            "package": "docassemble.package",
+        }
+
+        register_hooks()
+        assert server.file_finder("template.docx", _package="docassemble.package")[
+            "path"
+        ] == str(authored)
 
 
 class TestBootstrapConfig:
