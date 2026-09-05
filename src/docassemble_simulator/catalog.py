@@ -115,13 +115,14 @@ class InterviewCatalog:
     def _compile(self, identity: str | None = None):
         """Internal definition loader shared with execution."""
         from docassemble.base.interview_cache import get_interview
-        from docassemble.base.thread_context import empty_globals, global_context
+
+        from docassemble_simulator._runtime import runtime_context
 
         selected = identity or self.identity
         saved_argv = list(sys.argv)
         sys.argv[:] = ["docassemble-simulator", selected]
         try:
-            with global_context(empty_globals()):
+            with runtime_context():
                 return get_interview(selected)
         finally:
             sys.argv[:] = saved_argv

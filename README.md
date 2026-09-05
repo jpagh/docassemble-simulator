@@ -19,6 +19,14 @@ upgrading installed packages. Use `--offline` or `[simulator].offline = true`
 to disable acquisition. An installed package that fails because of a native
 library is reported as an import failure, not silently reinstalled.
 
+The supported compatibility floor is docassemble 1.9.8, including the legacy
+thread-local/server runtime interface; the current 1.10+ family uses its modern
+hook interface. Both paths are exercised by the real-runtime lane. The target
+package interpreter is authoritative: a global `jda` or unrelated Python
+installation is not a substitute. On macOS, docassemble's native dependencies
+(such as zbar, commonly installed with Homebrew) must also be available to
+that interpreter; native-library failures are reported rather than hidden.
+
 ## Command model
 
 Run from a directory containing `docassemble/<package>/`, or pass `--root` and

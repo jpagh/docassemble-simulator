@@ -82,6 +82,98 @@ _ACTIVE_BACKGROUND_ACTION_MODE: ContextVar[str | None] = ContextVar(
 )
 
 
+class RuntimeCompatibilityError(ValueError):
+    """An installed runtime lacks a required simulator capability."""
+
+
+class _ModernContextAdapter:
+    def __init__(self, context):
+        self.context = context
+
+    @contextmanager
+    def activate(self, namespace=None):
+        with self.context.global_context(self.context.empty_globals()):
+            if namespace is None:
+                yield
+            else:
+                with self.context.user_dict_context(namespace):
+                    yield
+
+
+class _LegacyContextAdapter:
+    def __init__(self, functions):
+        self.functions = functions
+        for name in (
+            "server",
+            "this_thread",
+            "populate_this_thread_defaults",
+            "backup_thread_variables",
+            "restore_thread_variables",
+        ):
+            if not hasattr(functions, name):
+                raise RuntimeCompatibilityError(
+                    f"Unsupported legacy docassemble runtime: missing functions.{name}. "
+                    "Use a complete supported runtime in the target package interpreter."
+                )
+
+    @contextmanager
+    def activate(self, namespace=None):
+        functions = self.functions
+        thread = functions.this_thread
+        previous = dict(vars(thread))
+        try:
+            # The native backup helper mutates misc and evaluation state. Never
+            # let it operate on the surrounding callback's objects.
+            vars(thread).clear()
+            functions.populate_this_thread_defaults()
+            functions.backup_thread_variables()
+            if namespace is not None:
+                thread.current_dict = namespace
+                thread.internal = namespace.get("_internal", {})
+            yield
+        finally:
+            vars(thread).clear()
+            functions.restore_thread_variables(previous)
+
+
+@contextmanager
+def runtime_context(namespace=None):
+    """Scope native runtime state without exporting a replacement DA module."""
+    try:
+        from docassemble.base import thread_context
+    except ImportError:
+        # Import the qualified module to distinguish absence from a broken
+        # dependency inside an installed modern context implementation.
+        import importlib
+
+        try:
+            context = importlib.import_module("docassemble.base.thread_context")
+        except ModuleNotFoundError as missing:
+            if missing.name != "docassemble.base.thread_context":
+                raise
+            from docassemble.base import functions
+
+            adapter = _LegacyContextAdapter(functions)
+        else:
+            adapter = _ModernContextAdapter(context)
+    else:
+        adapter = _ModernContextAdapter(thread_context)
+    with adapter.activate(namespace):
+        yield
+
+
+def status_field(status, name):
+    """Read the stable outcome vocabulary from either native status shape."""
+    legacy_names = {
+        "question_text": "questionText",
+        "subquestion_text": "subquestionText",
+        "continue_label": "continueLabel",
+    }
+    if hasattr(status, name):
+        return getattr(status, name)
+    return getattr(status, legacy_names.get(name, name))
+
+
 class PDFConversionUnavailable(RuntimeError):
     """Raised instead of exposing a late missing-PDF file lookup."""
 
@@ -703,7 +795,18 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     """Install simulator bindings on docassemble 1.9's server object."""
     from docassemble.base import functions
 
+    if not hasattr(functions, "server"):
+        raise RuntimeCompatibilityError(
+            "Unsupported or incomplete docassemble runtime: the legacy "
+            "docassemble.base.functions.server seam is unavailable. "
+            "Use the target package interpreter containing docassemble 1.9.x "
+            "or 1.10+."
+        )
     server = functions.server
+    if not isinstance(getattr(server, "server_redis", None), FakeRedis):
+        server.server_redis = FakeRedis()
+    if not isinstance(getattr(server, "server_redis_user", None), FakeRedis):
+        server.server_redis_user = FakeRedis()
     server.get_ext_and_mimetype = bindings.get_ext_and_mimetype
     server.get_default_voice = bindings.get_default_voice
     server.get_default_dialect = bindings.get_default_dialect
@@ -722,6 +825,10 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     server.debug_status = bindings.get_debug_status()
     server.main_page_parts = bindings.get_main_page_parts()
     server.button_class_prefix = bindings.get_button_class_prefix()
+    # 1.9's markdown filter reads these directly from the legacy server;
+    # modern runtimes obtain the equivalent values through their webapp setup.
+    server.default_table_class = '"table table-striped"'
+    server.default_thead_class = None
     server.daconfig = bindings.get_configuration()
 
     def file_finder(
