@@ -138,6 +138,240 @@ class TestRuntimeBindings:
         ] == str(authored)
 
 
+def _legacy_functions(thread=None, daconfig=None, omit=()):
+    """A recording legacy ``functions`` double with thread-local semantics."""
+    thread = thread if thread is not None else types.SimpleNamespace()
+    calls = {"restored": []}
+    functions = types.SimpleNamespace(
+        server=types.SimpleNamespace(),
+        this_thread=thread,
+    )
+    functions.populate_this_thread_defaults = lambda: setattr(thread, "populated", True)
+    functions.backup_thread_variables = lambda: setattr(thread, "backed_up", True)
+
+    def restore_thread_variables(saved):
+        calls["restored"].append(dict(saved))
+        vars(thread).clear()
+        vars(thread).update(saved)
+
+    functions.restore_thread_variables = restore_thread_variables
+    for name in omit:
+        delattr(functions, name)
+    functions.calls = calls
+    functions.seed_daconfig = dict(daconfig or {})
+    return functions
+
+
+def _install_legacy_modules(monkeypatch, functions):
+    """Expose a legacy-only stub runtime through ``sys.modules``."""
+    da = types.ModuleType("docassemble")
+    da.__path__ = []
+    base = types.ModuleType("docassemble.base")
+    base.__path__ = []
+    module = types.ModuleType("docassemble.base.functions")
+    for name in (
+        "server",
+        "this_thread",
+        "populate_this_thread_defaults",
+        "backup_thread_variables",
+        "restore_thread_variables",
+    ):
+        if hasattr(functions, name):
+            setattr(module, name, getattr(functions, name))
+    config = types.ModuleType("docassemble.base.config")
+    config.daconfig = functions.seed_daconfig
+    da.base = base
+    base.functions = module
+    base.config = config
+    for name, mod in {
+        "docassemble": da,
+        "docassemble.base": base,
+        "docassemble.base.functions": module,
+        "docassemble.base.config": config,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    return config
+
+
+class TestStatusField:
+    def test_modern_shape_passes_through(self):
+        from docassemble_simulator._runtime import status_field
+
+        status = types.SimpleNamespace(
+            question_text="Q?", subquestion_text="sub", continue_label="Go"
+        )
+        assert status_field(status, "question_text") == "Q?"
+        assert status_field(status, "subquestion_text") == "sub"
+        assert status_field(status, "continue_label") == "Go"
+
+    def test_legacy_shape_maps_camel_case(self):
+        from docassemble_simulator._runtime import status_field
+
+        status = types.SimpleNamespace(
+            questionText="Q?", subquestionText="sub", continueLabel="Go"
+        )
+        assert status_field(status, "question_text") == "Q?"
+        assert status_field(status, "subquestion_text") == "sub"
+        assert status_field(status, "continue_label") == "Go"
+
+    def test_unknown_field_raises_attribute_error(self):
+        from docassemble_simulator._runtime import status_field
+
+        with pytest.raises(AttributeError):
+            status_field(types.SimpleNamespace(), "question_text")
+
+
+class TestLegacyContext:
+    def test_installs_namespace_and_restores_previous_state(self, monkeypatch):
+        from docassemble_simulator._runtime import runtime_context
+
+        thread = types.SimpleNamespace(preexisting="keep")
+        functions = _legacy_functions(thread=thread)
+        _install_legacy_modules(monkeypatch, functions)
+        namespace = {"_internal": {"marker": True}, "user_var": 1}
+
+        with runtime_context(namespace):
+            assert functions.this_thread.current_dict is namespace
+            assert functions.this_thread.internal == {"marker": True}
+            assert functions.this_thread.populated is True
+            assert functions.this_thread.backed_up is True
+
+        assert vars(thread) == {"preexisting": "keep"}
+        assert functions.calls["restored"] == [{"preexisting": "keep"}]
+
+    def test_exception_still_restores_previous_state(self, monkeypatch):
+        from docassemble_simulator._runtime import runtime_context
+
+        thread = types.SimpleNamespace(preexisting="keep")
+        functions = _legacy_functions(thread=thread)
+        _install_legacy_modules(monkeypatch, functions)
+
+        with (
+            pytest.raises(RuntimeError, match="boom"),
+            runtime_context({"user_var": 1}),
+        ):
+            raise RuntimeError("boom")
+
+        assert vars(thread) == {"preexisting": "keep"}
+        assert functions.calls["restored"] == [{"preexisting": "keep"}]
+
+    def test_nested_contexts_restore_outer_state(self, monkeypatch):
+        from docassemble_simulator._runtime import runtime_context
+
+        functions = _legacy_functions()
+        _install_legacy_modules(monkeypatch, functions)
+        outer = {"user_var": "outer"}
+        inner = {"user_var": "inner"}
+
+        with runtime_context(outer):
+            with runtime_context(inner):
+                assert functions.this_thread.current_dict is inner
+            assert functions.this_thread.current_dict is outer
+
+    def test_context_entry_refreshes_server_config(self, monkeypatch):
+        from docassemble_simulator._runtime import runtime_context
+
+        functions = _legacy_functions(daconfig={"timezone": "America/New_York"})
+        config = _install_legacy_modules(monkeypatch, functions)
+
+        with runtime_context():
+            pass
+        assert functions.server.daconfig["timezone"] == "America/New_York"
+        assert functions.server.daconfig["debug"] is True
+
+        config.daconfig = {"timezone": "Europe/Paris"}
+        with runtime_context():
+            pass
+        assert functions.server.daconfig["timezone"] == "Europe/Paris"
+
+    def test_incomplete_runtime_names_missing_capability(self, monkeypatch):
+        from docassemble_simulator._runtime import (
+            RuntimeCompatibilityError,
+            runtime_context,
+        )
+
+        functions = _legacy_functions(omit=("backup_thread_variables",))
+        _install_legacy_modules(monkeypatch, functions)
+
+        with (
+            pytest.raises(RuntimeCompatibilityError, match="backup_thread_variables"),
+            runtime_context(),
+        ):
+            pass  # pragma: no cover - adapter rejects before entry
+
+
+class TestLegacyFakeRedis:
+    def test_redis_installed_and_preserved_on_reinstall(self, monkeypatch):
+        from docassemble_simulator._runtime import FakeRedis, register_hooks
+
+        functions = _legacy_functions()
+        _install_legacy_modules(monkeypatch, functions)
+        util = types.ModuleType("docassemble.base.util")
+        util.Individual = type("Individual", (), {})
+        monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
+
+        register_hooks()
+        assert isinstance(functions.server.server_redis, FakeRedis)
+        assert isinstance(functions.server.server_redis_user, FakeRedis)
+
+        redis, redis_user = (
+            functions.server.server_redis,
+            functions.server.server_redis_user,
+        )
+        register_hooks()
+        assert functions.server.server_redis is redis
+        assert functions.server.server_redis_user is redis_user
+
+
+class TestMissingRuntime:
+    @pytest.fixture
+    def no_docassemble(self, monkeypatch):
+        for name in [
+            name
+            for name in sys.modules
+            if name == "docassemble" or name.startswith("docassemble.")
+        ]:
+            monkeypatch.delitem(sys.modules, name)
+        import importlib.abc
+
+        class _Blocker(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "docassemble" or fullname.startswith("docassemble."):
+                    raise ModuleNotFoundError(
+                        f"No module named {fullname!r}", name=fullname
+                    )
+
+        blocker = _Blocker()
+        sys.meta_path.insert(0, blocker)
+        try:
+            yield
+        finally:
+            sys.meta_path.remove(blocker)
+
+    def test_runtime_context_reports_missing_runtime(self, no_docassemble):
+        from docassemble_simulator._runtime import (
+            RuntimeCompatibilityError,
+            runtime_context,
+        )
+
+        with (
+            pytest.raises(RuntimeCompatibilityError, match="No docassemble runtime"),
+            runtime_context(),
+        ):
+            pass  # pragma: no cover - detection rejects before entry
+
+    def test_register_hooks_reports_missing_runtime(self, no_docassemble):
+        from docassemble_simulator._runtime import (
+            RuntimeCompatibilityError,
+            register_hooks,
+        )
+
+        with pytest.raises(
+            RuntimeCompatibilityError, match="target package interpreter"
+        ):
+            register_hooks()
+
+
 class TestBootstrapConfig:
     def test_configured_timezone_uses_docassemble_config(self, monkeypatch):
         da = types.ModuleType("docassemble")

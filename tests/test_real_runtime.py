@@ -10,18 +10,26 @@ from zipfile import ZipFile
 import pytest
 
 
-@pytest.fixture
-def real_python():
-    # Run against the interpreter executing pytest by default.  The override
-    # remains useful for a separately provisioned target package.
-    configured = os.environ.get("DASIMULATOR_REAL_PYTHON")
+def _probe_interpreter(env_var, description):
+    # Capability probe, not version branching: every supported family
+    # provides docassemble.base; the thread_context marker distinguishes the
+    # modern interface from the legacy one.
+    configured = os.environ.get(env_var)
     interpreter = Path(configured or sys.executable).expanduser().absolute()
     if not interpreter.is_file():
         if configured:
             pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
-        pytest.skip("set DASIMULATOR_REAL_PYTHON to a target-package interpreter")
+        pytest.skip(f"set {env_var} to a {description} target-package interpreter")
     probe = subprocess.run(
-        [str(interpreter), "-c", "import docassemble.base, docassemble.webapp"],
+        [
+            str(interpreter),
+            "-c",
+            (
+                "import docassemble.base, importlib.util; "
+                "print('modern' if importlib.util.find_spec("
+                "'docassemble.base.thread_context') is not None else 'legacy')"
+            ),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -37,6 +45,56 @@ def real_python():
             "docassemble runtime is not installed in the pytest interpreter: " + message
         )
     return interpreter
+
+
+@pytest.fixture
+def real_python():
+    # Run against the interpreter executing pytest by default.  The override
+    # remains useful for a separately provisioned target package.
+    return _probe_interpreter("DASIMULATOR_REAL_PYTHON", "1.10+")
+
+
+@pytest.fixture
+def real_python_19():
+    # A separately provisioned docassemble 1.9.x target-package interpreter,
+    # or None when absent.  The family fixture below decides whether the
+    # absence skips, so requesting this fixture never skips the modern lane.
+    if not os.environ.get("DASIMULATOR_REAL_PYTHON_19"):
+        return None
+    return _probe_interpreter("DASIMULATOR_REAL_PYTHON_19", "1.9.x")
+
+
+def _runtime_family(interpreter):
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            (
+                "import importlib.util; "
+                "print(importlib.util.find_spec("
+                "'docassemble.base.thread_context') is not None)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode:
+        return "unknown"
+    return "modern" if completed.stdout.strip() == "True" else "legacy"
+
+
+@pytest.fixture(params=["modern", "legacy"])
+def family_python(request, real_python, real_python_19):
+    """(label, interpreter) for each supported runtime family.
+
+    The legacy entry skips when no 1.9.x interpreter is provisioned.
+    """
+    if request.param == "modern":
+        return ("1.10+", real_python)
+    if real_python_19 is None:
+        pytest.skip("set DASIMULATOR_REAL_PYTHON_19 to a 1.9.x interpreter")
+    return ("1.9.x", real_python_19)
 
 
 @pytest.fixture
@@ -161,6 +219,36 @@ def _assert_helper_output(path):
         "08/26/2026",
     ):
         assert expected in xml
+
+
+def test_minimal_start_answer_contract_across_families(family_python, real_workspace):
+    label, interpreter = family_python
+    root = real_workspace
+
+    assert _runtime_family(interpreter) == (
+        "modern" if label == "1.10+" else "legacy"
+    ), f"{label} interpreter does not expose the expected runtime family"
+
+    checked = _run(interpreter, root, "check")
+    assert checked["ok"], label
+    assert checked["result"]["failures"] == 0, label
+
+    started = _run(interpreter, root, "start")
+    assert started["ok"], label
+    screen = started["result"]
+    assert screen["kind"] == "question", label
+    assert screen["question_text"], label
+    for leaked in ("questionText", "subquestionText", "continueLabel"):
+        assert leaked not in screen, (label, leaked)
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "filing_date=2026-08-26",
+        "caption=2026-08-26",
+    )
+    assert answered["ok"], label
 
 
 def test_real_runtime_rehydrates_helpers_for_every_render_source(

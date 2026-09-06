@@ -277,9 +277,18 @@ target package's interpreter (which supplies `docassemble` and `python-docx`):
 scripts/test-real-runtime /path/to/target/package/.venv/bin/python
 ```
 
+Pass a second interpreter to also run the cross-family contract against
+docassemble 1.9.x:
+
+```sh
+scripts/test-real-runtime /path/to/1.10/package/.venv/bin/python \
+  /path/to/1.9/package/.venv/bin/python
+```
+
 The real-runtime tests use the current pytest interpreter when the runtime
 is installed; set `DASIMULATOR_REAL_PYTHON` to use a separate target
-environment. Without either runtime, they skip; a configured target that
+environment and `DASIMULATOR_REAL_PYTHON_19` for the 1.9.x lane. Without
+either runtime, they skip; a configured target that
 cannot run the tests fails clearly. The fast suite's stubbed runtime tests
 never require `docassemble`. PDF-only download screens are
 intentionally deferred to staging; the simulator gate is DOCX artifact

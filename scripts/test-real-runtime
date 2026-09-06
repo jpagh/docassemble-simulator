@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "usage: scripts/test-real-runtime /path/to/target-package/python" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "usage: scripts/test-real-runtime /path/to/target-package/python [/path/to/1.9-package/python]" >&2
   exit 2
 fi
 
@@ -14,4 +14,13 @@ if [[ ! -x "$interpreter" ]]; then
 fi
 
 cd "$repo_root"
-DASIMULATOR_REAL_PYTHON="$interpreter" uv run pytest -q tests/test_real_runtime.py
+export DASIMULATOR_REAL_PYTHON="$interpreter"
+if [[ ${2:-} ]]; then
+  legacy=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+  if [[ ! -x "$legacy" ]]; then
+    echo "error: 1.9 target interpreter is not executable: $legacy" >&2
+    exit 2
+  fi
+  export DASIMULATOR_REAL_PYTHON_19="$legacy"
+fi
+uv run pytest -q tests/test_real_runtime.py

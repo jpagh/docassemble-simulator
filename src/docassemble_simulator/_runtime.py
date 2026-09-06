@@ -86,6 +86,25 @@ class RuntimeCompatibilityError(ValueError):
     """An installed runtime lacks a required simulator capability."""
 
 
+def _ensure_runtime_present() -> None:
+    """Raise an actionable error when no docassemble runtime is installed."""
+    import importlib
+
+    try:
+        importlib.import_module("docassemble.base")
+    except ModuleNotFoundError as missing:
+        if missing.name not in ("docassemble", "docassemble.base"):
+            # A dependency *inside* an installed runtime broke; surface it
+            # unchanged rather than misreporting a missing runtime.
+            raise
+        raise RuntimeCompatibilityError(
+            "No docassemble runtime is installed in the target package "
+            f"interpreter ({sys.executable}). Install docassemble 1.9.x or "
+            "1.10+ into that interpreter; the simulator does not substitute "
+            "another Python environment."
+        ) from missing
+
+
 class _ModernContextAdapter:
     def __init__(self, context):
         self.context = context
@@ -101,8 +120,9 @@ class _ModernContextAdapter:
 
 
 class _LegacyContextAdapter:
-    def __init__(self, functions):
+    def __init__(self, functions, config_loader=None):
         self.functions = functions
+        self.config_loader = config_loader
         for name in (
             "server",
             "this_thread",
@@ -130,6 +150,11 @@ class _LegacyContextAdapter:
             if namespace is not None:
                 thread.current_dict = namespace
                 thread.internal = namespace.get("_internal", {})
+            if self.config_loader is not None:
+                # Mirror the modern hook's per-read freshness: server config
+                # is re-published on every operation entry, not snapshotted
+                # once at installation.
+                functions.server.daconfig = self.config_loader()
             yield
         finally:
             vars(thread).clear()
@@ -150,10 +175,16 @@ def runtime_context(namespace=None):
             context = importlib.import_module("docassemble.base.thread_context")
         except ModuleNotFoundError as missing:
             if missing.name != "docassemble.base.thread_context":
+                _ensure_runtime_present()
                 raise
+            # Either a legacy runtime (no thread_context module) or no
+            # runtime at all; the presence check reports the latter.
+            _ensure_runtime_present()
             from docassemble.base import functions
 
-            adapter = _LegacyContextAdapter(functions)
+            adapter = _LegacyContextAdapter(
+                functions, _SimulatorRuntimeBindings().get_configuration
+            )
         else:
             adapter = _ModernContextAdapter(context)
     else:
@@ -162,16 +193,16 @@ def runtime_context(namespace=None):
         yield
 
 
-def status_field(status, name):
+def status_field(status, field_name):
     """Read the stable outcome vocabulary from either native status shape."""
     legacy_names = {
         "question_text": "questionText",
         "subquestion_text": "subquestionText",
         "continue_label": "continueLabel",
     }
-    if hasattr(status, name):
-        return getattr(status, name)
-    return getattr(status, legacy_names.get(name, name))
+    if hasattr(status, field_name):
+        return getattr(status, field_name)
+    return getattr(status, legacy_names.get(field_name, field_name))
 
 
 class PDFConversionUnavailable(RuntimeError):
@@ -874,17 +905,29 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     server.save_numbered_file = bindings.save_numbered_file
 
 
-def register_hooks() -> None:
-    """Install simulator hooks through either supported docassemble interface."""
-    _install_relationship_methods()
-    bindings = _SimulatorRuntimeBindings()
+def _modern_hooks_available() -> bool:
+    """Whether the installed runtime exposes the 1.10 pluggy hook API."""
     try:
         from docassemble.base.plugin_manager import pm  # noqa: F401
     except ModuleNotFoundError as error:
         if error.name != "docassemble.base.plugin_manager":
+            _ensure_runtime_present()
             raise
+        return False
+    return True
+
+
+def register_hooks() -> None:
+    """Install simulator hooks through either supported docassemble interface."""
+    bindings = _SimulatorRuntimeBindings()
+    if not _modern_hooks_available():
+        # Either a legacy runtime (no plugin manager) or no runtime at all;
+        # the presence check reports the latter before anything else imports.
+        _ensure_runtime_present()
+        _install_relationship_methods()
         _register_legacy_runtime_bindings(bindings)
     else:
+        _install_relationship_methods()
         _register_pluggy_runtime_bindings(bindings)
 
 
