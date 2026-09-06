@@ -1,12 +1,16 @@
+[env]
+    # Local test environment for macOS/Homebrew native libraries
+    DYLD_FALLBACK_LIBRARY_PATH = "/opt/homebrew/lib"
+
+[settings]
+    python.uv_venv_auto = "create|source"
+
 [tools]
     "pipx:bump-my-version" = "latest"
     "pipx:pyrefly"         = "latest"
     tombi                  = "latest"
     ruff                   = "latest"
     uv                     = "latest"
-
-[settings]
-    python.uv_venv_auto = "create|source"
 
 [tasks.bump]
     description = "Bump the patch digit (CalVer YY.MM.patch → YY.MM.patch+1) and push"
