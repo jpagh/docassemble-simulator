@@ -323,6 +323,112 @@ class TestLegacyFakeRedis:
         assert functions.server.server_redis_user is redis_user
 
 
+class TestIncompleteRuntime:
+    def test_register_hooks_missing_util_is_actionable(self, monkeypatch):
+        from docassemble_simulator._runtime import (
+            RuntimeCompatibilityError,
+            register_hooks,
+        )
+
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.server = types.SimpleNamespace()
+        config = types.ModuleType("docassemble.base.config")
+        config.daconfig = {}
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.functions": functions,
+            "docassemble.base.config": config,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+        monkeypatch.delitem(sys.modules, "docassemble.base.util", raising=False)
+        monkeypatch.delitem(
+            sys.modules, "docassemble.base.plugin_manager", raising=False
+        )
+
+        with pytest.raises(RuntimeCompatibilityError, match="util"):
+            register_hooks()
+
+
+class TestLegacyBackgroundFallback:
+    def _stub_legacy_without_background(self, monkeypatch):
+        from docassemble_simulator import _runtime as runtime_module
+
+        monkeypatch.setattr(runtime_module, "_BACKGROUND_INSTALLED", False)
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.server = types.SimpleNamespace()
+        config = types.ModuleType("docassemble.base.config")
+        config.daconfig = {}
+        util = types.ModuleType("docassemble.base.util")
+        util.Individual = type("Individual", (), {})
+        util.background_action = None
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.functions": functions,
+            "docassemble.base.config": config,
+            "docassemble.base.util": util,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+        monkeypatch.delitem(sys.modules, "docassemble.base.background", raising=False)
+        monkeypatch.delitem(
+            sys.modules, "docassemble.base.plugin_manager", raising=False
+        )
+        return functions, util
+
+    def test_legacy_server_seam_installed_without_background_module(self, monkeypatch):
+        from docassemble_simulator import _runtime as runtime_module
+
+        functions, util = self._stub_legacy_without_background(monkeypatch)
+
+        runtime_module.register_hooks()
+        assert (
+            functions.server.bg_action is runtime_module._foreground_background_action
+        )
+
+        runtime_module._install_background_action_fallback("foreground")
+        assert (
+            functions.server.bg_action is runtime_module._foreground_background_action
+        )
+        # functions-level dispatch resolves without the modern module.
+        assert callable(functions.background_action)
+        assert callable(util.background_action)
+
+    def test_legacy_disabled_mode_returns_pending(self, monkeypatch):
+        from docassemble_simulator import _runtime as runtime_module
+
+        functions, _ = self._stub_legacy_without_background(monkeypatch)
+
+        runtime_module._install_background_action_fallback("disabled")
+        task = functions.server.bg_action("event")
+        assert not task.ready()
+        assert not task.failed()
+
+    def test_legacy_reinstall_reasserts_server_seam(self, monkeypatch):
+        from docassemble_simulator import _runtime as runtime_module
+
+        functions, _ = self._stub_legacy_without_background(monkeypatch)
+
+        runtime_module._install_background_action_fallback("foreground")
+        assert (
+            functions.server.bg_action is runtime_module._foreground_background_action
+        )
+        # Simulate a replaced legacy server object; reinstall must patch it.
+        functions.server = types.SimpleNamespace()
+        runtime_module._install_background_action_fallback("foreground")
+        assert (
+            functions.server.bg_action is runtime_module._foreground_background_action
+        )
+
+
 class TestMissingRuntime:
     @pytest.fixture
     def no_docassemble(self, monkeypatch):

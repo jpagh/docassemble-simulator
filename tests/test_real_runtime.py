@@ -252,9 +252,13 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
 
 
 def test_real_runtime_rehydrates_helpers_for_every_render_source(
-    real_python, real_workspace
+    family_python, real_workspace
 ):
+    label, interpreter = family_python
     root = real_workspace
+    assert _runtime_family(interpreter) == (
+        "modern" if label == "1.10+" else "legacy"
+    ), f"{label} interpreter does not expose the expected runtime family"
     snapshot = root / "state.snapshot"
     fresh = root / "fresh.docx"
     fixture = root / "fixture.docx"
@@ -262,7 +266,7 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
     saved = root / "saved.docx"
 
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
@@ -272,10 +276,10 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         str(snapshot),
         "--output",
         str(fresh),
-    )["ok"]
-    assert not list((root / ".simulator" / "sessions").glob("*.pkl"))
+    )["ok"], label
+    assert not list((root / ".simulator" / "sessions").glob("*.pkl")), label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
@@ -283,9 +287,9 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         str(root / "fixture.py"),
         "--output",
         str(fixture),
-    )["ok"]
+    )["ok"], label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
@@ -294,17 +298,17 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         "--no-assemble",
         "--output",
         str(from_snapshot),
-    )["ok"]
-    assert _run(real_python, root, "start")["ok"]
+    )["ok"], label
+    assert _run(interpreter, root, "start")["ok"], label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
         "--no-assemble",
         "--output",
         str(saved),
-    )["ok"]
+    )["ok"], label
 
     for artifact in (fresh, fixture, from_snapshot, saved):
         _assert_helper_output(artifact)
@@ -380,101 +384,111 @@ def test_demo_package_compiles_with_all_includes(real_python):
 
 
 def test_generated_attachment_has_durable_local_uri_and_manifest(
-    real_python, real_workspace
+    family_python, real_workspace
 ):
+    label, interpreter = family_python
+    assert _runtime_family(interpreter) == (
+        "modern" if label == "1.10+" else "legacy"
+    ), f"{label} interpreter does not expose the expected runtime family"
     payload = _run(
-        real_python,
+        interpreter,
         real_workspace,
         "start",
         "--interview",
         "download.yml",
     )
 
-    assert payload["ok"]
-    assert 'href="None"' not in payload["result"]["subquestion_text"]
-    assert 'href="file://' in payload["result"]["subquestion_text"]
-    assert len(payload["attachments"]) == 1
+    assert payload["ok"], label
+    assert 'href="None"' not in payload["result"]["subquestion_text"], label
+    assert 'href="file://' in payload["result"]["subquestion_text"], label
+    assert len(payload["attachments"]) == 1, label
     attachment = payload["attachments"][0]
-    assert attachment["filename"].lower() == "local_document.docx"
-    assert Path(attachment["path"]).is_file()
-    assert attachment["uri"] == Path(attachment["path"]).resolve().as_uri()
+    assert attachment["filename"].lower() == "local_document.docx", label
+    assert Path(attachment["path"]).is_file(), label
+    assert attachment["uri"] == Path(attachment["path"]).resolve().as_uri(), label
     index = real_workspace / ".simulator" / "files" / "index.json"
-    assert index.is_file()
+    assert index.is_file(), label
 
     refreshed = _run(
-        real_python,
+        interpreter,
         real_workspace,
         "refresh",
         "--interview",
         "download.yml",
     )
-    assert refreshed["ok"]
-    assert refreshed["attachments"][0]["uri"] == attachment["uri"]
+    assert refreshed["ok"], label
+    assert refreshed["attachments"][0]["uri"] == attachment["uri"], label
 
 
-def test_real_date_answer_formats_and_rejections_roll_back(real_python, real_workspace):
+def test_real_date_answer_formats_and_rejections_roll_back(
+    family_python, real_workspace
+):
+    label, interpreter = family_python
+    assert _runtime_family(interpreter) == (
+        "modern" if label == "1.10+" else "legacy"
+    ), f"{label} interpreter does not expose the expected runtime family"
     root = real_workspace
-    assert _run(real_python, root, "start")["ok"]
+    assert _run(interpreter, root, "start")["ok"], label
     session = next((root / ".simulator" / "sessions").glob("*.pkl"))
     before = session.read_bytes()
 
     rejected = _run(
-        real_python,
+        interpreter,
         root,
         "answer",
         "filing_date=2026-02-30",
         "caption=changed",
         expected_code=2,
     )
-    assert rejected["error"]["kind"] == "answer-input"
-    assert session.read_bytes() == before
+    assert rejected["error"]["kind"] == "answer-input", label
+    assert session.read_bytes() == before, label
 
     accepted = _run(
-        real_python,
+        interpreter,
         root,
         "answer",
         "filing_date=2026-08-26",
         "caption=2026-08-26",
     )
-    assert accepted["ok"]
+    assert accepted["ok"], label
     assert (
-        _run(real_python, root, "eval", "type(filing_date).__name__")["result"]["value"]
+        _run(interpreter, root, "eval", "type(filing_date).__name__")["result"]["value"]
         == "'DADateTime'"
-    )
+    ), label
     assert (
-        _run(real_python, root, "eval", "filing_date.format('MM/dd/yyyy')")["result"][
+        _run(interpreter, root, "eval", "filing_date.format('MM/dd/yyyy')")["result"][
             "value"
         ]
         == "'08/26/2026'"
-    )
+    ), label
     assert (
-        _run(real_python, root, "eval", "type(caption).__name__")["result"]["value"]
+        _run(interpreter, root, "eval", "type(caption).__name__")["result"]["value"]
         == "'str'"
-    )
+    ), label
 
     artifact = root / "date.docx"
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "date.docx",
         "--no-assemble",
         "--output",
         str(artifact),
-    )["ok"]
+    )["ok"], label
     xml = _document_xml(artifact)
-    assert "08/26/2026" in xml
-    assert "2026-08-26" in xml
+    assert "08/26/2026" in xml, label
+    assert "2026-08-26" in xml, label
 
-    assert _run(real_python, root, "start")["ok"]
+    assert _run(interpreter, root, "start")["ok"], label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "answer",
         "--code",
         "filing_date='2026-08-26'",
-    )["ok"]
+    )["ok"], label
     assert (
-        _run(real_python, root, "eval", "type(filing_date).__name__")["result"]["value"]
+        _run(interpreter, root, "eval", "type(filing_date).__name__")["result"]["value"]
         == "'str'"
-    )
+    ), label

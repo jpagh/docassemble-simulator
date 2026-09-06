@@ -179,8 +179,7 @@ def runtime_context(namespace=None):
                 raise
             # Either a legacy runtime (no thread_context module) or no
             # runtime at all; the presence check reports the latter.
-            _ensure_runtime_present()
-            from docassemble.base import functions
+            functions = _import_legacy_runtime_modules()
 
             adapter = _LegacyContextAdapter(
                 functions, _SimulatorRuntimeBindings().get_configuration
@@ -686,8 +685,37 @@ class _SimulatorRuntimeBindings:
         return cfg
 
 
+def _incomplete_runtime_error(missing: str) -> RuntimeCompatibilityError:
+    """Actionable error for an installed but incomplete runtime."""
+    return RuntimeCompatibilityError(
+        f"Unsupported or incomplete docassemble runtime: missing {missing}. "
+        "Use the target package interpreter containing docassemble 1.9.x "
+        "or 1.10+."
+    )
+
+
+def _import_legacy_runtime_modules():
+    """Import required legacy modules, converting failures to actionable errors."""
+    _ensure_runtime_present()
+    try:
+        from docassemble.base import functions
+    except ModuleNotFoundError as missing:
+        raise _incomplete_runtime_error(
+            missing.name or "docassemble.base.functions"
+        ) from missing
+    except ImportError as broken:
+        raise _incomplete_runtime_error(
+            f"docassemble.base.functions ({broken})"
+        ) from broken
+    return functions
+
+
 def _install_relationship_methods() -> None:
-    from docassemble.base.util import Individual
+    try:
+        from docassemble.base.util import Individual
+    except (ModuleNotFoundError, ImportError, AttributeError) as missing:
+        name = getattr(missing, "name", None) or "docassemble.base.util.Individual"
+        raise _incomplete_runtime_error(name) from missing
 
     # These convenience relationship methods are present in the documented
     # interview API but are commented out in some installed base packages.
@@ -903,6 +931,9 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     server.file_number_finder = file_number_finder
     server.url_finder = url_finder
     server.save_numbered_file = bindings.save_numbered_file
+    # 1.9 dispatches background_action() through server.bg_action; point that
+    # seam at the shared foreground fallback (ADR-0003, no Celery emulation).
+    server.bg_action = _foreground_background_action
 
 
 def _modern_hooks_available() -> bool:
@@ -921,9 +952,10 @@ def register_hooks() -> None:
     """Install simulator hooks through either supported docassemble interface."""
     bindings = _SimulatorRuntimeBindings()
     if not _modern_hooks_available():
-        # Either a legacy runtime (no plugin manager) or no runtime at all;
-        # the presence check reports the latter before anything else imports.
-        _ensure_runtime_present()
+        # Either a legacy runtime (no plugin manager) or no runtime at all.
+        # Validate required legacy modules before mutating shared state so
+        # incomplete runtimes raise actionable errors, not raw imports.
+        _import_legacy_runtime_modules()
         _install_relationship_methods()
         _register_legacy_runtime_bindings(bindings)
     else:
@@ -1078,15 +1110,49 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
         info.update(old)
 
 
+def _patch_legacy_background_seam(functions) -> None:
+    """Point 1.9 background dispatch at the foreground fallback."""
+    server = getattr(functions, "server", None)
+    if server is not None:
+        server.bg_action = _foreground_background_action
+    functions.bg_action = _foreground_background_action
+    functions.background_action = lambda *args, **kwargs: _foreground_background_action(
+        *args, **kwargs
+    )
+    try:
+        from docassemble.base import util as legacy_util
+    except (ModuleNotFoundError, ImportError):
+        return
+    legacy_util.background_action = functions.background_action
+
+
 def _install_background_action_fallback(mode: str | None = None) -> None:
     """Replace Celery dispatch with a foreground task, unless explicitly disabled."""
     global _BACKGROUND_INSTALLED
     _set_background_action_mode(mode)
     if _BACKGROUND_INSTALLED:
+        # Process-global install already patched the modern modules, but a
+        # legacy server object may have been replaced since (notably in
+        # tests); re-assert the per-object legacy seam when present.
+        try:
+            from docassemble.base import functions as installed_functions
+        except (ModuleNotFoundError, ImportError):
+            return
+        if getattr(installed_functions, "server", None) is not None:
+            _patch_legacy_background_seam(installed_functions)
         return
     try:
         from docassemble.base import background, functions, util
-    except ImportError:
+    except (ModuleNotFoundError, ImportError):
+        # No modern background module: fall back to the 1.9 server seam.
+        try:
+            from docassemble.base import functions as legacy_functions
+        except (ModuleNotFoundError, ImportError):
+            return
+        if getattr(legacy_functions, "server", None) is None:
+            return
+        _patch_legacy_background_seam(legacy_functions)
+        _BACKGROUND_INSTALLED = True
         return
     # functions.background_action delegates through its module-global bg_action;
     # util re-exports the function object, while background.bg_action is useful
@@ -1097,6 +1163,10 @@ def _install_background_action_fallback(mode: str | None = None) -> None:
     )
     util.background_action = functions.background_action
     background.bg_action = _foreground_background_action
+    # A legacy server object shares the same functions module shape when both
+    # seams exist; keep server.bg_action pointed at the same fallback.
+    if getattr(functions, "server", None) is not None:
+        functions.server.bg_action = _foreground_background_action
     _BACKGROUND_INSTALLED = True
 
 
