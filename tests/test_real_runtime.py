@@ -10,33 +10,30 @@ from zipfile import ZipFile
 import pytest
 
 
-def _probe_interpreter(env_var, description):
+def _family_probe_cmd():
     # Capability probe, not version branching: every supported family
     # provides docassemble.base; the thread_context marker distinguishes the
     # modern interface from the legacy one.
-    configured = os.environ.get(env_var)
-    interpreter = Path(configured or sys.executable).expanduser().absolute()
-    if not interpreter.is_file():
-        if configured:
-            pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
-        pytest.skip(f"set {env_var} to a {description} target-package interpreter")
-    probe = subprocess.run(
-        [
-            str(interpreter),
-            "-c",
-            (
-                "import docassemble.base, importlib.util; "
-                "print('modern' if importlib.util.find_spec("
-                "'docassemble.base.thread_context') is not None else 'legacy')"
-            ),
-        ],
+    return (
+        "import docassemble.base, importlib.util; "
+        "print('modern' if importlib.util.find_spec("
+        "'docassemble.base.thread_context') is not None else 'legacy')"
+    )
+
+
+def _query_family(interpreter, *, strict, env_var="", description=""):
+    """Return 'modern'/'legacy' for an interpreter, or 'unknown' when lax."""
+    completed = subprocess.run(
+        [str(interpreter), "-c", _family_probe_cmd()],
         capture_output=True,
         text=True,
         check=False,
     )
-    if probe.returncode:
-        message = (probe.stderr or probe.stdout).strip()
-        if configured:
+    if completed.returncode:
+        if not strict:
+            return "unknown"
+        message = (completed.stderr or completed.stdout).strip()
+        if env_var and os.environ.get(env_var):
             pytest.fail(
                 "the configured real-runtime interpreter cannot import the "
                 "docassemble runtime: " + message
@@ -44,6 +41,17 @@ def _probe_interpreter(env_var, description):
         pytest.skip(
             "docassemble runtime is not installed in the pytest interpreter: " + message
         )
+    return "modern" if completed.stdout.strip() == "modern" else "legacy"
+
+
+def _probe_interpreter(env_var, description):
+    configured = os.environ.get(env_var)
+    interpreter = Path(configured or sys.executable).expanduser().absolute()
+    if not interpreter.is_file():
+        if configured:
+            pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
+        pytest.skip(f"set {env_var} to a {description} target-package interpreter")
+    _query_family(interpreter, strict=True, env_var=env_var, description=description)
     return interpreter
 
 
@@ -65,23 +73,7 @@ def real_python_19():
 
 
 def _runtime_family(interpreter):
-    completed = subprocess.run(
-        [
-            str(interpreter),
-            "-c",
-            (
-                "import importlib.util; "
-                "print(importlib.util.find_spec("
-                "'docassemble.base.thread_context') is not None)"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode:
-        return "unknown"
-    return "modern" if completed.stdout.strip() == "True" else "legacy"
+    return _query_family(interpreter, strict=False)
 
 
 @pytest.fixture(params=["modern", "legacy"])
@@ -121,6 +113,25 @@ def real_workspace(tmp_path, real_python):
         "    required: False\n"
         "  - Caption: caption\n"
         "    required: False\n"
+    )
+    (questions / "background.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Greeter\n"
+        "fields:\n"
+        "  - Your name: user_name\n"
+        "---\n"
+        "code: |\n"
+        "  greeting_task = background_action('shout_name')\n"
+        "  greeting = greeting_task.get()\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Result\n"
+        "subquestion: ${ greeting }\n"
+        "---\n"
+        "event: shout_name\n"
+        "code: |\n"
+        "  background_response('hi:' + user_name)\n"
     )
     (questions / "download.yml").write_text(
         "---\n"
@@ -249,6 +260,41 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
         "caption=2026-08-26",
     )
     assert answered["ok"], label
+
+
+def test_foreground_background_action_contract_across_families(
+    family_python, real_workspace
+):
+    label, interpreter = family_python
+    root = real_workspace
+    assert _runtime_family(interpreter) == (
+        "modern" if label == "1.10+" else "legacy"
+    ), f"{label} interpreter does not expose the expected runtime family"
+
+    checked = _run(interpreter, root, "check", "--interview", "background.yml")
+    assert checked["ok"], label
+    assert checked["result"]["failures"] == 0, label
+
+    started = _run(interpreter, root, "start", "--interview", "background.yml")
+    assert started["ok"], label
+    assert started["result"]["kind"] == "question", label
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "--interview",
+        "background.yml",
+        "user_name=Ada",
+    )
+    assert answered["ok"], label
+    assert "hi:Ada" in answered["result"].get("subquestion_text", ""), label
+
+    evaluated = _run(
+        interpreter, root, "eval", "--interview", "background.yml", "greeting"
+    )
+    assert evaluated["ok"], label
+    assert evaluated["result"]["value"] == "'hi:Ada'", label
 
 
 def test_real_runtime_rehydrates_helpers_for_every_render_source(

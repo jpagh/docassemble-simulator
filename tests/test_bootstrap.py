@@ -137,6 +137,40 @@ class TestRuntimeBindings:
             "path"
         ] == str(authored)
 
+    def test_legacy_url_finder_normalizes_option_styles(self, monkeypatch, tmp_path):
+        from docassemble_simulator import _runtime as runtime_module
+
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        functions = types.ModuleType("docassemble.base.functions")
+        functions.server = types.SimpleNamespace()
+        config = types.ModuleType("docassemble.base.config")
+        config.daconfig = {}
+        util = types.ModuleType("docassemble.base.util")
+        util.Individual = type("Individual", (), {})
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.functions": functions,
+            "docassemble.base.config": config,
+            "docassemble.base.util": util,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+        authored = tmp_path / "docassemble" / "pkg" / "data" / "static"
+        authored.mkdir(parents=True)
+        (authored / "template.docx").write_bytes(b"docx")
+        with runtime_module.SimulatorRuntime().activate(tmp_path):
+            runtime_module.register_hooks()
+            server = functions.server
+            via_options = server.url_finder(
+                "template.docx", {"_package": "docassemble.pkg"}
+            )
+            via_kwargs = server.url_finder("template.docx", _package="docassemble.pkg")
+        assert via_options == via_kwargs
+        assert via_options.startswith("file://")
+
 
 def _legacy_functions(thread=None, daconfig=None, omit=()):
     """A recording legacy ``functions`` double with thread-local semantics."""
@@ -353,6 +387,26 @@ class TestIncompleteRuntime:
         with pytest.raises(RuntimeCompatibilityError, match="util"):
             register_hooks()
 
+    def test_configuration_without_config_module_is_actionable(self, monkeypatch):
+        from docassemble_simulator._runtime import (
+            RuntimeCompatibilityError,
+            _SimulatorRuntimeBindings,
+        )
+
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+        monkeypatch.delitem(sys.modules, "docassemble.base.config", raising=False)
+
+        with pytest.raises(RuntimeCompatibilityError, match="docassemble.base.config"):
+            _SimulatorRuntimeBindings().get_configuration()
+
 
 class TestLegacyBackgroundFallback:
     def _stub_legacy_without_background(self, monkeypatch):
@@ -365,6 +419,19 @@ class TestLegacyBackgroundFallback:
         base.__path__ = []
         functions = types.ModuleType("docassemble.base.functions")
         functions.server = types.SimpleNamespace()
+        interview = types.SimpleNamespace(
+            askfor=lambda *args, **kwargs: {
+                "question": types.SimpleNamespace(
+                    question_type="backgroundresponse", backgroundresponse=42
+                )
+            }
+        )
+        functions.this_thread = types.SimpleNamespace(
+            current_dict={},
+            current_info={},
+            interview_status=object(),
+            interview=interview,
+        )
         config = types.ModuleType("docassemble.base.config")
         config.daconfig = {}
         util = types.ModuleType("docassemble.base.util")
@@ -384,23 +451,28 @@ class TestLegacyBackgroundFallback:
         )
         return functions, util
 
-    def test_legacy_server_seam_installed_without_background_module(self, monkeypatch):
+    def test_legacy_background_dispatch_completes_without_background_module(
+        self, monkeypatch
+    ):
         from docassemble_simulator import _runtime as runtime_module
 
         functions, util = self._stub_legacy_without_background(monkeypatch)
 
         runtime_module.register_hooks()
-        assert (
-            functions.server.bg_action is runtime_module._foreground_background_action
-        )
+        task = functions.server.bg_action("event")
+        assert task.ready() and not task.failed()
+        assert task.get() == 42
 
         runtime_module._install_background_action_fallback("foreground")
-        assert (
-            functions.server.bg_action is runtime_module._foreground_background_action
-        )
-        # functions-level dispatch resolves without the modern module.
-        assert callable(functions.background_action)
-        assert callable(util.background_action)
+        # Every legacy dispatch seam resolves without the modern module.
+        for dispatch in (
+            functions.server.bg_action,
+            functions.background_action,
+            util.background_action,
+        ):
+            task = dispatch("event")
+            assert task.ready() and not task.failed()
+            assert task.get() == 42
 
     def test_legacy_disabled_mode_returns_pending(self, monkeypatch):
         from docassemble_simulator import _runtime as runtime_module
@@ -418,15 +490,14 @@ class TestLegacyBackgroundFallback:
         functions, _ = self._stub_legacy_without_background(monkeypatch)
 
         runtime_module._install_background_action_fallback("foreground")
-        assert (
-            functions.server.bg_action is runtime_module._foreground_background_action
-        )
+        task = functions.server.bg_action("event")
+        assert task.ready() and task.get() == 42
         # Simulate a replaced legacy server object; reinstall must patch it.
         functions.server = types.SimpleNamespace()
         runtime_module._install_background_action_fallback("foreground")
-        assert (
-            functions.server.bg_action is runtime_module._foreground_background_action
-        )
+        task = functions.server.bg_action("event")
+        assert task.ready() and not task.failed()
+        assert task.get() == 42
 
 
 class TestMissingRuntime:

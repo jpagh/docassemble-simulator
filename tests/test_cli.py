@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+import types
 from types import SimpleNamespace
 
 from docassemble_simulator import cli
@@ -290,6 +291,97 @@ def test_composition_root_bootstraps_runtime_command_once(monkeypatch, tmp_path)
 
     assert cli.main(["start"]) == 0
     assert calls == ["import", "bootstrap"]
+
+
+def _stub_incomplete_runtime(monkeypatch, *, with_server):
+    da = types.ModuleType("docassemble")
+    da.__path__ = []
+    base = types.ModuleType("docassemble.base")
+    base.__path__ = []
+    functions = types.ModuleType("docassemble.base.functions")
+    if with_server:
+        functions.server = types.SimpleNamespace()
+    config = types.ModuleType("docassemble.base.config")
+    config.daconfig = {}
+    util = types.ModuleType("docassemble.base.util")
+    util.Individual = type("Individual", (), {})
+    webapp = types.ModuleType("docassemble.webapp")
+    webapp.__path__ = []
+    for name, module in {
+        "docassemble": da,
+        "docassemble.base": base,
+        "docassemble.base.functions": functions,
+        "docassemble.base.config": config,
+        "docassemble.base.util": util,
+        "docassemble.webapp": webapp,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.delitem(sys.modules, "docassemble.base.plugin_manager", raising=False)
+    return functions
+
+
+def test_incomplete_runtime_reports_structured_input_error(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+    monkeypatch.setattr(cli, "ensure_importable", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    _stub_incomplete_runtime(monkeypatch, with_server=False)
+    saved_argv = list(sys.argv)
+    try:
+        assert cli.main(["--json", "start"]) == 1
+    finally:
+        sys.argv[:] = saved_argv
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "docassemble.base.functions.server" in payload["error"]["message"]
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_broken_runtime_context_reports_structured_compile_error(
+    monkeypatch, tmp_path, capsys
+):
+
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+    monkeypatch.setattr(cli, "ensure_importable", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    # functions has a server but no thread-local state, so bootstrap passes
+    # while catalog compilation fails inside runtime_context's validation.
+    # The interview_cache stub keeps the import reachable; runtime_context
+    # raises before get_interview is ever called.
+    _stub_incomplete_runtime(monkeypatch, with_server=True)
+    interview_cache = types.ModuleType("docassemble.base.interview_cache")
+    interview_cache.get_interview = lambda identity: types.SimpleNamespace(
+        questions_list=[]
+    )
+    monkeypatch.setitem(
+        sys.modules, "docassemble.base.interview_cache", interview_cache
+    )
+    package = tmp_path / "docassemble" / "regression"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "main.yml").write_text(
+        "---\nmandatory: True\nquestion: Hi\nfields:\n  - Name: user_name\n"
+    )
+    saved_argv = list(sys.argv)
+    try:
+        assert cli.main(["--json", "check"]) == 2
+    finally:
+        sys.argv[:] = saved_argv
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert payload["error"]["kind"] == "compile"
+    assert "functions.this_thread" in json.dumps(payload["error"])
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
 
 
 def test_render_parser_models_orthogonal_request_concerns():

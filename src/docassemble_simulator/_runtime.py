@@ -675,7 +675,11 @@ class _SimulatorRuntimeBindings:
     def get_configuration(self):
         # Return the live server config (not a stub): interviews read
         # `jinja data` and package settings through this hook.
-        import docassemble.base.config as da_config_mod
+        try:
+            import docassemble.base.config as da_config_mod
+        except (ModuleNotFoundError, ImportError) as missing:
+            name = getattr(missing, "name", None) or "docassemble.base.config"
+            raise _incomplete_runtime_error(name) from missing
 
         cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
         cfg.setdefault("debug", True)
@@ -855,12 +859,7 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     from docassemble.base import functions
 
     if not hasattr(functions, "server"):
-        raise RuntimeCompatibilityError(
-            "Unsupported or incomplete docassemble runtime: the legacy "
-            "docassemble.base.functions.server seam is unavailable. "
-            "Use the target package interpreter containing docassemble 1.9.x "
-            "or 1.10+."
-        )
+        raise _incomplete_runtime_error("docassemble.base.functions.server")
     server = functions.server
     if not isinstance(getattr(server, "server_redis", None), FakeRedis):
         server.server_redis = FakeRedis()
@@ -1126,6 +1125,17 @@ def _patch_legacy_background_seam(functions) -> None:
     legacy_util.background_action = functions.background_action
 
 
+def _legacy_functions_or_none():
+    """Return the legacy functions module, or None when unavailable."""
+    try:
+        from docassemble.base import functions as legacy_functions
+    except (ModuleNotFoundError, ImportError):
+        return None
+    if getattr(legacy_functions, "server", None) is None:
+        return None
+    return legacy_functions
+
+
 def _install_background_action_fallback(mode: str | None = None) -> None:
     """Replace Celery dispatch with a foreground task, unless explicitly disabled."""
     global _BACKGROUND_INSTALLED
@@ -1134,22 +1144,16 @@ def _install_background_action_fallback(mode: str | None = None) -> None:
         # Process-global install already patched the modern modules, but a
         # legacy server object may have been replaced since (notably in
         # tests); re-assert the per-object legacy seam when present.
-        try:
-            from docassemble.base import functions as installed_functions
-        except (ModuleNotFoundError, ImportError):
-            return
-        if getattr(installed_functions, "server", None) is not None:
-            _patch_legacy_background_seam(installed_functions)
+        legacy_functions = _legacy_functions_or_none()
+        if legacy_functions is not None:
+            _patch_legacy_background_seam(legacy_functions)
         return
     try:
         from docassemble.base import background, functions, util
     except (ModuleNotFoundError, ImportError):
         # No modern background module: fall back to the 1.9 server seam.
-        try:
-            from docassemble.base import functions as legacy_functions
-        except (ModuleNotFoundError, ImportError):
-            return
-        if getattr(legacy_functions, "server", None) is None:
+        legacy_functions = _legacy_functions_or_none()
+        if legacy_functions is None:
             return
         _patch_legacy_background_seam(legacy_functions)
         _BACKGROUND_INSTALLED = True
