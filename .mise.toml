@@ -36,6 +36,19 @@
     description = "Run the test suite with pytest"
     run         = "uv run pytest"
 
+[tasks."sync:da19"]
+    description = "Provision .venv-da19 with docassemble 1.9.x for the real-runtime lane"
+    run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-da19 uv sync --group da19"
+
+[tasks."sync:da110"]
+    description = "Provision .venv-da110 with docassemble 1.10.x for the real-runtime lane"
+    run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-da110 uv sync --group da110"
+
+[tasks."test:all-da"]
+    description = "Run tests against real docassemble 1.9.x and 1.10.x"
+    depends     = ["sync:da19", "sync:da110"]
+    run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-da110 DASIMULATOR_REAL_PYTHON=\"$PWD/.venv-da110/bin/python\" DASIMULATOR_REAL_PYTHON_19=\"$PWD/.venv-da19/bin/python\" uv run --group da110 pytest -q"
+
 [tasks.pre-commit]
     description = "Lint and format the whole project"
     run         = [

@@ -285,6 +285,20 @@ scripts/test-real-runtime /path/to/1.10/package/.venv/bin/python \
   /path/to/1.9/package/.venv/bin/python
 ```
 
+The repo can provision both target interpreters itself from the `da19` /
+`da110` dependency groups in `pyproject.toml`:
+
+```sh
+mise run test:all-da
+```
+
+This syncs isolated `.venv-da19` (docassemble 1.9.x) and `.venv-da110`
+(1.10.x) environments and runs the suite once with both lanes wired up
+(`DASIMULATOR_REAL_PYTHON*` pointing at those interpreters), so every
+cross-family contract test exercises the modern and legacy runtimes. Use
+`mise run sync:da19` / `mise run sync:da110` to (re)provision one family
+without running the suite.
+
 The real-runtime tests use the current pytest interpreter when the runtime
 is installed; set `DASIMULATOR_REAL_PYTHON` to use a separate target
 environment and `DASIMULATOR_REAL_PYTHON_19` for the 1.9.x lane. Without
