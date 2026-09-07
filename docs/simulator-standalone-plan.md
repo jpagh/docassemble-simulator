@@ -1,6 +1,6 @@
 # Standalone simulator and jda #2 resolution
 
-Status: proposed; no implementation or issue changes made.
+Status: implemented and verified; jda #2 is closed as superseded by the project-local integration model.
 
 Source: https://github.com/jpagh/jda/issues/2
 
@@ -12,9 +12,9 @@ Keep `docassemble-simulator` as the canonical command and add `sim` as a console
 
 ## 1. Re-scope the issue before implementation
 
-Add a decision comment to jda #2 explaining the replacement contract. The original requirements to retain `jda sim`/`jda simulator`, bundle a runtime in a jda extra, and run the simulator on every jda-supported interpreter are intentionally superseded, not implemented.
+A decision comment was added to jda #2 explaining the replacement contract. The original requirements to retain `jda sim`/`jda simulator`, bundle a runtime in a jda extra, and run the simulator on every jda-supported interpreter are intentionally superseded, not implemented. The issue was closed as superseded, not as a claim that every arbitrary docassemble environment is supported.
 
-Create linked simulator issues for any remaining runtime/acceptance work below. Inventory existing tests before creating duplicate work: this repo already documents legacy 1.9.8+ and modern runtime support, missing-runtime acquisition, actionable compatibility errors, and isolated cross-family test environments. These are progress, not proof that the original AssemblyLine interview works.
+No linked follow-up was needed: the existing simulator runtime/preflight and real-runtime acceptance coverage provide the remaining supported contract. Inventory existing tests before creating duplicate work: this repo documents legacy 1.9.8+ and modern runtime support, missing-runtime acquisition, actionable compatibility errors, and isolated cross-family test environments.
 
 ## 2. Add and verify the standalone alias
 
@@ -66,6 +66,8 @@ For each failure verify:
 Preserve server independence: these tests must not need or mutate a Server or Playground.
 
 ## 5. Close with evidence, not installation metadata
+
+Completed evidence: the installed-script tests pass; the simulator suite passes with 187 tests and 6 expected skips; both configured runtime-family lanes pass with 193 tests; the jda suite passes with 225 tests; both projects pass their configured build, lock, lint, format, and type checks.
 
 Track every original #2 requirement as already verified, completed by this work, explicitly superseded by the project-environment decision, or transferred to a linked simulator issue.
 
