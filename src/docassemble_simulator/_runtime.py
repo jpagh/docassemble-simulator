@@ -86,6 +86,16 @@ class RuntimeCompatibilityError(ValueError):
     """An installed runtime lacks a required simulator capability."""
 
 
+def _is_missing_module(error: ModuleNotFoundError, *names: str) -> bool:
+    """Whether the error is the absence of an expected module.
+
+    Distinguishes a missing capability (one of ``names`` is absent) from a
+    broken dependency *inside* an installed runtime, which must surface
+    unchanged rather than being misreported.
+    """
+    return getattr(error, "name", None) in names
+
+
 def _ensure_runtime_present() -> None:
     """Raise an actionable error when no docassemble runtime is installed."""
     import importlib
@@ -93,7 +103,7 @@ def _ensure_runtime_present() -> None:
     try:
         importlib.import_module("docassemble.base")
     except ModuleNotFoundError as missing:
-        if missing.name not in ("docassemble", "docassemble.base"):
+        if not _is_missing_module(missing, "docassemble", "docassemble.base"):
             # A dependency *inside* an installed runtime broke; surface it
             # unchanged rather than misreporting a missing runtime.
             raise
@@ -174,7 +184,7 @@ def runtime_context(namespace=None):
         try:
             context = importlib.import_module("docassemble.base.thread_context")
         except ModuleNotFoundError as missing:
-            if missing.name != "docassemble.base.thread_context":
+            if not _is_missing_module(missing, "docassemble.base.thread_context"):
                 _ensure_runtime_present()
                 raise
             # Either a legacy runtime (no thread_context module) or no
@@ -740,9 +750,14 @@ def _install_relationship_methods() -> None:
 def _register_pluggy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
     """Register simulator bindings through the docassemble 1.10 hook API."""
     from docassemble.base.plugin_manager import pm
-    from docassemble.webapp import main as webapp_main
-    from docassemble.webapp.interview import hooks as interview_hooks
-    from docassemble.webapp.main import hooks as main_hooks
+
+    try:
+        from docassemble.webapp import main as webapp_main
+        from docassemble.webapp.interview import hooks as interview_hooks
+        from docassemble.webapp.main import hooks as main_hooks
+    except (ModuleNotFoundError, ImportError) as missing:
+        name = getattr(missing, "name", None) or "docassemble.webapp"
+        raise _incomplete_runtime_error(name) from missing
 
     # These are normally auto-registered when docassemble.webapp imports;
     # only add them if somehow missing.
@@ -940,7 +955,7 @@ def _modern_hooks_available() -> bool:
     try:
         from docassemble.base.plugin_manager import pm  # noqa: F401
     except ModuleNotFoundError as error:
-        if error.name != "docassemble.base.plugin_manager":
+        if not _is_missing_module(error, "docassemble.base.plugin_manager"):
             _ensure_runtime_present()
             raise
         return False

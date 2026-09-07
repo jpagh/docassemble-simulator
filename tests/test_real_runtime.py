@@ -244,6 +244,10 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
     assert checked["ok"], label
     assert checked["result"]["failures"] == 0, label
 
+    download_checked = _run(interpreter, root, "check", "--interview", "download.yml")
+    assert download_checked["ok"], label
+    assert download_checked["result"]["failures"] == 0, label
+
     started = _run(interpreter, root, "start")
     assert started["ok"], label
     screen = started["result"]
@@ -260,6 +264,36 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
         "caption=2026-08-26",
     )
     assert answered["ok"], label
+
+
+def test_seek_contract_across_families(family_python, real_workspace):
+    label, interpreter = family_python
+    root = real_workspace
+    assert _runtime_family(interpreter) == (
+        "modern" if label == "1.10+" else "legacy"
+    ), f"{label} interpreter does not expose the expected runtime family"
+
+    assert _run(interpreter, root, "start")["ok"], label
+
+    sought = _run(interpreter, root, "seek", "filing_date", "--activate")
+    assert sought["ok"], label
+    screen = sought["result"]
+    assert screen["kind"] == "question", label
+    assert screen["question_text"], label
+    for leaked in ("questionText", "subquestionText", "continueLabel"):
+        assert leaked not in screen, (label, leaked)
+
+    missing = _run(
+        interpreter,
+        root,
+        "seek",
+        "no_such_variable_xyz",
+        "--fresh",
+        expected_code=2,
+    )
+    assert not missing["ok"], label
+    assert missing["error"]["kind"] == "unresolved-variable", label
+    assert "no_such_variable_xyz" in missing["error"]["message"], label
 
 
 def test_foreground_background_action_contract_across_families(

@@ -293,7 +293,7 @@ def test_composition_root_bootstraps_runtime_command_once(monkeypatch, tmp_path)
     assert calls == ["import", "bootstrap"]
 
 
-def _stub_incomplete_runtime(monkeypatch, *, with_server):
+def _stub_incomplete_runtime(monkeypatch, *, with_server, modern=False):
     da = types.ModuleType("docassemble")
     da.__path__ = []
     base = types.ModuleType("docassemble.base")
@@ -307,16 +307,31 @@ def _stub_incomplete_runtime(monkeypatch, *, with_server):
     util.Individual = type("Individual", (), {})
     webapp = types.ModuleType("docassemble.webapp")
     webapp.__path__ = []
-    for name, module in {
+    modules = {
         "docassemble": da,
         "docassemble.base": base,
         "docassemble.base.functions": functions,
         "docassemble.base.config": config,
         "docassemble.base.util": util,
         "docassemble.webapp": webapp,
-    }.items():
+    }
+    if modern:
+        pm_module = types.ModuleType("docassemble.base.plugin_manager")
+        pm_module.pm = types.SimpleNamespace(get_plugin=lambda name: object())
+        modules["docassemble.base.plugin_manager"] = pm_module
+    for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.delitem(sys.modules, "docassemble.base.plugin_manager", raising=False)
+    if not modern:
+        monkeypatch.delitem(
+            sys.modules, "docassemble.base.plugin_manager", raising=False
+        )
+    for absent in (
+        "docassemble.webapp.main",
+        "docassemble.webapp.main.hooks",
+        "docassemble.webapp.interview",
+        "docassemble.webapp.interview.hooks",
+    ):
+        monkeypatch.delitem(sys.modules, absent, raising=False)
     return functions
 
 
@@ -338,6 +353,28 @@ def test_incomplete_runtime_reports_structured_input_error(
     payload = json.loads(captured.out)
     assert payload["ok"] is False
     assert "docassemble.base.functions.server" in payload["error"]["message"]
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_modern_runtime_missing_webapp_reports_structured_input_error(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+    monkeypatch.setattr(cli, "ensure_importable", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    _stub_incomplete_runtime(monkeypatch, with_server=True, modern=True)
+    saved_argv = list(sys.argv)
+    try:
+        assert cli.main(["--json", "start"]) == 1
+    finally:
+        sys.argv[:] = saved_argv
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "webapp" in payload["error"]["message"]
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
 

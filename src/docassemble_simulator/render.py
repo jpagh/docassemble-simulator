@@ -16,6 +16,7 @@ from docassemble_simulator._files import (
     atomic_replace,
 )
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
+from docassemble_simulator._runtime import _is_missing_module
 from docassemble_simulator.execution import (
     FixtureSource,
     FreshSource,
@@ -37,7 +38,7 @@ def _custom_jinja_env():
     try:
         from docassemble.base.jinja import custom_jinja_env
     except ModuleNotFoundError as error:
-        if error.name != "docassemble.base.jinja":
+        if not _is_missing_module(error, "docassemble.base.jinja"):
             raise
         from docassemble.base.parse import custom_jinja_env
     return custom_jinja_env
@@ -142,7 +143,7 @@ def prepare_docx_template(path: str | Path):
         try:
             from docassemble.base.helpers import fix_quotes
         except ModuleNotFoundError as error:
-            if error.name != "docassemble.base.helpers":
+            if not _is_missing_module(error, "docassemble.base.helpers"):
                 raise
             from docassemble.base.parse import fix_quotes
         custom_jinja_env = _custom_jinja_env()

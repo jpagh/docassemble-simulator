@@ -19,33 +19,39 @@ from docassemble_simulator._runtime import (
 from docassemble_simulator.config import deep_merge
 
 
+def _stub_legacy_server_modules(monkeypatch, *, server=None, daconfig=None):
+    """Install stub runtime modules exposing a legacy ``functions.server``."""
+    da = types.ModuleType("docassemble")
+    da.__path__ = []
+    base = types.ModuleType("docassemble.base")
+    base.__path__ = []
+    functions = types.ModuleType("docassemble.base.functions")
+    functions.server = types.SimpleNamespace() if server is None else server
+    config = types.ModuleType("docassemble.base.config")
+    config.daconfig = {} if daconfig is None else daconfig
+    util = types.ModuleType("docassemble.base.util")
+    util.Individual = type("Individual", (), {})
+    da.base = base
+    base.functions = functions
+    base.config = config
+    base.util = util
+    for name, module in {
+        "docassemble": da,
+        "docassemble.base": base,
+        "docassemble.base.functions": functions,
+        "docassemble.base.config": config,
+        "docassemble.base.util": util,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    return functions, config
+
+
 class TestRuntimeBindings:
     def test_legacy_runtime_installs_file_metadata_on_existing_server(
         self, monkeypatch
     ):
-        da = types.ModuleType("docassemble")
-        da.__path__ = []
-        base = types.ModuleType("docassemble.base")
-        base.__path__ = []
-        functions = types.ModuleType("docassemble.base.functions")
         original_server = types.SimpleNamespace()
-        functions.server = original_server
-        config = types.ModuleType("docassemble.base.config")
-        config.daconfig = {}
-        util = types.ModuleType("docassemble.base.util")
-        util.Individual = type("Individual", (), {})
-        da.base = base
-        base.functions = functions
-        base.config = config
-        base.util = util
-        for name, module in {
-            "docassemble": da,
-            "docassemble.base": base,
-            "docassemble.base.functions": functions,
-            "docassemble.base.config": config,
-            "docassemble.base.util": util,
-        }.items():
-            monkeypatch.setitem(sys.modules, name, module)
+        functions, _ = _stub_legacy_server_modules(monkeypatch, server=original_server)
 
         register_hooks()
 
@@ -60,31 +66,13 @@ class TestRuntimeBindings:
     ):
         from docassemble_simulator import _runtime as runtime_module
 
-        da = types.ModuleType("docassemble")
-        da.__path__ = []
-        base = types.ModuleType("docassemble.base")
-        base.__path__ = []
-        functions = types.ModuleType("docassemble.base.functions")
-        functions.server = types.SimpleNamespace()
-        config = types.ModuleType("docassemble.base.config")
-        config.daconfig = {
-            "jinja data": {"category": "Family"},
-            "timezone": "America/New_York",
-        }
-        util = types.ModuleType("docassemble.base.util")
-        util.Individual = type("Individual", (), {})
-        da.base = base
-        base.config = config
-        base.functions = functions
-        base.util = util
-        for name, module in {
-            "docassemble": da,
-            "docassemble.base": base,
-            "docassemble.base.config": config,
-            "docassemble.base.functions": functions,
-            "docassemble.base.util": util,
-        }.items():
-            monkeypatch.setitem(sys.modules, name, module)
+        functions, _ = _stub_legacy_server_modules(
+            monkeypatch,
+            daconfig={
+                "jinja data": {"category": "Family"},
+                "timezone": "America/New_York",
+            },
+        )
 
         seen = {}
         authored = tmp_path / "authored-file"
@@ -140,24 +128,7 @@ class TestRuntimeBindings:
     def test_legacy_url_finder_normalizes_option_styles(self, monkeypatch, tmp_path):
         from docassemble_simulator import _runtime as runtime_module
 
-        da = types.ModuleType("docassemble")
-        da.__path__ = []
-        base = types.ModuleType("docassemble.base")
-        base.__path__ = []
-        functions = types.ModuleType("docassemble.base.functions")
-        functions.server = types.SimpleNamespace()
-        config = types.ModuleType("docassemble.base.config")
-        config.daconfig = {}
-        util = types.ModuleType("docassemble.base.util")
-        util.Individual = type("Individual", (), {})
-        for name, module in {
-            "docassemble": da,
-            "docassemble.base": base,
-            "docassemble.base.functions": functions,
-            "docassemble.base.config": config,
-            "docassemble.base.util": util,
-        }.items():
-            monkeypatch.setitem(sys.modules, name, module)
+        functions, _ = _stub_legacy_server_modules(monkeypatch)
         authored = tmp_path / "docassemble" / "pkg" / "data" / "static"
         authored.mkdir(parents=True)
         (authored / "template.docx").write_bytes(b"docx")
@@ -386,6 +357,57 @@ class TestIncompleteRuntime:
 
         with pytest.raises(RuntimeCompatibilityError, match="util"):
             register_hooks()
+
+    def test_register_hooks_missing_webapp_is_actionable(self, monkeypatch):
+        from docassemble_simulator._runtime import (
+            RuntimeCompatibilityError,
+            register_hooks,
+        )
+
+        da = types.ModuleType("docassemble")
+        da.__path__ = []
+        base = types.ModuleType("docassemble.base")
+        base.__path__ = []
+        pm_module = types.ModuleType("docassemble.base.plugin_manager")
+        pm_module.pm = types.SimpleNamespace(get_plugin=lambda name: object())
+        util = types.ModuleType("docassemble.base.util")
+        util.Individual = type("Individual", (), {})
+        webapp = types.ModuleType("docassemble.webapp")
+        webapp.__path__ = []
+        for name, module in {
+            "docassemble": da,
+            "docassemble.base": base,
+            "docassemble.base.plugin_manager": pm_module,
+            "docassemble.base.util": util,
+            "docassemble.webapp": webapp,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, module)
+        for absent in (
+            "docassemble.webapp.main",
+            "docassemble.webapp.main.hooks",
+            "docassemble.webapp.interview",
+            "docassemble.webapp.interview.hooks",
+        ):
+            monkeypatch.delitem(sys.modules, absent, raising=False)
+
+        with pytest.raises(RuntimeCompatibilityError, match="webapp"):
+            register_hooks()
+
+    def test_missing_module_probe_distinguishes_expected_from_broken(self):
+        from docassemble_simulator._runtime import _is_missing_module
+
+        assert _is_missing_module(
+            ModuleNotFoundError("absent", name="docassemble.base"),
+            "docassemble",
+            "docassemble.base",
+        )
+        assert not _is_missing_module(
+            ModuleNotFoundError("broken", name="docassemble.base.dep"),
+            "docassemble.base",
+        )
+        assert not _is_missing_module(
+            ModuleNotFoundError("unnamed"), "docassemble.base"
+        )
 
     def test_configuration_without_config_module_is_actionable(self, monkeypatch):
         from docassemble_simulator._runtime import (
