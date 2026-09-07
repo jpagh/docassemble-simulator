@@ -5,14 +5,24 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
 
-MODERN = "modern"
-LEGACY = "legacy"
-UNKNOWN = "unknown"
+
+class RuntimeProbe(str, Enum):
+    """Capability marker distinguishing the supported runtime families."""
+
+    MODERN = "modern"
+    LEGACY = "legacy"
+    UNKNOWN = "unknown"
+
+
+MODERN = RuntimeProbe.MODERN
+LEGACY = RuntimeProbe.LEGACY
+UNKNOWN = RuntimeProbe.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -21,7 +31,7 @@ class RuntimeFamily:
 
     label: str  # "1.10+" or "1.9.x" for failure messages
     interpreter: Path
-    probe: str  # MODERN or LEGACY capability marker
+    probe: RuntimeProbe
 
 
 def _family_probe_cmd():
@@ -35,7 +45,7 @@ def _family_probe_cmd():
     )
 
 
-def _query_family(interpreter, *, strict, env_var="", description=""):
+def _query_family(interpreter, *, strict, env_var="", description="") -> RuntimeProbe:
     """Return MODERN/LEGACY for an interpreter, or UNKNOWN when lax."""
     completed = subprocess.run(
         [str(interpreter), "-c", _family_probe_cmd()],
@@ -55,7 +65,11 @@ def _query_family(interpreter, *, strict, env_var="", description=""):
         pytest.skip(
             "docassemble runtime is not installed in the pytest interpreter: " + message
         )
-    return MODERN if completed.stdout.strip() == MODERN else LEGACY
+    return (
+        RuntimeProbe.MODERN
+        if completed.stdout.strip() == RuntimeProbe.MODERN.value
+        else RuntimeProbe.LEGACY
+    )
 
 
 def _probe_interpreter(env_var, description):
@@ -315,6 +329,9 @@ def test_seek_contract_across_families(family_python, real_workspace):
     assert not missing["ok"], label
     assert missing["error"]["kind"] == "unresolved-variable", label
     assert "no_such_variable_xyz" in missing["error"]["message"], label
+    diagnostics = missing.get("diagnostics") or []
+    assert diagnostics, label
+    assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
 
 
 def test_foreground_background_action_contract_across_families(
@@ -499,11 +516,13 @@ def test_generated_attachment_has_durable_local_uri_and_manifest(
     assert payload["ok"], label
     assert 'href="None"' not in payload["result"]["subquestion_text"], label
     assert 'href="file://' in payload["result"]["subquestion_text"], label
+    assert ".pdf" not in payload["result"]["subquestion_text"].lower(), label
     assert len(payload["attachments"]) == 1, label
     attachment = payload["attachments"][0]
     assert attachment["filename"].lower() == "local_document.docx", label
     assert Path(attachment["path"]).is_file(), label
     assert attachment["uri"] == Path(attachment["path"]).resolve().as_uri(), label
+    assert not list((real_workspace / ".simulator" / "files").glob("*.pdf")), label
     index = real_workspace / ".simulator" / "files" / "index.json"
     assert index.is_file(), label
 

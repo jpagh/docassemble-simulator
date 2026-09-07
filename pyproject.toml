@@ -44,6 +44,8 @@
         "**/*.ipynb",
     ]
     preset           = "basic"
+    # Shared fast-test helpers live in tests/ outside the src import root.
+    search-path      = ["src", "tests"]
 
 [tool.uv]
     # da19 and da110 pin disjoint versions of the same target packages, so

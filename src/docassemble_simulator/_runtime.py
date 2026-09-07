@@ -701,15 +701,15 @@ class _SimulatorRuntimeBindings:
         # `jinja data` and package settings through this hook.
         try:
             import docassemble.base.config as da_config_mod
-        except ModuleNotFoundError as missing:
+        except ImportError as error:
             raise _incomplete_runtime_error(
                 _missing_or_raise(
-                    missing,
+                    error,
                     "docassemble",
                     "docassemble.base",
                     "docassemble.base.config",
                 )
-            ) from missing
+            ) from error
 
         cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
         cfg.setdefault("debug", True)
@@ -733,46 +733,31 @@ def _import_legacy_runtime_modules():
     _ensure_runtime_present()
     try:
         from docassemble.base import functions
-    except ModuleNotFoundError as missing:
+    except ImportError as error:
         raise _incomplete_runtime_error(
             _missing_or_raise(
-                missing,
-                "docassemble",
-                "docassemble.base",
-                "docassemble.base.functions",
+                error, "docassemble", "docassemble.base", "docassemble.base.functions"
             )
-        ) from missing
-    except ImportError as broken:
-        raise _incomplete_runtime_error(
-            _missing_or_raise(
-                broken, "docassemble", "docassemble.base", "docassemble.base.functions"
-            )
-        ) from broken
+        ) from error
     return functions
 
 
 def _install_relationship_methods() -> None:
     try:
         from docassemble.base.util import Individual
-    except ModuleNotFoundError as missing:
-        raise _incomplete_runtime_error(
-            _missing_or_raise(
-                missing, "docassemble", "docassemble.base", "docassemble.base.util"
-            )
-        ) from missing
-    except ImportError as broken:
+    except ImportError as error:
         # `from util import Individual` with a missing Individual names the
         # attribute. AttributeError is never converted: a broken Individual
         # implementation must surface unchanged.
         raise _incomplete_runtime_error(
             _missing_or_raise(
-                broken,
+                error,
                 "docassemble",
                 "docassemble.base",
                 "docassemble.base.util",
                 "docassemble.base.util.Individual",
             )
-        ) from broken
+        ) from error
 
     # These convenience relationship methods are present in the documented
     # interview API but are commented out in some installed base packages.
@@ -798,29 +783,18 @@ def _register_pluggy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
         from docassemble.webapp import main as webapp_main
         from docassemble.webapp.interview import hooks as interview_hooks
         from docassemble.webapp.main import hooks as main_hooks
-    except ModuleNotFoundError as missing:
-        raise _incomplete_runtime_error(
-            _missing_or_raise(
-                missing,
-                "docassemble.webapp",
-                "docassemble.webapp.main",
-                "docassemble.webapp.main.hooks",
-                "docassemble.webapp.interview",
-                "docassemble.webapp.interview.hooks",
-            )
-        ) from missing
-    except ImportError as broken:
+    except ImportError as error:
         # Stubbed parents raise `cannot import name ...` naming the parent.
         raise _incomplete_runtime_error(
             _missing_or_raise(
-                broken,
+                error,
                 "docassemble.webapp",
                 "docassemble.webapp.main",
                 "docassemble.webapp.main.hooks",
                 "docassemble.webapp.interview",
                 "docassemble.webapp.interview.hooks",
             )
-        ) from broken
+        ) from error
 
     # These are normally auto-registered when docassemble.webapp imports;
     # only add them if somehow missing.
@@ -1198,14 +1172,9 @@ def _patch_legacy_background_seam(functions) -> None:
     )
     try:
         from docassemble.base import util as legacy_util
-    except ModuleNotFoundError as missing:
+    except ImportError as error:
         _missing_or_raise(
-            missing, "docassemble", "docassemble.base", "docassemble.base.util"
-        )
-        return
-    except ImportError as broken:
-        _missing_or_raise(
-            broken, "docassemble", "docassemble.base", "docassemble.base.util"
+            error, "docassemble", "docassemble.base", "docassemble.base.util"
         )
         return
     legacy_util.background_action = functions.background_action
@@ -1215,14 +1184,9 @@ def _legacy_functions_or_none():
     """Return the legacy functions module, or None when unavailable."""
     try:
         from docassemble.base import functions as legacy_functions
-    except ModuleNotFoundError as missing:
+    except ImportError as error:
         _missing_or_raise(
-            missing, "docassemble", "docassemble.base", "docassemble.base.functions"
-        )
-        return None
-    except ImportError as broken:
-        _missing_or_raise(
-            broken, "docassemble", "docassemble.base", "docassemble.base.functions"
+            error, "docassemble", "docassemble.base", "docassemble.base.functions"
         )
         return None
     if getattr(legacy_functions, "server", None) is None:
@@ -1244,9 +1208,9 @@ def _install_background_action_fallback(mode: str | None = None) -> None:
         return
     try:
         from docassemble.base import background, functions, util
-    except ModuleNotFoundError as missing:
+    except ImportError as error:
         if _is_missing_module(
-            missing,
+            error,
             "docassemble",
             "docassemble.base",
             "docassemble.base.background",
@@ -1262,27 +1226,9 @@ def _install_background_action_fallback(mode: str | None = None) -> None:
         # signal; a broken dep inside the modern modules must surface.
         raise _incomplete_runtime_error(
             _missing_or_raise(
-                missing, "docassemble.base.functions", "docassemble.base.util"
+                error, "docassemble.base.functions", "docassemble.base.util"
             )
-        ) from missing
-    except ImportError as broken:
-        if _is_missing_module(
-            broken,
-            "docassemble",
-            "docassemble.base",
-            "docassemble.base.background",
-        ):
-            legacy_functions = _legacy_functions_or_none()
-            if legacy_functions is None:
-                return
-            _patch_legacy_background_seam(legacy_functions)
-            _BACKGROUND_INSTALLED = True
-            return
-        raise _incomplete_runtime_error(
-            _missing_or_raise(
-                broken, "docassemble.base.functions", "docassemble.base.util"
-            )
-        ) from broken
+        ) from error
     # functions.background_action delegates through its module-global bg_action;
     # util re-exports the function object, while background.bg_action is useful
     # for runtimes that call the lower-level seam directly.

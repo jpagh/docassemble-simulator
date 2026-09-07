@@ -4,6 +4,21 @@ from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+from stub_runtime import (
+    docassemble_package as _docassemble_package,
+)
+from stub_runtime import (
+    install_legacy_modules as _install_legacy_modules,
+)
+from stub_runtime import (
+    install_modules as _install_modules,
+)
+from stub_runtime import (
+    legacy_functions as _legacy_functions,
+)
+from stub_runtime import (
+    stub_legacy_server_modules as _stub_legacy_server_modules,
+)
 
 from docassemble_simulator._artifacts import (
     LocalFileRegistry,
@@ -17,50 +32,6 @@ from docassemble_simulator._runtime import (
     register_hooks,
 )
 from docassemble_simulator.config import deep_merge
-
-
-def _docassemble_package():
-    """A bare ``docassemble`` + ``docassemble.base`` package skeleton."""
-    da = types.ModuleType("docassemble")
-    da.__path__ = []
-    base = types.ModuleType("docassemble.base")
-    base.__path__ = []
-    da.base = base
-    return da, base
-
-
-def _install_modules(monkeypatch, modules, absent=()):
-    """Install stub modules, removing names the test declares absent."""
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    for name in absent:
-        monkeypatch.delitem(sys.modules, name, raising=False)
-
-
-def _stub_legacy_server_modules(monkeypatch, *, server=None, daconfig=None):
-    """Install stub runtime modules exposing a legacy ``functions.server``."""
-    da, base = _docassemble_package()
-    functions = types.ModuleType("docassemble.base.functions")
-    functions.server = types.SimpleNamespace() if server is None else server
-    config = types.ModuleType("docassemble.base.config")
-    config.daconfig = {} if daconfig is None else daconfig
-    util = types.ModuleType("docassemble.base.util")
-    util.Individual = type("Individual", (), {})
-    da.base = base
-    base.functions = functions
-    base.config = config
-    base.util = util
-    _install_modules(
-        monkeypatch,
-        {
-            "docassemble": da,
-            "docassemble.base": base,
-            "docassemble.base.functions": functions,
-            "docassemble.base.config": config,
-            "docassemble.base.util": util,
-        },
-    )
-    return functions, config
 
 
 class TestRuntimeBindings:
@@ -158,60 +129,6 @@ class TestRuntimeBindings:
             via_kwargs = server.url_finder("template.docx", _package="docassemble.pkg")
         assert via_options == via_kwargs
         assert via_options.startswith("file://")
-
-
-def _legacy_functions(thread=None, daconfig=None, omit=()):
-    """A recording legacy ``functions`` double with thread-local semantics."""
-    thread = thread if thread is not None else types.SimpleNamespace()
-    calls = {"restored": []}
-    functions = types.SimpleNamespace(
-        server=types.SimpleNamespace(),
-        this_thread=thread,
-    )
-    functions.populate_this_thread_defaults = lambda: setattr(thread, "populated", True)
-    functions.backup_thread_variables = lambda: setattr(thread, "backed_up", True)
-
-    def restore_thread_variables(saved):
-        calls["restored"].append(dict(saved))
-        vars(thread).clear()
-        vars(thread).update(saved)
-
-    functions.restore_thread_variables = restore_thread_variables
-    for name in omit:
-        delattr(functions, name)
-    functions.calls = calls
-    functions.seed_daconfig = dict(daconfig or {})
-    return functions
-
-
-def _install_legacy_modules(monkeypatch, functions):
-    """Expose a legacy-only stub runtime through ``sys.modules``."""
-    da, base = _docassemble_package()
-    module = types.ModuleType("docassemble.base.functions")
-    for name in (
-        "server",
-        "this_thread",
-        "populate_this_thread_defaults",
-        "backup_thread_variables",
-        "restore_thread_variables",
-    ):
-        if hasattr(functions, name):
-            setattr(module, name, getattr(functions, name))
-    config = types.ModuleType("docassemble.base.config")
-    config.daconfig = functions.seed_daconfig
-    da.base = base
-    base.functions = module
-    base.config = config
-    _install_modules(
-        monkeypatch,
-        {
-            "docassemble": da,
-            "docassemble.base": base,
-            "docassemble.base.functions": module,
-            "docassemble.base.config": config,
-        },
-    )
-    return config
 
 
 class TestStatusField:
@@ -543,45 +460,9 @@ class TestIncompleteRuntime:
 
 class TestLegacyBackgroundFallback:
     def _stub_legacy_without_background(self, monkeypatch):
-        from docassemble_simulator import _runtime as runtime_module
+        from stub_runtime import stub_legacy_without_background
 
-        monkeypatch.setattr(runtime_module, "_BACKGROUND_INSTALLED", False)
-        da, base = _docassemble_package()
-        functions = types.ModuleType("docassemble.base.functions")
-        functions.server = types.SimpleNamespace()
-        interview = types.SimpleNamespace(
-            askfor=lambda *args, **kwargs: {
-                "question": types.SimpleNamespace(
-                    question_type="backgroundresponse", backgroundresponse=42
-                )
-            }
-        )
-        functions.this_thread = types.SimpleNamespace(
-            current_dict={},
-            current_info={},
-            interview_status=object(),
-            interview=interview,
-        )
-        config = types.ModuleType("docassemble.base.config")
-        config.daconfig = {}
-        util = types.ModuleType("docassemble.base.util")
-        util.Individual = type("Individual", (), {})
-        util.background_action = None
-        _install_modules(
-            monkeypatch,
-            {
-                "docassemble": da,
-                "docassemble.base": base,
-                "docassemble.base.functions": functions,
-                "docassemble.base.config": config,
-                "docassemble.base.util": util,
-            },
-            absent=(
-                "docassemble.base.background",
-                "docassemble.base.plugin_manager",
-            ),
-        )
-        return functions, util
+        return stub_legacy_without_background(monkeypatch)
 
     def test_legacy_background_dispatch_completes_without_background_module(
         self, monkeypatch
@@ -635,27 +516,16 @@ class TestLegacyBackgroundFallback:
 class TestMissingRuntime:
     @pytest.fixture
     def no_docassemble(self, monkeypatch):
+        from stub_runtime import blocked_docassemble_imports
+
         for name in [
             name
             for name in sys.modules
             if name == "docassemble" or name.startswith("docassemble.")
         ]:
             monkeypatch.delitem(sys.modules, name)
-        import importlib.abc
-
-        class _Blocker(importlib.abc.MetaPathFinder):
-            def find_spec(self, fullname, path=None, target=None):
-                if fullname == "docassemble" or fullname.startswith("docassemble."):
-                    raise ModuleNotFoundError(
-                        f"No module named {fullname!r}", name=fullname
-                    )
-
-        blocker = _Blocker()
-        sys.meta_path.insert(0, blocker)
-        try:
+        with blocked_docassemble_imports():
             yield
-        finally:
-            sys.meta_path.remove(blocker)
 
     def test_runtime_context_reports_missing_runtime(self, no_docassemble):
         from docassemble_simulator._runtime import (
@@ -837,6 +707,25 @@ class TestAttachmentFormats:
 
         assert seen["formats_to_use"] == ["docx"]
         assert seen["valid_formats"] == ["docx"]
+
+    def test_pdf_only_attachment_raises_unavailable(self, monkeypatch):
+        from docassemble_simulator import _runtime as runtime_module
+        from docassemble_simulator._runtime import PDFConversionUnavailable
+
+        monkeypatch.setattr(runtime_module, "_ATTACHMENT_FALLBACK_INSTALLED", False)
+
+        class FakeQuestion:
+            def finalize_attachment(self, _attachment, result, _user_dict):
+                return result  # pragma: no cover - wrapper raises first
+
+        parse = types.ModuleType("docassemble.base.parse")
+        parse.Question = FakeQuestion
+        monkeypatch.setitem(sys.modules, "docassemble.base.parse", parse)
+        install_attachment_filename_fallback()
+        result = {"formats_to_use": ["pdf"], "valid_formats": ["pdf"]}
+
+        with pytest.raises(PDFConversionUnavailable, match="PDF output"):
+            FakeQuestion().finalize_attachment(None, result, {})
 
 
 class TestForegroundBackgroundActions:

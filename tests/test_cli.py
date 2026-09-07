@@ -4,25 +4,13 @@ import sys
 import types
 from types import SimpleNamespace
 
+from stub_runtime import (
+    stub_incomplete_runtime as _stub_incomplete_runtime,
+)
+
 from docassemble_simulator import cli
 from docassemble_simulator._diagnostics import Diagnostic
 from docassemble_simulator._outcomes import ErrorKind, Failure, PublishedAttachment
-
-
-def _docassemble_package():
-    da = types.ModuleType("docassemble")
-    da.__path__ = []
-    base = types.ModuleType("docassemble.base")
-    base.__path__ = []
-    da.base = base
-    return da, base
-
-
-def _install_modules(monkeypatch, modules, absent=()):
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    for name in absent:
-        monkeypatch.delitem(sys.modules, name, raising=False)
 
 
 def _run_cli(*arguments):
@@ -309,40 +297,6 @@ def test_composition_root_bootstraps_runtime_command_once(monkeypatch, tmp_path)
     assert calls == ["import", "bootstrap"]
 
 
-def _stub_incomplete_runtime(monkeypatch, *, with_server, modern=False):
-    da, base = _docassemble_package()
-    functions = types.ModuleType("docassemble.base.functions")
-    if with_server:
-        functions.server = types.SimpleNamespace()
-    config = types.ModuleType("docassemble.base.config")
-    config.daconfig = {}
-    util = types.ModuleType("docassemble.base.util")
-    util.Individual = type("Individual", (), {})
-    webapp = types.ModuleType("docassemble.webapp")
-    webapp.__path__ = []
-    modules = {
-        "docassemble": da,
-        "docassemble.base": base,
-        "docassemble.base.functions": functions,
-        "docassemble.base.config": config,
-        "docassemble.base.util": util,
-        "docassemble.webapp": webapp,
-    }
-    if modern:
-        pm_module = types.ModuleType("docassemble.base.plugin_manager")
-        pm_module.pm = types.SimpleNamespace(get_plugin=lambda name: object())
-        modules["docassemble.base.plugin_manager"] = pm_module
-    absent = (
-        *(("docassemble.base.plugin_manager",) if not modern else ()),
-        "docassemble.webapp.main",
-        "docassemble.webapp.main.hooks",
-        "docassemble.webapp.interview",
-        "docassemble.webapp.interview.hooks",
-    )
-    _install_modules(monkeypatch, modules, absent=absent)
-    return functions
-
-
 def test_incomplete_runtime_reports_structured_input_error(
     monkeypatch, tmp_path, capsys
 ):
@@ -383,6 +337,34 @@ def test_modern_runtime_missing_webapp_reports_structured_input_error(
     payload = json.loads(captured.out)
     assert payload["ok"] is False
     assert "webapp" in payload["error"]["message"]
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_missing_runtime_reports_structured_input_error(monkeypatch, tmp_path, capsys):
+    from stub_runtime import blocked_docassemble_imports
+
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+    monkeypatch.setattr(cli, "ensure_importable", lambda *args, **kwargs: None)
+    monkeypatch.chdir(tmp_path)
+    for name in [
+        name
+        for name in sys.modules
+        if name == "docassemble" or name.startswith("docassemble.")
+    ]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    saved_argv = list(sys.argv)
+    try:
+        with blocked_docassemble_imports():
+            assert cli.main(["--json", "start"]) == 1
+    finally:
+        sys.argv[:] = saved_argv
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "No docassemble runtime" in payload["error"]["message"]
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
 
