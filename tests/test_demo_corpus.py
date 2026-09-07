@@ -16,11 +16,13 @@ from docassemble_simulator.demo_corpus import (
     FixtureCase,
     RuntimePackage,
     _network_sandbox_command,
+    _prepare_nltk_data,
     apply_expectations,
     discover_fixture_cases,
     load_expectations,
     resolve_provenance,
     run_case,
+    run_corpus,
     run_subprocess,
     select_cases,
     stage_corpus,
@@ -175,6 +177,182 @@ def test_start_rejects_unknown_outcome_kind(tmp_path: Path) -> None:
     assert result.classification == "protocol_error"
     assert result.error_kind == "protocol"
     assert "outcome kind" in (result.message or "")
+
+
+def test_run_corpus_preserves_input_order_when_cases_finish_out_of_order(
+    monkeypatch, tmp_path: Path
+) -> None:
+    cases = tuple(
+        FixtureCase(
+            tmp_path / f"{name}.yml",
+            Path(f"{name}.yml"),
+            name,
+            canonical_package_path=name,
+        )
+        for name in ("slow", "fast")
+    )
+    import threading
+
+    started = []
+    slow_started = threading.Event()
+
+    def fake_run_case(case, _staged_root, _interpreter, phase, **_kwargs):
+        started.append(case.relative_path.name)
+        if case.relative_path.name == "slow.yml":
+            slow_started.set()
+            slow_started.wait(1)
+        else:
+            assert slow_started.wait(1)
+        return CaseResult(
+            case.canonical_package_path,
+            case.relative_path.as_posix(),
+            case.sha256,
+            phase,
+            ("python",),
+            0,
+            0,
+            "success",
+        )
+
+    monkeypatch.setattr("docassemble_simulator.demo_corpus.run_case", fake_run_case)
+
+    results = run_corpus(cases, tmp_path, "python", ["start"], jobs=2)
+
+    assert started == ["slow.yml", "fast.yml"]
+    assert [result.fixture for result in results] == ["slow.yml", "fast.yml"]
+
+
+def test_run_corpus_bounds_active_workers(monkeypatch, tmp_path: Path) -> None:
+    import threading
+    import time
+
+    cases = tuple(
+        FixtureCase(
+            tmp_path / f"{index}.yml",
+            Path(f"{index}.yml"),
+            str(index),
+            canonical_package_path=str(index),
+        )
+        for index in range(5)
+    )
+    active = 0
+    maximum = 0
+    guard = threading.Lock()
+
+    def fake_run_case(case, _staged_root, _interpreter, phase, **_kwargs):
+        nonlocal active, maximum
+        with guard:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.02)
+        with guard:
+            active -= 1
+        return CaseResult(
+            case.canonical_package_path,
+            case.relative_path.as_posix(),
+            case.sha256,
+            phase,
+            ("python",),
+            0,
+            0,
+            "success",
+        )
+
+    monkeypatch.setattr("docassemble_simulator.demo_corpus.run_case", fake_run_case)
+    run_corpus(cases, tmp_path, "python", ["start"], jobs=2)
+
+    assert maximum <= 2
+
+
+def test_run_corpus_rejects_nonpositive_jobs(tmp_path: Path) -> None:
+    with pytest.raises(CorpusError, match="jobs must be positive"):
+        run_corpus([], tmp_path, "python", ["start"], jobs=0)
+
+
+def test_nltk_data_is_reused_and_refresh_keeps_active_generation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    identity = {"schema": 1, "python": "3.14", "runtime": {}, "packages": []}
+    downloads = []
+
+    def fake_download(_interpreter, cache):
+        downloads.append(cache)
+        for package in ("omw-1.4", "wordnet", "wordnet_ic", "sentiwordnet"):
+            (cache / "corpora" / package).mkdir(parents=True)
+        return True
+
+    monkeypatch.setattr(
+        "docassemble_simulator.demo_corpus._nltk_cache_identity", lambda _: identity
+    )
+    monkeypatch.setattr(
+        "docassemble_simulator.demo_corpus._download_nltk_data", fake_download
+    )
+
+    first = _prepare_nltk_data("python", tmp_path / "nltk")
+    warm = _prepare_nltk_data("python", tmp_path / "nltk")
+    assert first is not None
+    assert warm == first
+
+    (first / ".complete.json").unlink()
+    recovered = _prepare_nltk_data("python", tmp_path / "nltk")
+    refreshed = _prepare_nltk_data("python", tmp_path / "nltk", refresh=True)
+
+    assert recovered is not None
+    assert recovered != first
+    assert refreshed is not None
+    assert refreshed != recovered
+    assert first.is_dir()
+    assert len(downloads) == 3
+
+
+def test_nltk_data_preparation_is_shared_by_concurrent_callers(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    identity = {"schema": 1, "python": "3.14", "runtime": {}, "packages": []}
+    downloads = []
+
+    def fake_download(_interpreter, cache):
+        downloads.append(cache)
+        time.sleep(0.02)
+        for package in ("omw-1.4", "wordnet", "wordnet_ic", "sentiwordnet"):
+            (cache / "corpora" / package).mkdir(parents=True)
+        return True
+
+    monkeypatch.setattr(
+        "docassemble_simulator.demo_corpus._nltk_cache_identity", lambda _: identity
+    )
+    monkeypatch.setattr(
+        "docassemble_simulator.demo_corpus._download_nltk_data", fake_download
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda _: _prepare_nltk_data("python", tmp_path / "nltk"), range(2)
+            )
+        )
+
+    assert results[0] is not None
+    assert results[1] == results[0]
+    assert len(downloads) == 1
+
+
+def test_nltk_data_failed_preparation_does_not_publish_current(
+    monkeypatch, tmp_path: Path
+) -> None:
+    identity = {"schema": 1, "python": "3.14", "runtime": {}, "packages": []}
+    monkeypatch.setattr(
+        "docassemble_simulator.demo_corpus._nltk_cache_identity", lambda _: identity
+    )
+    monkeypatch.setattr(
+        "docassemble_simulator.demo_corpus._download_nltk_data", lambda *_: False
+    )
+
+    assert _prepare_nltk_data("python", tmp_path / "nltk") is None
+    assert not list((tmp_path / "nltk").rglob("current"))
 
 
 def test_runtime_drift_is_reported_without_running_interview(tmp_path: Path) -> None:

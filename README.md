@@ -19,6 +19,14 @@ upgrading installed packages. Use `--offline` or `[simulator].offline = true`
 to disable acquisition. An installed package that fails because of a native
 library is reported as an import failure, not silently reinstalled.
 
+The supported compatibility floor is docassemble 1.9.8, including the legacy
+thread-local/server runtime interface; the current 1.10+ family uses its modern
+hook interface. Both paths are exercised by the real-runtime lane. The target
+package interpreter is authoritative: a global `jda` or unrelated Python
+installation is not a substitute. On macOS, docassemble's native dependencies
+(such as zbar, commonly installed with Homebrew) must also be available to
+that interpreter; native-library failures are reported rather than hidden.
+
 ## Command model
 
 Run from a directory containing `docassemble/<package>/`, or pass `--root` and
@@ -256,11 +264,22 @@ deployment or staging responsibilities.
 
 ## Development
 
-Run the fast suite with:
+Run the complete suite with:
 
 ```sh
-uv run pytest -q
+mise run test
 ```
+
+For fast local feedback, run the tests without real runtimes or the external
+corpus:
+
+```sh
+mise run test:fast
+```
+
+The slower tests are split into explicit lanes. `test:runtime` runs the
+real-docassemble contract tests, while `test:corpus` runs the isolated external
+example corpus. The default `test` task still runs every test.
 
 Real-docassemble fidelity is covered by a separate lane that runs the CLI in a
 target package's interpreter (which supplies `docassemble` and `python-docx`):
@@ -269,9 +288,36 @@ target package's interpreter (which supplies `docassemble` and `python-docx`):
 scripts/test-real-runtime /path/to/target/package/.venv/bin/python
 ```
 
+Pass a second interpreter to also run the cross-family contract against
+docassemble 1.9.x:
+
+```sh
+scripts/test-real-runtime /path/to/1.10/package/.venv/bin/python \
+  /path/to/1.9/package/.venv/bin/python
+```
+
+The repo can provision both target interpreters itself from the `da19` /
+`da110` dependency groups in `pyproject.toml`:
+
+```sh
+mise run test:all-da
+```
+
+This syncs isolated `.venv-da19` (docassemble 1.9.x) and `.venv-da110`
+(1.10.x) environments and runs the suite once with both lanes wired up
+(`DASIMULATOR_REAL_PYTHON*` pointing at those interpreters), so every
+cross-family contract test exercises the modern and legacy runtimes. Use
+`mise run sync:da19` / `mise run sync:da110` to (re)provision one family
+without running the suite.
+
+There is no CI runner for the 1.9.x lane yet: `mise run test:all-da` is the
+manual regression gate that must pass before changes to the runtime
+compatibility layer merge (issue #1, story 23).
+
 The real-runtime tests use the current pytest interpreter when the runtime
 is installed; set `DASIMULATOR_REAL_PYTHON` to use a separate target
-environment. Without either runtime, they skip; a configured target that
+environment and `DASIMULATOR_REAL_PYTHON_19` for the 1.9.x lane. Without
+either runtime, they skip; a configured target that
 cannot run the tests fails clearly. The fast suite's stubbed runtime tests
 never require `docassemble`. PDF-only download screens are
 intentionally deferred to staging; the simulator gate is DOCX artifact
@@ -293,7 +339,10 @@ network-denial sandbox, and writes `results.jsonl`, `summary.json`, and
 `tests/demo_corpus_provenance.toml`; regenerate it with
 `--write-provenance-manifest PATH` when the fixture/runtime pair is intentionally
 updated. Missing optional NLTK corpora remain a dependency boundary by default;
-use `--prepare-runtime-data` explicitly when provisioning them is intended. Use
+use `--prepare-runtime-data` explicitly when provisioning them is intended.
+Prepared data is reused in a versioned cache; use `--nltk-cache-dir PATH` to
+choose its root or `--refresh-nltk-cache` to publish a new generation. Use
+`--jobs N` for bounded parallel case execution (serial by default),
 `--match`, `--shard INDEX/COUNT`, and
 `--expectations tests/demo_corpus_expectations.toml` for focused or reviewed
 runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and

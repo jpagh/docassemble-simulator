@@ -158,7 +158,7 @@ class TestDescribeChoices:
         assert thread.current_info == {}
         assert thread.current_variable == []
 
-    def test_object_field_uses_live_selection_keys(self):
+    def test_object_field_uses_live_selection_keys(self, da_stubs):
         field = _field(
             number=3,
             saveas=safeid("M.attorneys"),

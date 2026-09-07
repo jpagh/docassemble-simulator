@@ -819,18 +819,15 @@ def _build_status():
 @contextmanager
 def _interview_context(interview, namespace):
     from docassemble.base.functions import this_thread
-    from docassemble.base.thread_context import (
-        empty_globals,
-        global_context,
-        user_dict_context,
-    )
+
+    from docassemble_simulator._runtime import runtime_context
 
     status = _build_status()
     source = getattr(interview, "source", None)
     status.current_info.update(
         {"yaml_filename": getattr(source, "path", None), "url": None}
     )
-    with global_context(empty_globals()), user_dict_context(namespace):
+    with runtime_context(namespace):
         this_thread.current_info = status.current_info
         this_thread.interview = interview
         this_thread.interview_status = status
@@ -852,6 +849,8 @@ def _interview_context(interview, namespace):
 
 
 def _assemble(interview, namespace, status):
+    from docassemble_simulator._runtime import status_field
+
     try:
         interview.assemble(namespace, interview_status=status)
     except Exception as error:  # noqa: BLE001 - assembly may raise any interview-authored exception
@@ -876,15 +875,16 @@ def _assemble(interview, namespace, status):
     if question is not None and getattr(question, "question_type", None) == "continue":
         return {
             "kind": "continue",
-            "message": status.question_text or "continue screen reached",
+            "message": status_field(status, "question_text")
+            or "continue screen reached",
             "question_name": getattr(question, "name", None),
         }
     if question is not None:
         result = {
             "type": "question",
-            "question_text": status.question_text,
-            "subquestion_text": status.subquestion_text,
-            "continue_label": status.continue_label,
+            "question_text": status_field(status, "question_text"),
+            "subquestion_text": status_field(status, "subquestion_text"),
+            "continue_label": status_field(status, "continue_label"),
             "sought": status.sought,
             "orig_sought": status.orig_sought,
             "question": question,

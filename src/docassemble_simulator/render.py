@@ -16,6 +16,7 @@ from docassemble_simulator._files import (
     atomic_replace,
 )
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
+from docassemble_simulator._runtime import _is_missing_module
 from docassemble_simulator.execution import (
     FixtureSource,
     FreshSource,
@@ -31,6 +32,16 @@ class TemplateNotFoundError(Exception):
 
 class RenderExpectationError(Exception):
     """An ``expect-missing`` assertion did not hold."""
+
+
+def _custom_jinja_env():
+    try:
+        from docassemble.base.jinja import custom_jinja_env
+    except ModuleNotFoundError as error:
+        if not _is_missing_module(error, "docassemble.base.jinja"):
+            raise
+        from docassemble.base.parse import custom_jinja_env
+    return custom_jinja_env
 
 
 class RenderBindingError(ValueError):
@@ -129,8 +140,13 @@ def find_template(root: str | Path, filename: str) -> Path:
 def prepare_docx_template(path: str | Path):
     """Load and syntax-check a docx using the harness-compatible pipeline."""
     try:
-        from docassemble.base.helpers import fix_quotes
-        from docassemble.base.jinja import custom_jinja_env
+        try:
+            from docassemble.base.helpers import fix_quotes
+        except ModuleNotFoundError as error:
+            if not _is_missing_module(error, "docassemble.base.helpers"):
+                raise
+            from docassemble.base.parse import fix_quotes
+        custom_jinja_env = _custom_jinja_env()
         from docxtpl import DocxTemplate
 
         docx_template = DocxTemplate(path)
@@ -174,7 +190,8 @@ def render_template(
             set_context,
             this_thread,
         )
-        from docassemble.base.jinja import custom_jinja_env
+
+        custom_jinja_env = _custom_jinja_env()
 
         reset_context = reset_docx_context
         misc = this_thread.misc

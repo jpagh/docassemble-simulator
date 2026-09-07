@@ -4,31 +4,62 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
 
+pytestmark = pytest.mark.real_runtime
 
-@pytest.fixture
-def real_python():
-    # Run against the interpreter executing pytest by default.  The override
-    # remains useful for a separately provisioned target package.
-    configured = os.environ.get("DASIMULATOR_REAL_PYTHON")
-    interpreter = Path(configured or sys.executable).expanduser().absolute()
-    if not interpreter.is_file():
-        if configured:
-            pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
-        pytest.skip("set DASIMULATOR_REAL_PYTHON to a target-package interpreter")
-    probe = subprocess.run(
-        [str(interpreter), "-c", "import docassemble.base, docassemble.webapp"],
+
+class RuntimeProbe(str, Enum):
+    """Capability marker distinguishing the supported runtime families."""
+
+    MODERN = "modern"
+    LEGACY = "legacy"
+    UNKNOWN = "unknown"
+
+
+MODERN = RuntimeProbe.MODERN
+LEGACY = RuntimeProbe.LEGACY
+UNKNOWN = RuntimeProbe.UNKNOWN
+
+
+@dataclass(frozen=True)
+class RuntimeFamily:
+    """One supported docassemble runtime family under test."""
+
+    label: str  # "1.10+" or "1.9.x" for failure messages
+    interpreter: Path
+    probe: RuntimeProbe
+
+
+def _family_probe_cmd():
+    # Capability probe, not version branching: every supported family
+    # provides docassemble.base; the thread_context marker distinguishes the
+    # modern interface from the legacy one.
+    return (
+        "import docassemble.base, importlib.util; "
+        "print('modern' if importlib.util.find_spec("
+        "'docassemble.base.thread_context') is not None else 'legacy')"
+    )
+
+
+def _query_family(interpreter, *, strict, env_var="") -> RuntimeProbe:
+    """Return MODERN/LEGACY for an interpreter, or UNKNOWN when lax."""
+    completed = subprocess.run(
+        [str(interpreter), "-c", _family_probe_cmd()],
         capture_output=True,
         text=True,
         check=False,
     )
-    if probe.returncode:
-        message = (probe.stderr or probe.stdout).strip()
-        if configured:
+    if completed.returncode:
+        if not strict:
+            return UNKNOWN
+        message = (completed.stderr or completed.stdout).strip()
+        if env_var and os.environ.get(env_var):
             pytest.fail(
                 "the configured real-runtime interpreter cannot import the "
                 "docassemble runtime: " + message
@@ -36,7 +67,71 @@ def real_python():
         pytest.skip(
             "docassemble runtime is not installed in the pytest interpreter: " + message
         )
+    return (
+        RuntimeProbe.MODERN
+        if completed.stdout.strip() == RuntimeProbe.MODERN.value
+        else RuntimeProbe.LEGACY
+    )
+
+
+def _probe_interpreter(env_var, description):
+    configured = os.environ.get(env_var)
+    interpreter = Path(configured or sys.executable).expanduser().absolute()
+    if not interpreter.is_file():
+        if configured:
+            pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
+        pytest.skip(f"set {env_var} to a {description} target-package interpreter")
+    _query_family(interpreter, strict=True, env_var=env_var)
     return interpreter
+
+
+@pytest.fixture
+def real_python():
+    # Run against the interpreter executing pytest by default.  The override
+    # remains useful for a separately provisioned target package.
+    return _probe_interpreter("DASIMULATOR_REAL_PYTHON", "1.10+")
+
+
+@pytest.fixture
+def real_python_19():
+    # A separately provisioned docassemble 1.9.x target-package interpreter,
+    # or None when absent.  The family fixture below decides whether the
+    # absence skips, so requesting this fixture never skips the modern lane.
+    if not os.environ.get("DASIMULATOR_REAL_PYTHON_19"):
+        return None
+    return _probe_interpreter("DASIMULATOR_REAL_PYTHON_19", "1.9.x")
+
+
+def _runtime_family(interpreter):
+    return _query_family(interpreter, strict=False)
+
+
+def _assert_family_interpreter(case: RuntimeFamily) -> None:
+    """The provisioned interpreter must expose the expected family."""
+    assert _runtime_family(case.interpreter) == case.probe, (
+        f"{case.label} interpreter does not expose the expected runtime family"
+    )
+
+
+def _assert_question_screen(screen, case: RuntimeFamily) -> None:
+    """The stable snake-case screen shape holds for either family."""
+    assert screen["kind"] == "question", case.label
+    assert screen["question_text"], case.label
+    for leaked in ("questionText", "subquestionText", "continueLabel"):
+        assert leaked not in screen, (case.label, leaked)
+
+
+@pytest.fixture(params=[MODERN, LEGACY])
+def family_python(request, real_python, real_python_19):
+    """One RuntimeFamily per supported runtime family.
+
+    The legacy entry skips when no 1.9.x interpreter is provisioned.
+    """
+    if request.param == MODERN:
+        return RuntimeFamily("1.10+", real_python, MODERN)
+    if real_python_19 is None:
+        pytest.skip("set DASIMULATOR_REAL_PYTHON_19 to a 1.9.x interpreter")
+    return RuntimeFamily("1.9.x", real_python_19, LEGACY)
 
 
 @pytest.fixture
@@ -63,6 +158,25 @@ def real_workspace(tmp_path, real_python):
         "    required: False\n"
         "  - Caption: caption\n"
         "    required: False\n"
+    )
+    (questions / "background.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Greeter\n"
+        "fields:\n"
+        "  - Your name: user_name\n"
+        "---\n"
+        "code: |\n"
+        "  greeting_task = background_action('shout_name')\n"
+        "  greeting = greeting_task.get()\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Result\n"
+        "subquestion: ${ greeting }\n"
+        "---\n"
+        "event: shout_name\n"
+        "code: |\n"
+        "  background_response('hi:' + user_name)\n"
     )
     (questions / "download.yml").write_text(
         "---\n"
@@ -163,10 +277,110 @@ def _assert_helper_output(path):
         assert expected in xml
 
 
-def test_real_runtime_rehydrates_helpers_for_every_render_source(
-    real_python, real_workspace
-):
+def test_minimal_start_answer_contract_across_families(family_python, real_workspace):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
     root = real_workspace
+
+    _assert_family_interpreter(case)
+
+    checked = _run(interpreter, root, "check")
+    assert checked["ok"], label
+    assert checked["result"]["failures"] == 0, label
+
+    download_checked = _run(interpreter, root, "check", "--interview", "download.yml")
+    assert download_checked["ok"], label
+    assert download_checked["result"]["failures"] == 0, label
+
+    started = _run(interpreter, root, "start")
+    assert started["ok"], label
+    screen = started["result"]
+    _assert_question_screen(screen, case)
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "filing_date=2026-08-26",
+        "caption=2026-08-26",
+    )
+    assert answered["ok"], label
+    # The minimal interview has no further mandatory questions: answering the
+    # Dates screen must reach interview completion on either family (issue #1,
+    # story 3: same start command, same outcome shape).
+    assert answered["result"]["kind"] == "finished", (label, answered["result"])
+
+
+def test_seek_contract_across_families(family_python, real_workspace):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    assert _run(interpreter, root, "start")["ok"], label
+
+    sought = _run(interpreter, root, "seek", "filing_date", "--activate")
+    assert sought["ok"], label
+    screen = sought["result"]
+    _assert_question_screen(screen, case)
+
+    missing = _run(
+        interpreter,
+        root,
+        "seek",
+        "no_such_variable_xyz",
+        "--fresh",
+        expected_code=2,
+    )
+    assert not missing["ok"], label
+    assert missing["error"]["kind"] == "unresolved-variable", label
+    assert "no_such_variable_xyz" in missing["error"]["message"], label
+    diagnostics = missing.get("diagnostics") or []
+    assert diagnostics, label
+    assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
+
+
+def test_foreground_background_action_contract_across_families(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    checked = _run(interpreter, root, "check", "--interview", "background.yml")
+    assert checked["ok"], label
+    assert checked["result"]["failures"] == 0, label
+
+    started = _run(interpreter, root, "start", "--interview", "background.yml")
+    assert started["ok"], label
+    assert started["result"]["kind"] == "question", label
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "--interview",
+        "background.yml",
+        "user_name=Ada",
+    )
+    assert answered["ok"], label
+    assert "hi:Ada" in answered["result"].get("subquestion_text", ""), label
+
+    evaluated = _run(
+        interpreter, root, "eval", "--interview", "background.yml", "greeting"
+    )
+    assert evaluated["ok"], label
+    assert evaluated["result"]["value"] == "'hi:Ada'", label
+
+
+def test_real_runtime_rehydrates_helpers_for_every_render_source(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
     snapshot = root / "state.snapshot"
     fresh = root / "fresh.docx"
     fixture = root / "fixture.docx"
@@ -174,7 +388,7 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
     saved = root / "saved.docx"
 
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
@@ -184,10 +398,10 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         str(snapshot),
         "--output",
         str(fresh),
-    )["ok"]
-    assert not list((root / ".simulator" / "sessions").glob("*.pkl"))
+    )["ok"], label
+    assert not list((root / ".simulator" / "sessions").glob("*.pkl")), label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
@@ -195,9 +409,9 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         str(root / "fixture.py"),
         "--output",
         str(fixture),
-    )["ok"]
+    )["ok"], label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
@@ -206,22 +420,23 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         "--no-assemble",
         "--output",
         str(from_snapshot),
-    )["ok"]
-    assert _run(real_python, root, "start")["ok"]
+    )["ok"], label
+    assert _run(interpreter, root, "start")["ok"], label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "helpers.docx",
         "--no-assemble",
         "--output",
         str(saved),
-    )["ok"]
+    )["ok"], label
 
     for artifact in (fresh, fixture, from_snapshot, saved):
         _assert_helper_output(artifact)
 
 
+@pytest.mark.corpus
 def test_demo_corpus_runner_canary(real_python, tmp_path):
     fixture_root = Path(
         os.environ.get(
@@ -249,6 +464,10 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
             "--compile",
             "--start",
             "--prepare-runtime-data",
+            "--jobs",
+            os.environ.get("DASIMULATOR_CORPUS_JOBS", "1"),
+            "--nltk-cache-dir",
+            os.environ.get("DASIMULATOR_NLTK_CACHE_DIR", str(tmp_path / "nltk-cache")),
             "--match",
             r"^(yesno|fields|attachment-simple|objects-from-file|age_in_years|sections(-horizontal|-auto-open)?|path-and-mimetype|device(-ip)?|relationships)\.yml$",
             "--output",
@@ -267,6 +486,7 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
     assert summary["unexpected"] == 0
 
 
+@pytest.mark.corpus
 def test_demo_package_compiles_with_all_includes(real_python):
     package_root = (
         Path(
@@ -292,101 +512,111 @@ def test_demo_package_compiles_with_all_includes(real_python):
 
 
 def test_generated_attachment_has_durable_local_uri_and_manifest(
-    real_python, real_workspace
+    family_python, real_workspace
 ):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
     payload = _run(
-        real_python,
+        interpreter,
         real_workspace,
         "start",
         "--interview",
         "download.yml",
     )
 
-    assert payload["ok"]
-    assert 'href="None"' not in payload["result"]["subquestion_text"]
-    assert 'href="file://' in payload["result"]["subquestion_text"]
-    assert len(payload["attachments"]) == 1
+    assert payload["ok"], label
+    assert 'href="None"' not in payload["result"]["subquestion_text"], label
+    assert 'href="file://' in payload["result"]["subquestion_text"], label
+    assert ".pdf" not in payload["result"]["subquestion_text"].lower(), label
+    assert len(payload["attachments"]) == 1, label
     attachment = payload["attachments"][0]
-    assert attachment["filename"].lower() == "local_document.docx"
-    assert Path(attachment["path"]).is_file()
-    assert attachment["uri"] == Path(attachment["path"]).resolve().as_uri()
+    assert attachment["filename"].lower() == "local_document.docx", label
+    assert Path(attachment["path"]).is_file(), label
+    assert attachment["uri"] == Path(attachment["path"]).resolve().as_uri(), label
+    assert not list((real_workspace / ".simulator" / "files").glob("*.pdf")), label
     index = real_workspace / ".simulator" / "files" / "index.json"
-    assert index.is_file()
+    assert index.is_file(), label
 
     refreshed = _run(
-        real_python,
+        interpreter,
         real_workspace,
         "refresh",
         "--interview",
         "download.yml",
     )
-    assert refreshed["ok"]
-    assert refreshed["attachments"][0]["uri"] == attachment["uri"]
+    assert refreshed["ok"], label
+    assert refreshed["attachments"][0]["uri"] == attachment["uri"], label
 
 
-def test_real_date_answer_formats_and_rejections_roll_back(real_python, real_workspace):
+def test_real_date_answer_formats_and_rejections_roll_back(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
     root = real_workspace
-    assert _run(real_python, root, "start")["ok"]
+    assert _run(interpreter, root, "start")["ok"], label
     session = next((root / ".simulator" / "sessions").glob("*.pkl"))
     before = session.read_bytes()
 
     rejected = _run(
-        real_python,
+        interpreter,
         root,
         "answer",
         "filing_date=2026-02-30",
         "caption=changed",
         expected_code=2,
     )
-    assert rejected["error"]["kind"] == "answer-input"
-    assert session.read_bytes() == before
+    assert rejected["error"]["kind"] == "answer-input", label
+    assert session.read_bytes() == before, label
 
     accepted = _run(
-        real_python,
+        interpreter,
         root,
         "answer",
         "filing_date=2026-08-26",
         "caption=2026-08-26",
     )
-    assert accepted["ok"]
+    assert accepted["ok"], label
     assert (
-        _run(real_python, root, "eval", "type(filing_date).__name__")["result"]["value"]
+        _run(interpreter, root, "eval", "type(filing_date).__name__")["result"]["value"]
         == "'DADateTime'"
-    )
+    ), label
     assert (
-        _run(real_python, root, "eval", "filing_date.format('MM/dd/yyyy')")["result"][
+        _run(interpreter, root, "eval", "filing_date.format('MM/dd/yyyy')")["result"][
             "value"
         ]
         == "'08/26/2026'"
-    )
+    ), label
     assert (
-        _run(real_python, root, "eval", "type(caption).__name__")["result"]["value"]
+        _run(interpreter, root, "eval", "type(caption).__name__")["result"]["value"]
         == "'str'"
-    )
+    ), label
 
     artifact = root / "date.docx"
     assert _run(
-        real_python,
+        interpreter,
         root,
         "render",
         "date.docx",
         "--no-assemble",
         "--output",
         str(artifact),
-    )["ok"]
+    )["ok"], label
     xml = _document_xml(artifact)
-    assert "08/26/2026" in xml
-    assert "2026-08-26" in xml
+    assert "08/26/2026" in xml, label
+    assert "2026-08-26" in xml, label
 
-    assert _run(real_python, root, "start")["ok"]
+    assert _run(interpreter, root, "start")["ok"], label
     assert _run(
-        real_python,
+        interpreter,
         root,
         "answer",
         "--code",
         "filing_date='2026-08-26'",
-    )["ok"]
+    )["ok"], label
     assert (
-        _run(real_python, root, "eval", "type(filing_date).__name__")["result"]["value"]
+        _run(interpreter, root, "eval", "type(filing_date).__name__")["result"]["value"]
         == "'str'"
-    )
+    ), label

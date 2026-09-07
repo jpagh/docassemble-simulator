@@ -22,6 +22,7 @@ import tempfile
 import time
 import tomllib
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -507,15 +508,51 @@ def runtime_versions(interpreter: str | Path) -> dict[str, str | None]:
     }
 
 
-def _prepare_nltk_data(interpreter: str | Path) -> Path | None:
-    """Prepare optional linguistic data when explicitly requested."""
-    cache = Path(tempfile.mkdtemp(prefix="docassemble-demo-nltk-"))
+_NLTK_PACKAGES = ("omw-1.4", "wordnet", "wordnet_ic", "sentiwordnet")
+_NLTK_CACHE_SCHEMA = 1
+
+
+def _default_nltk_cache_dir() -> Path:
+    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+    return base / "docassemble-simulator" / "nltk"
+
+
+def _nltk_cache_identity(interpreter: str | Path) -> dict:
+    return {
+        "schema": _NLTK_CACHE_SCHEMA,
+        "python": _python_version(interpreter),
+        "runtime": runtime_versions(interpreter),
+        "packages": list(_NLTK_PACKAGES),
+    }
+
+
+def _nltk_cache_key(identity: dict) -> str:
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
+
+
+def _nltk_corpora_are_present(path: Path) -> bool:
+    return all((path / "corpora" / package).is_dir() for package in _NLTK_PACKAGES)
+
+
+def _nltk_data_is_valid(path: Path, identity: dict) -> bool:
+    marker = path / ".complete.json"
+    if not marker.is_file():
+        return False
+    try:
+        completed_identity = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return completed_identity == identity and _nltk_corpora_are_present(path)
+
+
+def _download_nltk_data(interpreter: str | Path, cache: Path) -> bool:
     script = f"""
 import nltk
 from pathlib import Path
 from zipfile import ZipFile
-cache = Path(r'{cache}')
-for package in ('omw-1.4', 'wordnet', 'wordnet_ic', 'sentiwordnet'):
+cache = Path({str(cache)!r})
+for package in {_NLTK_PACKAGES!r}:
     if not nltk.download(package, download_dir=str(cache), quiet=True):
         raise SystemExit(1)
     archive = cache / 'corpora' / (package + '.zip')
@@ -532,12 +569,81 @@ for package in ('omw-1.4', 'wordnet', 'wordnet_ic', 'sentiwordnet'):
             timeout=60,
         )
     except subprocess.TimeoutExpired:
-        shutil.rmtree(cache, ignore_errors=True)
+        return False
+    return completed.returncode == 0
+
+
+def _acquire_nltk_cache_lock(lock: Path) -> bool:
+    deadline = time.monotonic() + 120
+    while True:
+        try:
+            lock.mkdir()
+            (lock / "owner").write_text(str(os.getpid()), encoding="ascii")
+            return True
+        except FileExistsError:
+            try:
+                stale = time.time() - lock.stat().st_mtime > 180
+            except OSError:
+                stale = False
+            if stale:
+                shutil.rmtree(lock, ignore_errors=True)
+                continue
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
+def _prepare_nltk_data(
+    interpreter: str | Path,
+    cache_dir: str | Path | None = None,
+    *,
+    refresh: bool = False,
+) -> Path | None:
+    """Prepare optional linguistic data in a reusable, complete cache."""
+    identity = _nltk_cache_identity(interpreter)
+    root = (
+        Path(cache_dir).expanduser().resolve()
+        if cache_dir
+        else _default_nltk_cache_dir().resolve()
+    )
+    cache_root = root / _nltk_cache_key(identity)
+    generations = cache_root / "generations"
+    current = cache_root / "current"
+    lock = cache_root / ".lock"
+    generations.mkdir(parents=True, exist_ok=True)
+    if not refresh and current.is_symlink():
+        candidate = current.resolve()
+        if _nltk_data_is_valid(candidate, identity):
+            return candidate
+    if not _acquire_nltk_cache_lock(lock):
         return None
-    if completed.returncode:
-        shutil.rmtree(cache, ignore_errors=True)
-        return None
-    return cache
+    staging = None
+    try:
+        if not refresh and current.is_symlink():
+            candidate = current.resolve()
+            if _nltk_data_is_valid(candidate, identity):
+                return candidate
+        staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=generations))
+        if not _download_nltk_data(interpreter, staging):
+            return None
+        if not _nltk_corpora_are_present(staging):
+            return None
+        (staging / ".complete.json").write_text(
+            json.dumps(identity, sort_keys=True), encoding="utf-8"
+        )
+        if not _nltk_data_is_valid(staging, identity):
+            return None
+        published = generations / f"generation-{time.time_ns()}"
+        staging.rename(published)
+        staging = None
+        link = cache_root / f".current-{os.getpid()}-{time.time_ns()}"
+        link.symlink_to(published.relative_to(cache_root), target_is_directory=True)
+        os.replace(link, current)
+        return published
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(lock, ignore_errors=True)
 
 
 def _python_version(interpreter: str | Path) -> str:
@@ -1058,10 +1164,16 @@ def run_corpus(
     nltk_data: str | Path | None = None,
     provenance_manifest: str | Path | None = None,
     prepare_runtime_data: bool = False,
+    jobs: int = 1,
 ) -> tuple[CaseResult, ...]:
+    if jobs <= 0:
+        raise CorpusError("jobs must be positive")
     selected_phases = tuple(phases)
-    results = tuple(
-        run_case(
+    work = tuple((case, phase) for case in cases for phase in selected_phases)
+
+    def execute(item: tuple[FixtureCase, RunPhase | str]) -> CaseResult:
+        case, phase = item
+        return run_case(
             case,
             staged_root,
             interpreter,
@@ -1072,9 +1184,13 @@ def run_corpus(
             provenance_manifest=provenance_manifest,
             prepare_runtime_data=prepare_runtime_data,
         )
-        for case in cases
-        for phase in selected_phases
-    )
+
+    if jobs == 1:
+        results = tuple(map(execute, work))
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            # executor.map retains input order while bounding active workers.
+            results = tuple(executor.map(execute, work))
     return apply_expectations(results, expectations)
 
 
@@ -1330,10 +1446,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--shard", type=_parse_shard)
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument(
         "--prepare-runtime-data",
         action="store_true",
         help="download missing NLTK data before entering the network-denied sandbox",
+    )
+    parser.add_argument(
+        "--nltk-cache-dir",
+        help="directory for reusable prepared NLTK data",
+    )
+    parser.add_argument(
+        "--refresh-nltk-cache",
+        action="store_true",
+        help="prepare a new NLTK cache generation instead of reusing one",
     )
     parser.add_argument("--output", default=".simulator/demo-corpus-results")
     default_manifest = (
@@ -1351,6 +1477,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("timeout must be positive")
+    if args.jobs <= 0:
+        parser.error("jobs must be positive")
+    if args.refresh_nltk_cache and not args.prepare_runtime_data:
+        parser.error("--refresh-nltk-cache requires --prepare-runtime-data")
     try:
         matcher = re.compile(args.match) if args.match else None
         packages = discover_runtime_packages(args.interpreter)
@@ -1400,8 +1530,16 @@ def main(argv: list[str] | None = None) -> int:
             if expectation.key in selected_keys
         )
         nltk_data = (
-            _prepare_nltk_data(args.interpreter) if args.prepare_runtime_data else None
+            _prepare_nltk_data(
+                args.interpreter,
+                args.nltk_cache_dir,
+                refresh=args.refresh_nltk_cache,
+            )
+            if args.prepare_runtime_data
+            else None
         )
+        if args.prepare_runtime_data and nltk_data is None:
+            raise CorpusError("could not prepare reusable NLTK data")
         package_smoke = run_demo_package_smoke(
             args.fixtures,
             args.interpreter,
@@ -1420,6 +1558,7 @@ def main(argv: list[str] | None = None) -> int:
                 nltk_data=nltk_data,
                 provenance_manifest=args.provenance_manifest,
                 prepare_runtime_data=args.prepare_runtime_data,
+                jobs=args.jobs,
             )
             summary = write_reports(
                 results,
@@ -1428,6 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
                     "fixtures": str(Path(args.fixtures).resolve()),
                     "interpreter": str(Path(args.interpreter).expanduser().absolute()),
                     "phases": [phase.value for phase in phases],
+                    "jobs": args.jobs,
                     "runtime_versions": runtime_versions(args.interpreter),
                     "python_version": _python_version(args.interpreter),
                     "fixture_revision": _git_revision(args.fixtures),
@@ -1437,8 +1577,6 @@ def main(argv: list[str] | None = None) -> int:
                     "demo_package": package_smoke,
                 },
             )
-        if nltk_data is not None:
-            shutil.rmtree(nltk_data, ignore_errors=True)
         for result in results:
             if result.classification == CorpusClassification.RUNTIME_DRIFT:
                 print(

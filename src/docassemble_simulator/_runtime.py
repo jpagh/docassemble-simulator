@@ -72,7 +72,6 @@ def _file_metadata(reference, *, resolved_path: Path | None = None) -> dict:
 
 
 _BACKGROUND_ACTION_MODE = "foreground"
-_BACKGROUND_INSTALLED = False
 _DIAGNOSTIC_LOGGING_INSTALLED = False
 _ACTIVE_ROOT: ContextVar[Path | None] = ContextVar(
     "docassemble_simulator_runtime_root", default=None
@@ -80,6 +79,159 @@ _ACTIVE_ROOT: ContextVar[Path | None] = ContextVar(
 _ACTIVE_BACKGROUND_ACTION_MODE: ContextVar[str | None] = ContextVar(
     "docassemble_simulator_background_action_mode", default=None
 )
+
+
+class RuntimeCompatibilityError(ValueError):
+    """An installed runtime lacks a required simulator capability."""
+
+
+def _is_missing_module(error: BaseException, *names: str) -> bool:
+    """Whether the error is the absence of an expected module.
+
+    Distinguishes a missing capability (one of ``names`` is absent) from a
+    broken dependency *inside* an installed runtime, which must surface
+    unchanged rather than being misreported.
+    """
+    return getattr(error, "name", None) in names
+
+
+def _missing_or_raise(error: BaseException, *names: str) -> str:
+    """Return the absent capability, or re-raise a broken dependency.
+
+    Centralises the missing-capability vs broken-dependency distinction used
+    at every runtime import boundary: only an error naming one of ``names``
+    is treated as an absent capability; anything else (a broken dependency
+    *inside* an installed runtime) propagates unchanged rather than being
+    misreported as an incomplete runtime.
+
+    When it returns, ``error.name`` is guaranteed to be one of ``names``.
+    """
+    if not _is_missing_module(error, *names):
+        raise error
+    return error.name
+
+
+def _ensure_runtime_present() -> None:
+    """Raise an actionable error when no docassemble runtime is installed."""
+    import importlib
+
+    try:
+        importlib.import_module("docassemble.base")
+    except ModuleNotFoundError as missing:
+        if not _is_missing_module(missing, "docassemble", "docassemble.base"):
+            # A dependency *inside* an installed runtime broke; surface it
+            # unchanged rather than misreporting a missing runtime.
+            raise
+        raise RuntimeCompatibilityError(
+            "No docassemble runtime is installed in the target package "
+            f"interpreter ({sys.executable}). Install docassemble 1.9.x or "
+            "1.10+ into that interpreter; the simulator does not substitute "
+            "another Python environment."
+        ) from missing
+
+
+class _ModernContextAdapter:
+    def __init__(self, context):
+        self.context = context
+
+    @contextmanager
+    def activate(self, namespace=None):
+        with self.context.global_context(self.context.empty_globals()):
+            if namespace is None:
+                yield
+            else:
+                with self.context.user_dict_context(namespace):
+                    yield
+
+
+class _LegacyContextAdapter:
+    def __init__(self, functions, config_loader=None):
+        self.functions = functions
+        self.config_loader = config_loader
+        for name in (
+            "server",
+            "this_thread",
+            "populate_this_thread_defaults",
+            "backup_thread_variables",
+            "restore_thread_variables",
+        ):
+            if not hasattr(functions, name):
+                raise RuntimeCompatibilityError(
+                    f"Unsupported legacy docassemble runtime: missing functions.{name}. "
+                    "Use a complete supported runtime in the target package interpreter."
+                )
+
+    @contextmanager
+    def activate(self, namespace=None):
+        functions = self.functions
+        thread = functions.this_thread
+        previous = dict(vars(thread))
+        unset = object()
+        previous_daconfig = getattr(functions.server, "daconfig", unset)
+        try:
+            # The native backup helper mutates misc and evaluation state. Never
+            # let it operate on the surrounding callback's objects.
+            vars(thread).clear()
+            functions.populate_this_thread_defaults()
+            functions.backup_thread_variables()
+            if namespace is not None:
+                thread.current_dict = namespace
+                thread.internal = namespace.get("_internal", {})
+            if self.config_loader is not None:
+                # Mirror the modern hook's per-read freshness: server config
+                # is re-published on every operation entry, not snapshotted
+                # once at installation.
+                functions.server.daconfig = self.config_loader()
+            yield
+        finally:
+            vars(thread).clear()
+            functions.restore_thread_variables(previous)
+            # Nested operations with different roots/configurations must not
+            # leak their server config outward (spec: restore prior state in a
+            # finally path; ADR-0007). A first activation with no prior value
+            # keeps the freshly published config, matching install-time
+            # binding.
+            if previous_daconfig is not unset:
+                functions.server.daconfig = previous_daconfig
+
+
+@contextmanager
+def runtime_context(namespace=None):
+    """Scope native runtime state without exporting a replacement DA module."""
+    import importlib
+
+    try:
+        context = importlib.import_module("docassemble.base.thread_context")
+    except ModuleNotFoundError as missing:
+        if not _is_missing_module(missing, "docassemble.base.thread_context"):
+            # A dependency *inside* an installed modern context implementation
+            # broke; surface it unchanged rather than misreporting a legacy
+            # runtime. _ensure_runtime_present() distinguishes no-runtime.
+            _ensure_runtime_present()
+            raise
+        # Either a legacy runtime (no thread_context module) or no
+        # runtime at all; the presence check reports the latter.
+        functions = _import_legacy_runtime_modules()
+
+        adapter = _LegacyContextAdapter(
+            functions, _SimulatorRuntimeBindings().get_configuration
+        )
+    else:
+        adapter = _ModernContextAdapter(context)
+    with adapter.activate(namespace):
+        yield
+
+
+def status_field(status, field_name):
+    """Read the stable outcome vocabulary from either native status shape."""
+    legacy_names = {
+        "question_text": "questionText",
+        "subquestion_text": "subquestionText",
+        "continue_label": "continueLabel",
+    }
+    if hasattr(status, field_name):
+        return getattr(status, field_name)
+    return getattr(status, legacy_names.get(field_name, field_name))
 
 
 class PDFConversionUnavailable(RuntimeError):
@@ -331,9 +483,6 @@ def _configured_timezone() -> str:
         return "America/New_York"
 
 
-_ATTACHMENT_FALLBACK_INSTALLED = False
-
-
 def _without_pdf_conversion(result: dict) -> None:
     """Remove generated PDF formats before docassemble dispatches converters."""
     formats = result.get("formats_to_use")
@@ -354,10 +503,10 @@ def install_attachment_filename_fallback() -> None:
     Keep the server behavior for named files and only supply a fallback for
     this invalid ``None`` case. PDF conversion is handled separately by
     removing generated ``pdf`` formats before the real finalizer runs.
+
+    Idempotent per ``Question`` class via the wrapper marker, so a fresh stub
+    runtime in tests is wrapped without toggling module globals (ADR-0005).
     """
-    global _ATTACHMENT_FALLBACK_INSTALLED
-    if _ATTACHMENT_FALLBACK_INSTALLED:
-        return
     try:
         from docassemble.base.parse import Question
     except ImportError:
@@ -367,7 +516,6 @@ def install_attachment_filename_fallback() -> None:
     if original is None:
         return
     if getattr(original, "_dasimulator_filename_fallback", False):
-        _ATTACHMENT_FALLBACK_INSTALLED = True
         return
 
     def finalize_with_filename(self, attachment, result, user_dict):
@@ -389,7 +537,6 @@ def install_attachment_filename_fallback() -> None:
 
     finalize_with_filename._dasimulator_filename_fallback = True
     Question.finalize_attachment = finalize_with_filename
-    _ATTACHMENT_FALLBACK_INSTALLED = True
 
 
 def install_diagnostic_logging() -> None:
@@ -458,31 +605,179 @@ def _authored_file_path(
     return candidate if candidate.is_file() else None
 
 
-def register_hooks() -> None:
-    """Register the webapp hook modules plus a minimal local implementation.
+def _legacy_lookup_options(options: dict | None) -> dict:
+    """Fold 1.9's underscored lookup kwargs onto the canonical names.
 
-    The webapp default implementations of several hooks raise
-    NotImplementedError when no server is running; MinimalHooks overrides
-    exactly those.
+    The canonical ``question``/``package`` keys win when both styles are
+    present; unknown keys are preserved for the caller to swallow or forward.
     """
-    from docassemble.base.plugin_manager import pm
-    from docassemble.webapp import main as webapp_main
-    from docassemble.webapp.interview import hooks as interview_hooks
-    from docassemble.webapp.main import hooks as main_hooks
+    normalized = dict(options or {})
+    for canonical, legacy in (("question", "_question"), ("package", "_package")):
+        if canonical not in normalized:
+            if legacy in normalized:
+                normalized[canonical] = normalized.pop(legacy)
+        else:
+            normalized.pop(legacy, None)
+    return normalized
 
-    # These are normally auto-registered when docassemble.webapp imports;
-    # only add them if somehow missing.
-    for module, name in (
-        (webapp_main, "docassemble.webapp.main"),
-        (main_hooks, "docassemble.webapp.main.hooks"),
-        (interview_hooks, "docassemble.webapp.interview.hooks"),
+
+class _SimulatorRuntimeBindings:
+    """Shared simulator behavior behind the docassemble runtime adapters."""
+
+    def get_ext_and_mimetype(self, filename):
+        metadata = _file_metadata(filename)
+        return metadata["extension"].lower() or None, metadata["mimetype"]
+
+    def get_default_voice(self):
+        return ""
+
+    def get_default_dialect(self):
+        return ""
+
+    def get_default_language(self):
+        return "en"
+
+    def get_default_locale(self):
+        return "en_US"
+
+    def get_default_timezone(self):
+        return _configured_timezone()
+
+    def get_default_country(self):
+        return "US"
+
+    def get_hostname(self):
+        return "localhost"
+
+    def get_debug_status(self):
+        return True
+
+    def get_main_page_parts(self):
+        return {}
+
+    def get_button_class_prefix(self):
+        return "btn"
+
+    def save_numbered_file(self, filename, orig_path, yaml_file_name=None, uid=None):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        registry = active_file_registry()
+        if registry is None:
+            raise RuntimeError("simulator local file registry is not active")
+        return registry.save(filename, orig_path)
+
+    def file_finder(
+        self,
+        file_reference,
+        question=None,
+        folder=None,
+        package=None,
+        filename=None,
+        return_nonexistent=False,
+        uids=None,
     ):
-        if pm.get_plugin(name) is None:
-            pm.register(module, name=name)
-    from docassemble.base.util import Individual
+        if isinstance(file_reference, str) and file_reference.startswith(
+            ("http://", "https://")
+        ):
+            return _file_metadata(file_reference)
+        path = _authored_file_path(
+            file_reference, question=question, folder=folder, package=package
+        )
+        if path is None and return_nonexistent and isinstance(file_reference, str):
+            # Preserve the standard hook's missing-file semantics while
+            # keeping path construction confined to the active workspace.
+            return None
+        if path is None:
+            return None
+        return _file_metadata(path, resolved_path=path)
+
+    def file_number_finder(
+        self, file_number, filename=None, uids=None, privileged=False
+    ):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        registry = active_file_registry()
+        return None if registry is None else registry.find(file_number, filename)
+
+    def url_finder(self, file_reference, kwargs=None):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        options = _legacy_lookup_options(kwargs)
+        question = options.get("question")
+        package = options.get("package")
+        registry = active_file_registry()
+        if registry is not None:
+            url = registry.url_for(file_reference)
+            if url is not None:
+                return url
+        path = _authored_file_path(file_reference, question=question, package=package)
+        return None if path is None else path.resolve().as_uri()
+
+    def get_configuration(self):
+        # Return the live server config (not a stub): interviews read
+        # `jinja data` and package settings through this hook.
+        try:
+            import docassemble.base.config as da_config_mod
+        except ImportError as error:
+            raise _incomplete_runtime_error(
+                _missing_or_raise(
+                    error,
+                    "docassemble",
+                    "docassemble.base",
+                    "docassemble.base.config",
+                )
+            ) from error
+
+        cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
+        cfg.setdefault("debug", True)
+        cfg.setdefault("host", "localhost")
+        cfg.setdefault("locale", "en_US")
+        cfg.setdefault("country", "US")
+        return cfg
+
+
+def _incomplete_runtime_error(missing: str) -> RuntimeCompatibilityError:
+    """Actionable error for an installed but incomplete runtime."""
+    return RuntimeCompatibilityError(
+        f"Unsupported or incomplete docassemble runtime: missing {missing}. "
+        "Use the target package interpreter containing docassemble 1.9.x "
+        "or 1.10+."
+    )
+
+
+def _import_legacy_runtime_modules():
+    """Import required legacy modules, converting failures to actionable errors."""
+    _ensure_runtime_present()
+    try:
+        from docassemble.base import functions
+    except ImportError as error:
+        raise _incomplete_runtime_error(
+            _missing_or_raise(
+                error, "docassemble", "docassemble.base", "docassemble.base.functions"
+            )
+        ) from error
+    return functions
+
+
+def _install_relationship_methods() -> None:
+    try:
+        from docassemble.base.util import Individual
+    except ImportError as error:
+        # `from util import Individual` with a missing Individual names the
+        # attribute. AttributeError is never converted: a broken Individual
+        # implementation must surface unchanged.
+        raise _incomplete_runtime_error(
+            _missing_or_raise(
+                error,
+                "docassemble",
+                "docassemble.base",
+                "docassemble.base.util",
+                "docassemble.base.util.Individual",
+            )
+        ) from error
 
     # These convenience relationship methods are present in the documented
-    # interview API but are commented out in the installed base package.
+    # interview API but are commented out in some installed base packages.
     if not hasattr(Individual, "get_spouse"):
         Individual.get_spouse = lambda self, tree, create=False: self.get_peer_relation(
             "spouse", tree, create=create
@@ -496,6 +791,38 @@ def register_hooks() -> None:
             target, "spouse", tree
         )
 
+
+def _register_pluggy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
+    """Register simulator bindings through the docassemble 1.10 hook API."""
+    from docassemble.base.plugin_manager import pm
+
+    try:
+        from docassemble.webapp import main as webapp_main
+        from docassemble.webapp.interview import hooks as interview_hooks
+        from docassemble.webapp.main import hooks as main_hooks
+    except ImportError as error:
+        # Stubbed parents raise `cannot import name ...` naming the parent.
+        raise _incomplete_runtime_error(
+            _missing_or_raise(
+                error,
+                "docassemble.webapp",
+                "docassemble.webapp.main",
+                "docassemble.webapp.main.hooks",
+                "docassemble.webapp.interview",
+                "docassemble.webapp.interview.hooks",
+            )
+        ) from error
+
+    # These are normally auto-registered when docassemble.webapp imports;
+    # only add them if somehow missing.
+    for module, name in (
+        (webapp_main, "docassemble.webapp.main"),
+        (main_hooks, "docassemble.webapp.main.hooks"),
+        (interview_hooks, "docassemble.webapp.interview.hooks"),
+    ):
+        if pm.get_plugin(name) is None:
+            pm.register(module, name=name)
+
     import pluggy
 
     hookimpl = pluggy.HookimplMarker("docassemble")
@@ -505,59 +832,55 @@ def register_hooks() -> None:
         # unmarked methods are silently ignored.
         @hookimpl(tryfirst=True)
         def get_ext_and_mimetype(self, filename):
-            metadata = _file_metadata(filename)
-            return metadata["extension"].lower() or None, metadata["mimetype"]
+            return bindings.get_ext_and_mimetype(filename)
 
         @hookimpl
         def get_default_voice(self):
-            return ""
+            return bindings.get_default_voice()
 
         @hookimpl
         def get_default_dialect(self):
-            return ""
+            return bindings.get_default_dialect()
 
         @hookimpl
         def get_default_language(self):
-            return "en"
+            return bindings.get_default_language()
 
         @hookimpl
         def get_default_locale(self):
-            return "en_US"
+            return bindings.get_default_locale()
 
         @hookimpl
         def get_default_timezone(self):
-            return _configured_timezone()
+            return bindings.get_default_timezone()
 
         @hookimpl
         def get_default_country(self):
-            return "US"
+            return bindings.get_default_country()
 
         @hookimpl
         def get_hostname(self):
-            return "localhost"
+            return bindings.get_hostname()
 
         @hookimpl
         def get_debug_status(self):
-            return True
+            return bindings.get_debug_status()
 
         @hookimpl
         def get_main_page_parts(self):
-            return {}
+            return bindings.get_main_page_parts()
 
         @hookimpl
         def get_button_class_prefix(self):
-            return "btn"
+            return bindings.get_button_class_prefix()
 
         @hookimpl
         def save_numbered_file(
             self, filename, orig_path, yaml_file_name=None, uid=None
         ):
-            from docassemble_simulator._artifacts import active_file_registry
-
-            registry = active_file_registry()
-            if registry is None:
-                raise RuntimeError("simulator local file registry is not active")
-            return registry.save(filename, orig_path)
+            return bindings.save_numbered_file(
+                filename, orig_path, yaml_file_name=yaml_file_name, uid=uid
+            )
 
         @hookimpl(tryfirst=True)
         def file_finder(
@@ -570,57 +893,157 @@ def register_hooks() -> None:
             return_nonexistent=False,
             uids=None,
         ):
-            if isinstance(file_reference, str) and file_reference.startswith(
-                ("http://", "https://")
-            ):
-                return _file_metadata(file_reference)
-            path = _authored_file_path(
-                file_reference, question=question, folder=folder, package=package
+            return bindings.file_finder(
+                file_reference,
+                question=question,
+                folder=folder,
+                package=package,
+                filename=filename,
+                return_nonexistent=return_nonexistent,
+                uids=uids,
             )
-            if path is None and return_nonexistent and isinstance(file_reference, str):
-                # Preserve the standard hook's missing-file semantics while
-                # keeping path construction confined to the active workspace.
-                return None
-            if path is None:
-                return None
-            return _file_metadata(path, resolved_path=path)
 
         @hookimpl(tryfirst=True)
         def file_number_finder(
             self, file_number, filename=None, uids=None, privileged=False
         ):
-            from docassemble_simulator._artifacts import active_file_registry
-
-            registry = active_file_registry()
-            return None if registry is None else registry.find(file_number, filename)
+            return bindings.file_number_finder(
+                file_number, filename=filename, uids=uids, privileged=privileged
+            )
 
         @hookimpl(tryfirst=True)
         def url_finder(self, file_reference, kwargs):
-            from docassemble_simulator._artifacts import active_file_registry
-
-            registry = active_file_registry()
-            if registry is not None:
-                url = registry.url_for(file_reference)
-                if url is not None:
-                    return url
-            path = _authored_file_path(file_reference)
-            return None if path is None else path.resolve().as_uri()
+            return bindings.url_finder(file_reference, kwargs)
 
         @hookimpl
         def get_configuration(self):
-            # Return the live server config (not a stub): interviews read
-            # `jinja data` and package settings through this hook.
-            import docassemble.base.config as da_config_mod
-
-            cfg = dict(getattr(da_config_mod, "daconfig", {}) or {})
-            cfg.setdefault("debug", True)
-            cfg.setdefault("host", "localhost")
-            cfg.setdefault("locale", "en_US")
-            cfg.setdefault("country", "US")
-            return cfg
+            return bindings.get_configuration()
 
     if pm.get_plugin("dasimulator.minimal") is None:
         pm.register(MinimalHooks(), name="dasimulator.minimal")
+
+
+_LEGACY_DEFAULT_FIELDS = (
+    ("get_ext_and_mimetype", "get_ext_and_mimetype", False),
+    ("get_default_voice", "get_default_voice", False),
+    ("get_default_dialect", "get_default_dialect", False),
+    ("get_default_language", "get_default_language", False),
+    ("get_default_locale", "get_default_locale", False),
+    ("get_default_timezone", "get_default_timezone", False),
+    ("get_default_country", "get_default_country", False),
+    ("default_voice", "get_default_voice", True),
+    ("default_dialect", "get_default_dialect", True),
+    ("default_language", "get_default_language", True),
+    ("default_locale", "get_default_locale", True),
+    ("default_timezone", "get_default_timezone", True),
+    ("default_country", "get_default_country", True),
+    ("hostname", "get_hostname", True),
+    ("debug", "get_debug_status", True),
+    ("debug_status", "get_debug_status", True),
+    ("main_page_parts", "get_main_page_parts", True),
+    ("button_class_prefix", "get_button_class_prefix", True),
+)
+
+
+def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
+    """Install simulator bindings on docassemble 1.9's server object."""
+    from docassemble.base import functions
+
+    if not hasattr(functions, "server"):
+        raise _incomplete_runtime_error("docassemble.base.functions.server")
+    server = functions.server
+    if not isinstance(getattr(server, "server_redis", None), FakeRedis):
+        server.server_redis = FakeRedis()
+    if not isinstance(getattr(server, "server_redis_user", None), FakeRedis):
+        server.server_redis_user = FakeRedis()
+    # Freshness contract: the snapshot values below (call=*) are install-time
+    # copies of simulator constants, so they cannot drift from the modern
+    # hook values; only `daconfig` is workspace-dependent, so it alone is
+    # re-published on every operation entry (_LegacyContextAdapter).
+    for attribute, getter, snapshot in _LEGACY_DEFAULT_FIELDS:
+        bound = getattr(bindings, getter)
+        setattr(server, attribute, bound() if snapshot else bound)
+    # 1.9's markdown filter reads these directly from the legacy server;
+    # modern runtimes obtain the equivalent values through their webapp setup.
+    server.default_table_class = '"table table-striped"'
+    server.default_thead_class = None
+    server.daconfig = bindings.get_configuration()
+
+    def file_finder(
+        file_reference,
+        question=None,
+        folder=None,
+        package=None,
+        filename=None,
+        return_nonexistent=False,
+        uids=None,
+        **kwargs,
+    ):
+        options = _legacy_lookup_options(
+            {
+                key: value
+                for key, value in (("question", question), ("package", package))
+                if value is not None
+            }
+            | kwargs
+        )
+        return bindings.file_finder(
+            file_reference,
+            question=options.get("question"),
+            folder=folder,
+            package=options.get("package"),
+            filename=filename,
+            return_nonexistent=return_nonexistent,
+            uids=uids,
+        )
+
+    def file_number_finder(file_number, filename=None, uids=None, privileged=False):
+        return bindings.file_number_finder(
+            file_number,
+            filename=filename,
+            uids=uids,
+            privileged=privileged,
+        )
+
+    def url_finder(file_reference, options=None, **kwargs):
+        return bindings.url_finder(
+            file_reference, _legacy_lookup_options({**(options or {}), **kwargs})
+        )
+
+    server.file_finder = file_finder
+    server.file_number_finder = file_number_finder
+    server.url_finder = url_finder
+    server.save_numbered_file = bindings.save_numbered_file
+    # 1.9 dispatches background_action() through server.bg_action; point that
+    # seam at the shared foreground fallback (ADR-0003, no Celery emulation).
+    server.bg_action = _foreground_background_action
+
+
+def _modern_hooks_available() -> bool:
+    """Whether the installed runtime exposes the 1.10 pluggy hook API."""
+    try:
+        from docassemble.base.plugin_manager import pm  # noqa: F401
+    except ModuleNotFoundError as error:
+        if not _is_missing_module(error, "docassemble.base.plugin_manager"):
+            _ensure_runtime_present()
+            raise
+        return False
+    return True
+
+
+def register_hooks() -> None:
+    """Install simulator hooks through either supported docassemble interface."""
+    bindings = _SimulatorRuntimeBindings()
+    if not _modern_hooks_available():
+        # Either a legacy runtime (no plugin manager) or no runtime at all.
+        # Validate required legacy modules before mutating shared state so
+        # incomplete runtimes raise actionable errors, not raw imports.
+        _import_legacy_runtime_modules()
+        _install_relationship_methods()
+        _register_legacy_runtime_bindings(bindings)
+    else:
+        _install_relationship_methods()
+        _register_pluggy_runtime_bindings(bindings)
 
 
 _STUBBED = False
@@ -770,26 +1193,84 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
         info.update(old)
 
 
-def _install_background_action_fallback(mode: str | None = None) -> None:
-    """Replace Celery dispatch with a foreground task, unless explicitly disabled."""
-    global _BACKGROUND_INSTALLED
-    _set_background_action_mode(mode)
-    if _BACKGROUND_INSTALLED:
-        return
-    try:
-        from docassemble.base import background, functions, util
-    except ImportError:
-        return
-    # functions.background_action delegates through its module-global bg_action;
-    # util re-exports the function object, while background.bg_action is useful
-    # for runtimes that call the lower-level seam directly.
+def _patch_background_dispatch(functions, util) -> None:
+    """Point every functions-level dispatch seam at the foreground fallback."""
     functions.bg_action = _foreground_background_action
     functions.background_action = lambda *args, **kwargs: _foreground_background_action(
         *args, **kwargs
     )
+    # functions.background_action delegates through its module-global bg_action;
+    # util re-exports the function object.
     util.background_action = functions.background_action
+    server = getattr(functions, "server", None)
+    if server is not None:
+        server.bg_action = _foreground_background_action
+
+
+def _patch_legacy_background_seam(functions) -> None:
+    """Point 1.9 background dispatch at the foreground fallback."""
+    try:
+        from docassemble.base import util as legacy_util
+    except ImportError as error:
+        if not _is_missing_module(
+            error, "docassemble", "docassemble.base", "docassemble.base.util"
+        ):
+            raise
+        return
+    _patch_background_dispatch(functions, legacy_util)
+
+
+def _legacy_functions_or_none():
+    """Return the legacy functions module, or None when unavailable."""
+    try:
+        from docassemble.base import functions as legacy_functions
+    except ImportError as error:
+        if not _is_missing_module(
+            error, "docassemble", "docassemble.base", "docassemble.base.functions"
+        ):
+            raise
+        return None
+    if getattr(legacy_functions, "server", None) is None:
+        return None
+    return legacy_functions
+
+
+def _install_background_action_fallback(mode: str | None = None) -> None:
+    """Replace Celery dispatch with a foreground task, unless explicitly disabled."""
+    _set_background_action_mode(mode)
+    try:
+        from docassemble.base import background, functions, util
+    except ImportError as error:
+        if _is_missing_module(
+            error,
+            "docassemble",
+            "docassemble.base",
+            "docassemble.base.background",
+        ):
+            # No modern background module: fall back to the 1.9 server seam.
+            legacy_functions = _legacy_functions_or_none()
+            if legacy_functions is None:
+                return
+            _patch_legacy_background_seam(legacy_functions)
+            return
+        # functions/util absent is an incomplete runtime, not a legacy
+        # signal; a broken dep inside the modern modules must surface.
+        raise _incomplete_runtime_error(
+            _missing_or_raise(
+                error, "docassemble.base.functions", "docassemble.base.util"
+            )
+        ) from error
+    if getattr(functions, "bg_action", None) is _foreground_background_action:
+        # Process-level install already patched the modern modules, but a
+        # legacy server object may have been replaced since (notably in
+        # tests); re-assert the per-object legacy seam when present.
+        if getattr(functions, "server", None) is not None:
+            functions.server.bg_action = _foreground_background_action
+        return
+    _patch_background_dispatch(functions, util)
+    # background.bg_action is useful for runtimes that call the lower-level
+    # seam directly.
     background.bg_action = _foreground_background_action
-    _BACKGROUND_INSTALLED = True
 
 
 def apply_session_stubs(*, stub_define_defined: bool = False) -> None:

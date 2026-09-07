@@ -13,19 +13,30 @@
         docassemble-simulator = "docassemble_simulator.cli:main"
 
 [dependency-groups]
-    dev = [
+    dev   = [
         "docxtpl>=0.20.2",
         "pytest>=9.1.1",
+    ]
+    # NOTE: `docassemble` itself is intentionally NOT a default dependency.
+    # The simulator must run inside the same interpreter environment as the
+    # target docassemble package, because it imports docassemble.base
+    # directly and drives the real interview machinery. Versioned target
+    # packages live in the opt-in groups below (`uv run --group da19 ...` /
+    # `--group da110 ...`); the `test:all-da` mise task provisions isolated
+    # `.venv-da*` environments from these groups so the cross-family contract
+    # in tests/test_real_runtime.py runs against both families at once.
+    da19  = [
+        "docassemble-base>=1.9,<1.10",
+        "docassemble-webapp>=1.9,<1.10",
+    ]
+    da110 = [
+        "docassemble-base>=1.10,<1.11",
+        "docassemble-webapp>=1.10,<1.11",
     ]
 
 [build-system]
     requires      = ["uv_build>=0.12.5,<0.13.0"]
     build-backend = "uv_build"
-
-    # NOTE: `docassemble` itself is intentionally NOT a dependency here. The
-    # simulator must run inside the same interpreter environment as the target
-    # docassemble package (the package's own .venv), because it imports
-    # docassemble.base directly and drives the real interview machinery.
 
 [tool.pyrefly]
     project-includes = [
@@ -33,3 +44,19 @@
         "**/*.ipynb",
     ]
     preset           = "basic"
+    # Shared fast-test helpers live in tests/ outside the src import root.
+    search-path      = ["src", "tests"]
+
+[tool.pytest.ini_options]
+    markers = [
+        "real_runtime: requires a real docassemble interpreter",
+        "corpus: exercises the external docassemble example corpus",
+    ]
+
+[tool.uv]
+    # da19 and da110 pin disjoint versions of the same target packages, so
+    # they can never be installed together. Declaring the conflict lets uv
+    # resolve and lock each family separately (`uv sync --group da19`, ...).
+    conflicts = [
+        [{ group = "da19" }, { group = "da110" }],
+    ]
