@@ -10,10 +10,21 @@ agents.
 Run the simulator in the target package's interpreter:
 
 ```sh
-uv pip install --python /path/to/package/.venv/bin/python docassemble-simulator
+# Run these in the interview package's project environment.
+uv add --dev docassemble-simulator
+uv run sim check
 ```
 
-If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
+The canonical command is also available as `docassemble-simulator`. For a
+non-uv project, install it into the target package interpreter:
+
+```sh
+/path/to/package/.venv/bin/python -m pip install docassemble-simulator
+/path/to/package/.venv/bin/sim check
+```
+
+The simulator must run in the same environment as the target package; a global
+installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
 missing fixed package names with `uv pip` (or the interpreter's `pip`) without
 upgrading installed packages. Use `--offline` or `[simulator].offline = true`
 to disable acquisition. An installed package that fails because of a native

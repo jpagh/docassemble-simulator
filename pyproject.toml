@@ -11,6 +11,7 @@
 
     [project.scripts]
         docassemble-simulator = "docassemble_simulator.cli:main"
+        sim                   = "docassemble_simulator.cli:main"
 
 [dependency-groups]
     dev   = [
