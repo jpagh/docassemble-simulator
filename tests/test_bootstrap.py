@@ -479,6 +479,31 @@ class TestIncompleteRuntime:
         finally:
             sys.meta_path.pop(0)
 
+    def test_runtime_context_broken_dep_propagates(self, monkeypatch):
+        import importlib.abc
+
+        from docassemble_simulator._runtime import runtime_context
+
+        purge_docassemble_modules(monkeypatch)
+        _stub_legacy_server_modules(monkeypatch)
+
+        class _Broken(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "docassemble.base.thread_context":
+                    raise ModuleNotFoundError(
+                        "broken dep inside thread_context", name="some_internal_dep"
+                    )
+
+        sys.meta_path.insert(0, _Broken())
+        try:
+            with (
+                pytest.raises(ModuleNotFoundError, match="broken dep"),
+                runtime_context(),
+            ):
+                pass  # pragma: no cover - detection rejects before entry
+        finally:
+            sys.meta_path.pop(0)
+
 
 class TestLegacyBackgroundFallback:
     def _stub_legacy_without_background(self, monkeypatch, *, this_thread=None):
@@ -540,8 +565,7 @@ class TestMissingRuntime:
     def no_docassemble(self, monkeypatch):
         from stub_runtime import blocked_docassemble_imports
 
-        purge_docassemble_modules(monkeypatch)
-        with blocked_docassemble_imports():
+        with blocked_docassemble_imports(monkeypatch):
             yield
 
     def test_runtime_context_reports_missing_runtime(self, no_docassemble):

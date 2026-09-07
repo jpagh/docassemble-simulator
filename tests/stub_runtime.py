@@ -152,14 +152,9 @@ def stub_incomplete_runtime(monkeypatch, *, with_server, modern=False):
 
 
 @contextmanager
-def blocked_docassemble_imports():
+def blocked_docassemble_imports(monkeypatch):
     """Block every ``docassemble`` import, simulating a wrong interpreter."""
-    for name in [
-        name
-        for name in sys.modules
-        if name == "docassemble" or name.startswith("docassemble.")
-    ]:
-        del sys.modules[name]
+    purge_docassemble_modules(monkeypatch)
 
     class _Blocker(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname, path=None, target=None):

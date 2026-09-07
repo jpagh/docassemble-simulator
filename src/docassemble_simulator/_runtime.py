@@ -103,10 +103,12 @@ def _missing_or_raise(error: BaseException, *names: str) -> str:
     is treated as an absent capability; anything else (a broken dependency
     *inside* an installed runtime) propagates unchanged rather than being
     misreported as an incomplete runtime.
+
+    When it returns, ``error.name`` is guaranteed to be one of ``names``.
     """
     if not _is_missing_module(error, *names):
         raise error
-    return getattr(error, "name", None) or names[-1]
+    return error.name
 
 
 def _ensure_runtime_present() -> None:
@@ -186,8 +188,9 @@ class _LegacyContextAdapter:
             functions.restore_thread_variables(previous)
             # Nested operations with different roots/configurations must not
             # leak their server config outward (spec: restore prior state in a
-            # finally path). A first activation with no prior value keeps the
-            # freshly published config, matching install-time binding.
+            # finally path; ADR-0007). A first activation with no prior value
+            # keeps the freshly published config, matching install-time
+            # binding.
             if previous_daconfig is not unset:
                 functions.server.daconfig = previous_daconfig
 
@@ -195,30 +198,26 @@ class _LegacyContextAdapter:
 @contextmanager
 def runtime_context(namespace=None):
     """Scope native runtime state without exporting a replacement DA module."""
+    import importlib
+
     try:
-        from docassemble.base import thread_context
-    except ImportError:
-        # Import the qualified module to distinguish absence from a broken
-        # dependency inside an installed modern context implementation.
-        import importlib
+        context = importlib.import_module("docassemble.base.thread_context")
+    except ModuleNotFoundError as missing:
+        if not _is_missing_module(missing, "docassemble.base.thread_context"):
+            # A dependency *inside* an installed modern context implementation
+            # broke; surface it unchanged rather than misreporting a legacy
+            # runtime. _ensure_runtime_present() distinguishes no-runtime.
+            _ensure_runtime_present()
+            raise
+        # Either a legacy runtime (no thread_context module) or no
+        # runtime at all; the presence check reports the latter.
+        functions = _import_legacy_runtime_modules()
 
-        try:
-            context = importlib.import_module("docassemble.base.thread_context")
-        except ModuleNotFoundError as missing:
-            if not _is_missing_module(missing, "docassemble.base.thread_context"):
-                _ensure_runtime_present()
-                raise
-            # Either a legacy runtime (no thread_context module) or no
-            # runtime at all; the presence check reports the latter.
-            functions = _import_legacy_runtime_modules()
-
-            adapter = _LegacyContextAdapter(
-                functions, _SimulatorRuntimeBindings().get_configuration
-            )
-        else:
-            adapter = _ModernContextAdapter(context)
+        adapter = _LegacyContextAdapter(
+            functions, _SimulatorRuntimeBindings().get_configuration
+        )
     else:
-        adapter = _ModernContextAdapter(thread_context)
+        adapter = _ModernContextAdapter(context)
     with adapter.activate(namespace):
         yield
 
@@ -606,6 +605,22 @@ def _authored_file_path(
     return candidate if candidate.is_file() else None
 
 
+def _legacy_lookup_options(options: dict | None) -> dict:
+    """Fold 1.9's underscored lookup kwargs onto the canonical names.
+
+    The canonical ``question``/``package`` keys win when both styles are
+    present; unknown keys are preserved for the caller to swallow or forward.
+    """
+    normalized = dict(options or {})
+    for canonical, legacy in (("question", "_question"), ("package", "_package")):
+        if canonical not in normalized:
+            if legacy in normalized:
+                normalized[canonical] = normalized.pop(legacy)
+        else:
+            normalized.pop(legacy, None)
+    return normalized
+
+
 class _SimulatorRuntimeBindings:
     """Shared simulator behavior behind the docassemble runtime adapters."""
 
@@ -687,9 +702,9 @@ class _SimulatorRuntimeBindings:
     def url_finder(self, file_reference, kwargs=None):
         from docassemble_simulator._artifacts import active_file_registry
 
-        options = dict(kwargs or {})
-        question = options.get("question", options.get("_question"))
-        package = options.get("package", options.get("_package"))
+        options = _legacy_lookup_options(kwargs)
+        question = options.get("question")
+        package = options.get("package")
         registry = active_file_registry()
         if registry is not None:
             url = registry.url_for(file_reference)
@@ -908,6 +923,28 @@ def _register_pluggy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
         pm.register(MinimalHooks(), name="dasimulator.minimal")
 
 
+_LEGACY_DEFAULT_FIELDS = (
+    ("get_ext_and_mimetype", "get_ext_and_mimetype", False),
+    ("get_default_voice", "get_default_voice", False),
+    ("get_default_dialect", "get_default_dialect", False),
+    ("get_default_language", "get_default_language", False),
+    ("get_default_locale", "get_default_locale", False),
+    ("get_default_timezone", "get_default_timezone", False),
+    ("get_default_country", "get_default_country", False),
+    ("default_voice", "get_default_voice", True),
+    ("default_dialect", "get_default_dialect", True),
+    ("default_language", "get_default_language", True),
+    ("default_locale", "get_default_locale", True),
+    ("default_timezone", "get_default_timezone", True),
+    ("default_country", "get_default_country", True),
+    ("hostname", "get_hostname", True),
+    ("debug", "get_debug_status", True),
+    ("debug_status", "get_debug_status", True),
+    ("main_page_parts", "get_main_page_parts", True),
+    ("button_class_prefix", "get_button_class_prefix", True),
+)
+
+
 def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
     """Install simulator bindings on docassemble 1.9's server object."""
     from docassemble.base import functions
@@ -919,24 +956,13 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
         server.server_redis = FakeRedis()
     if not isinstance(getattr(server, "server_redis_user", None), FakeRedis):
         server.server_redis_user = FakeRedis()
-    server.get_ext_and_mimetype = bindings.get_ext_and_mimetype
-    server.get_default_voice = bindings.get_default_voice
-    server.get_default_dialect = bindings.get_default_dialect
-    server.get_default_language = bindings.get_default_language
-    server.get_default_locale = bindings.get_default_locale
-    server.get_default_timezone = bindings.get_default_timezone
-    server.get_default_country = bindings.get_default_country
-    server.default_voice = bindings.get_default_voice()
-    server.default_dialect = bindings.get_default_dialect()
-    server.default_language = bindings.get_default_language()
-    server.default_locale = bindings.get_default_locale()
-    server.default_timezone = bindings.get_default_timezone()
-    server.default_country = bindings.get_default_country()
-    server.hostname = bindings.get_hostname()
-    server.debug = bindings.get_debug_status()
-    server.debug_status = bindings.get_debug_status()
-    server.main_page_parts = bindings.get_main_page_parts()
-    server.button_class_prefix = bindings.get_button_class_prefix()
+    # Freshness contract: the snapshot values below (call=*) are install-time
+    # copies of simulator constants, so they cannot drift from the modern
+    # hook values; only `daconfig` is workspace-dependent, so it alone is
+    # re-published on every operation entry (_LegacyContextAdapter).
+    for attribute, getter, snapshot in _LEGACY_DEFAULT_FIELDS:
+        bound = getattr(bindings, getter)
+        setattr(server, attribute, bound() if snapshot else bound)
     # 1.9's markdown filter reads these directly from the legacy server;
     # modern runtimes obtain the equivalent values through their webapp setup.
     server.default_table_class = '"table table-striped"'
@@ -953,20 +979,26 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
         uids=None,
         **kwargs,
     ):
-        question = kwargs.pop("_question", question)
-        package = kwargs.pop("_package", package)
+        options = _legacy_lookup_options(
+            {
+                key: value
+                for key, value in (("question", question), ("package", package))
+                if value is not None
+            }
+            | kwargs
+        )
         return bindings.file_finder(
             file_reference,
-            question=question,
+            question=options.get("question"),
             folder=folder,
-            package=package,
+            package=options.get("package"),
             filename=filename,
             return_nonexistent=return_nonexistent,
             uids=uids,
         )
 
     def file_number_finder(
-        file_number, filename=None, uids=None, privileged=False, **kwargs
+        file_number, filename=None, uids=None, privileged=False
     ):
         return bindings.file_number_finder(
             file_number,
@@ -976,9 +1008,9 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
         )
 
     def url_finder(file_reference, options=None, **kwargs):
-        normalized = dict(options or {})
-        normalized.update(kwargs)
-        return bindings.url_finder(file_reference, normalized)
+        return bindings.url_finder(
+            file_reference, _legacy_lookup_options({**(options or {}), **kwargs})
+        )
 
     server.file_finder = file_finder
     server.file_number_finder = file_number_finder
@@ -1182,9 +1214,10 @@ def _patch_legacy_background_seam(functions) -> None:
     try:
         from docassemble.base import util as legacy_util
     except ImportError as error:
-        _missing_or_raise(
+        if not _is_missing_module(
             error, "docassemble", "docassemble.base", "docassemble.base.util"
-        )
+        ):
+            raise
         return
     _patch_background_dispatch(functions, legacy_util)
 
@@ -1194,9 +1227,10 @@ def _legacy_functions_or_none():
     try:
         from docassemble.base import functions as legacy_functions
     except ImportError as error:
-        _missing_or_raise(
+        if not _is_missing_module(
             error, "docassemble", "docassemble.base", "docassemble.base.functions"
-        )
+        ):
+            raise
         return None
     if getattr(legacy_functions, "server", None) is None:
         return None
