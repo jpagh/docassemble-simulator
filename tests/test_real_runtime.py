@@ -4,10 +4,24 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+
+MODERN = "modern"
+LEGACY = "legacy"
+UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class RuntimeFamily:
+    """One supported docassemble runtime family under test."""
+
+    label: str  # "1.10+" or "1.9.x" for failure messages
+    interpreter: Path
+    probe: str  # MODERN or LEGACY capability marker
 
 
 def _family_probe_cmd():
@@ -22,7 +36,7 @@ def _family_probe_cmd():
 
 
 def _query_family(interpreter, *, strict, env_var="", description=""):
-    """Return 'modern'/'legacy' for an interpreter, or 'unknown' when lax."""
+    """Return MODERN/LEGACY for an interpreter, or UNKNOWN when lax."""
     completed = subprocess.run(
         [str(interpreter), "-c", _family_probe_cmd()],
         capture_output=True,
@@ -31,7 +45,7 @@ def _query_family(interpreter, *, strict, env_var="", description=""):
     )
     if completed.returncode:
         if not strict:
-            return "unknown"
+            return UNKNOWN
         message = (completed.stderr or completed.stdout).strip()
         if env_var and os.environ.get(env_var):
             pytest.fail(
@@ -41,7 +55,7 @@ def _query_family(interpreter, *, strict, env_var="", description=""):
         pytest.skip(
             "docassemble runtime is not installed in the pytest interpreter: " + message
         )
-    return "modern" if completed.stdout.strip() == "modern" else "legacy"
+    return MODERN if completed.stdout.strip() == MODERN else LEGACY
 
 
 def _probe_interpreter(env_var, description):
@@ -76,17 +90,32 @@ def _runtime_family(interpreter):
     return _query_family(interpreter, strict=False)
 
 
-@pytest.fixture(params=["modern", "legacy"])
+def _assert_family_interpreter(case: RuntimeFamily) -> None:
+    """The provisioned interpreter must expose the expected family."""
+    assert _runtime_family(case.interpreter) == case.probe, (
+        f"{case.label} interpreter does not expose the expected runtime family"
+    )
+
+
+def _assert_question_screen(screen, case: RuntimeFamily) -> None:
+    """The stable snake-case screen shape holds for either family."""
+    assert screen["kind"] == "question", case.label
+    assert screen["question_text"], case.label
+    for leaked in ("questionText", "subquestionText", "continueLabel"):
+        assert leaked not in screen, (case.label, leaked)
+
+
+@pytest.fixture(params=[MODERN, LEGACY])
 def family_python(request, real_python, real_python_19):
-    """(label, interpreter) for each supported runtime family.
+    """One RuntimeFamily per supported runtime family.
 
     The legacy entry skips when no 1.9.x interpreter is provisioned.
     """
-    if request.param == "modern":
-        return ("1.10+", real_python)
+    if request.param == MODERN:
+        return RuntimeFamily("1.10+", real_python, MODERN)
     if real_python_19 is None:
         pytest.skip("set DASIMULATOR_REAL_PYTHON_19 to a 1.9.x interpreter")
-    return ("1.9.x", real_python_19)
+    return RuntimeFamily("1.9.x", real_python_19, LEGACY)
 
 
 @pytest.fixture
@@ -233,12 +262,11 @@ def _assert_helper_output(path):
 
 
 def test_minimal_start_answer_contract_across_families(family_python, real_workspace):
-    label, interpreter = family_python
+    case = family_python
+    label, interpreter = case.label, case.interpreter
     root = real_workspace
 
-    assert _runtime_family(interpreter) == (
-        "modern" if label == "1.10+" else "legacy"
-    ), f"{label} interpreter does not expose the expected runtime family"
+    _assert_family_interpreter(case)
 
     checked = _run(interpreter, root, "check")
     assert checked["ok"], label
@@ -251,10 +279,7 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
     started = _run(interpreter, root, "start")
     assert started["ok"], label
     screen = started["result"]
-    assert screen["kind"] == "question", label
-    assert screen["question_text"], label
-    for leaked in ("questionText", "subquestionText", "continueLabel"):
-        assert leaked not in screen, (label, leaked)
+    _assert_question_screen(screen, case)
 
     answered = _run(
         interpreter,
@@ -267,21 +292,17 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
 
 
 def test_seek_contract_across_families(family_python, real_workspace):
-    label, interpreter = family_python
+    case = family_python
+    label, interpreter = case.label, case.interpreter
     root = real_workspace
-    assert _runtime_family(interpreter) == (
-        "modern" if label == "1.10+" else "legacy"
-    ), f"{label} interpreter does not expose the expected runtime family"
+    _assert_family_interpreter(case)
 
     assert _run(interpreter, root, "start")["ok"], label
 
     sought = _run(interpreter, root, "seek", "filing_date", "--activate")
     assert sought["ok"], label
     screen = sought["result"]
-    assert screen["kind"] == "question", label
-    assert screen["question_text"], label
-    for leaked in ("questionText", "subquestionText", "continueLabel"):
-        assert leaked not in screen, (label, leaked)
+    _assert_question_screen(screen, case)
 
     missing = _run(
         interpreter,
@@ -299,11 +320,10 @@ def test_seek_contract_across_families(family_python, real_workspace):
 def test_foreground_background_action_contract_across_families(
     family_python, real_workspace
 ):
-    label, interpreter = family_python
+    case = family_python
+    label, interpreter = case.label, case.interpreter
     root = real_workspace
-    assert _runtime_family(interpreter) == (
-        "modern" if label == "1.10+" else "legacy"
-    ), f"{label} interpreter does not expose the expected runtime family"
+    _assert_family_interpreter(case)
 
     checked = _run(interpreter, root, "check", "--interview", "background.yml")
     assert checked["ok"], label
@@ -334,11 +354,10 @@ def test_foreground_background_action_contract_across_families(
 def test_real_runtime_rehydrates_helpers_for_every_render_source(
     family_python, real_workspace
 ):
-    label, interpreter = family_python
+    case = family_python
+    label, interpreter = case.label, case.interpreter
     root = real_workspace
-    assert _runtime_family(interpreter) == (
-        "modern" if label == "1.10+" else "legacy"
-    ), f"{label} interpreter does not expose the expected runtime family"
+    _assert_family_interpreter(case)
     snapshot = root / "state.snapshot"
     fresh = root / "fresh.docx"
     fixture = root / "fixture.docx"
@@ -466,10 +485,9 @@ def test_demo_package_compiles_with_all_includes(real_python):
 def test_generated_attachment_has_durable_local_uri_and_manifest(
     family_python, real_workspace
 ):
-    label, interpreter = family_python
-    assert _runtime_family(interpreter) == (
-        "modern" if label == "1.10+" else "legacy"
-    ), f"{label} interpreter does not expose the expected runtime family"
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
     payload = _run(
         interpreter,
         real_workspace,
@@ -503,10 +521,9 @@ def test_generated_attachment_has_durable_local_uri_and_manifest(
 def test_real_date_answer_formats_and_rejections_roll_back(
     family_python, real_workspace
 ):
-    label, interpreter = family_python
-    assert _runtime_family(interpreter) == (
-        "modern" if label == "1.10+" else "legacy"
-    ), f"{label} interpreter does not expose the expected runtime family"
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
     root = real_workspace
     assert _run(interpreter, root, "start")["ok"], label
     session = next((root / ".simulator" / "sessions").glob("*.pkl"))

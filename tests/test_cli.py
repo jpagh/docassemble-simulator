@@ -9,6 +9,22 @@ from docassemble_simulator._diagnostics import Diagnostic
 from docassemble_simulator._outcomes import ErrorKind, Failure, PublishedAttachment
 
 
+def _docassemble_package():
+    da = types.ModuleType("docassemble")
+    da.__path__ = []
+    base = types.ModuleType("docassemble.base")
+    base.__path__ = []
+    da.base = base
+    return da, base
+
+
+def _install_modules(monkeypatch, modules, absent=()):
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    for name in absent:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+
 def _run_cli(*arguments):
     return subprocess.run(
         [sys.executable, "-m", "docassemble_simulator", *arguments],
@@ -294,10 +310,7 @@ def test_composition_root_bootstraps_runtime_command_once(monkeypatch, tmp_path)
 
 
 def _stub_incomplete_runtime(monkeypatch, *, with_server, modern=False):
-    da = types.ModuleType("docassemble")
-    da.__path__ = []
-    base = types.ModuleType("docassemble.base")
-    base.__path__ = []
+    da, base = _docassemble_package()
     functions = types.ModuleType("docassemble.base.functions")
     if with_server:
         functions.server = types.SimpleNamespace()
@@ -319,19 +332,14 @@ def _stub_incomplete_runtime(monkeypatch, *, with_server, modern=False):
         pm_module = types.ModuleType("docassemble.base.plugin_manager")
         pm_module.pm = types.SimpleNamespace(get_plugin=lambda name: object())
         modules["docassemble.base.plugin_manager"] = pm_module
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    if not modern:
-        monkeypatch.delitem(
-            sys.modules, "docassemble.base.plugin_manager", raising=False
-        )
-    for absent in (
+    absent = (
+        *(("docassemble.base.plugin_manager",) if not modern else ()),
         "docassemble.webapp.main",
         "docassemble.webapp.main.hooks",
         "docassemble.webapp.interview",
         "docassemble.webapp.interview.hooks",
-    ):
-        monkeypatch.delitem(sys.modules, absent, raising=False)
+    )
+    _install_modules(monkeypatch, modules, absent=absent)
     return functions
 
 
