@@ -15,6 +15,10 @@ artifact and do not fail the interview; manually supplied PDF files are not
 removed. The simulator does not invoke LibreOffice or any other external PDF
 converter.
 
+> **Partially superseded by [ADR-0006](0006-pdf-only-attachments-fail.md):**
+> PDF-only attachments now raise `PDFConversionUnavailable` instead of failing
+> silently. The mixed-format and no-external-converter behavior above stands.
+
 ## Plan
 
 - Centralize the converter stub in the bootstrap layer so every attachment-generation path gets the same behavior.

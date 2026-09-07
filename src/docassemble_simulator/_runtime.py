@@ -72,7 +72,6 @@ def _file_metadata(reference, *, resolved_path: Path | None = None) -> dict:
 
 
 _BACKGROUND_ACTION_MODE = "foreground"
-_BACKGROUND_INSTALLED = False
 _DIAGNOSTIC_LOGGING_INSTALLED = False
 _ACTIVE_ROOT: ContextVar[Path | None] = ContextVar(
     "docassemble_simulator_runtime_root", default=None
@@ -165,6 +164,8 @@ class _LegacyContextAdapter:
         functions = self.functions
         thread = functions.this_thread
         previous = dict(vars(thread))
+        unset = object()
+        previous_daconfig = getattr(functions.server, "daconfig", unset)
         try:
             # The native backup helper mutates misc and evaluation state. Never
             # let it operate on the surrounding callback's objects.
@@ -183,6 +184,12 @@ class _LegacyContextAdapter:
         finally:
             vars(thread).clear()
             functions.restore_thread_variables(previous)
+            # Nested operations with different roots/configurations must not
+            # leak their server config outward (spec: restore prior state in a
+            # finally path). A first activation with no prior value keeps the
+            # freshly published config, matching install-time binding.
+            if previous_daconfig is not unset:
+                functions.server.daconfig = previous_daconfig
 
 
 @contextmanager
@@ -477,9 +484,6 @@ def _configured_timezone() -> str:
         return "America/New_York"
 
 
-_ATTACHMENT_FALLBACK_INSTALLED = False
-
-
 def _without_pdf_conversion(result: dict) -> None:
     """Remove generated PDF formats before docassemble dispatches converters."""
     formats = result.get("formats_to_use")
@@ -500,10 +504,10 @@ def install_attachment_filename_fallback() -> None:
     Keep the server behavior for named files and only supply a fallback for
     this invalid ``None`` case. PDF conversion is handled separately by
     removing generated ``pdf`` formats before the real finalizer runs.
+
+    Idempotent per ``Question`` class via the wrapper marker, so a fresh stub
+    runtime in tests is wrapped without toggling module globals (ADR-0005).
     """
-    global _ATTACHMENT_FALLBACK_INSTALLED
-    if _ATTACHMENT_FALLBACK_INSTALLED:
-        return
     try:
         from docassemble.base.parse import Question
     except ImportError:
@@ -513,7 +517,6 @@ def install_attachment_filename_fallback() -> None:
     if original is None:
         return
     if getattr(original, "_dasimulator_filename_fallback", False):
-        _ATTACHMENT_FALLBACK_INSTALLED = True
         return
 
     def finalize_with_filename(self, attachment, result, user_dict):
@@ -535,7 +538,6 @@ def install_attachment_filename_fallback() -> None:
 
     finalize_with_filename._dasimulator_filename_fallback = True
     Question.finalize_attachment = finalize_with_filename
-    _ATTACHMENT_FALLBACK_INSTALLED = True
 
 
 def install_diagnostic_logging() -> None:
@@ -1161,15 +1163,22 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
         info.update(old)
 
 
-def _patch_legacy_background_seam(functions) -> None:
-    """Point 1.9 background dispatch at the foreground fallback."""
-    server = getattr(functions, "server", None)
-    if server is not None:
-        server.bg_action = _foreground_background_action
+def _patch_background_dispatch(functions, util) -> None:
+    """Point every functions-level dispatch seam at the foreground fallback."""
     functions.bg_action = _foreground_background_action
     functions.background_action = lambda *args, **kwargs: _foreground_background_action(
         *args, **kwargs
     )
+    # functions.background_action delegates through its module-global bg_action;
+    # util re-exports the function object.
+    util.background_action = functions.background_action
+    server = getattr(functions, "server", None)
+    if server is not None:
+        server.bg_action = _foreground_background_action
+
+
+def _patch_legacy_background_seam(functions) -> None:
+    """Point 1.9 background dispatch at the foreground fallback."""
     try:
         from docassemble.base import util as legacy_util
     except ImportError as error:
@@ -1177,7 +1186,7 @@ def _patch_legacy_background_seam(functions) -> None:
             error, "docassemble", "docassemble.base", "docassemble.base.util"
         )
         return
-    legacy_util.background_action = functions.background_action
+    _patch_background_dispatch(functions, legacy_util)
 
 
 def _legacy_functions_or_none():
@@ -1196,16 +1205,7 @@ def _legacy_functions_or_none():
 
 def _install_background_action_fallback(mode: str | None = None) -> None:
     """Replace Celery dispatch with a foreground task, unless explicitly disabled."""
-    global _BACKGROUND_INSTALLED
     _set_background_action_mode(mode)
-    if _BACKGROUND_INSTALLED:
-        # Process-global install already patched the modern modules, but a
-        # legacy server object may have been replaced since (notably in
-        # tests); re-assert the per-object legacy seam when present.
-        legacy_functions = _legacy_functions_or_none()
-        if legacy_functions is not None:
-            _patch_legacy_background_seam(legacy_functions)
-        return
     try:
         from docassemble.base import background, functions, util
     except ImportError as error:
@@ -1220,7 +1220,6 @@ def _install_background_action_fallback(mode: str | None = None) -> None:
             if legacy_functions is None:
                 return
             _patch_legacy_background_seam(legacy_functions)
-            _BACKGROUND_INSTALLED = True
             return
         # functions/util absent is an incomplete runtime, not a legacy
         # signal; a broken dep inside the modern modules must surface.
@@ -1229,20 +1228,17 @@ def _install_background_action_fallback(mode: str | None = None) -> None:
                 error, "docassemble.base.functions", "docassemble.base.util"
             )
         ) from error
-    # functions.background_action delegates through its module-global bg_action;
-    # util re-exports the function object, while background.bg_action is useful
-    # for runtimes that call the lower-level seam directly.
-    functions.bg_action = _foreground_background_action
-    functions.background_action = lambda *args, **kwargs: _foreground_background_action(
-        *args, **kwargs
-    )
-    util.background_action = functions.background_action
+    if getattr(functions, "bg_action", None) is _foreground_background_action:
+        # Process-level install already patched the modern modules, but a
+        # legacy server object may have been replaced since (notably in
+        # tests); re-assert the per-object legacy seam when present.
+        if getattr(functions, "server", None) is not None:
+            functions.server.bg_action = _foreground_background_action
+        return
+    _patch_background_dispatch(functions, util)
+    # background.bg_action is useful for runtimes that call the lower-level
+    # seam directly.
     background.bg_action = _foreground_background_action
-    # A legacy server object shares the same functions module shape when both
-    # seams exist; keep server.bg_action pointed at the same fallback.
-    if getattr(functions, "server", None) is not None:
-        functions.server.bg_action = _foreground_background_action
-    _BACKGROUND_INSTALLED = True
 
 
 def apply_session_stubs(*, stub_define_defined: bool = False) -> None:

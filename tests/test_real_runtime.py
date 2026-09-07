@@ -45,7 +45,7 @@ def _family_probe_cmd():
     )
 
 
-def _query_family(interpreter, *, strict, env_var="", description="") -> RuntimeProbe:
+def _query_family(interpreter, *, strict, env_var="") -> RuntimeProbe:
     """Return MODERN/LEGACY for an interpreter, or UNKNOWN when lax."""
     completed = subprocess.run(
         [str(interpreter), "-c", _family_probe_cmd()],
@@ -79,7 +79,7 @@ def _probe_interpreter(env_var, description):
         if configured:
             pytest.fail(f"real-runtime interpreter does not exist: {interpreter}")
         pytest.skip(f"set {env_var} to a {description} target-package interpreter")
-    _query_family(interpreter, strict=True, env_var=env_var, description=description)
+    _query_family(interpreter, strict=True, env_var=env_var)
     return interpreter
 
 
@@ -303,6 +303,10 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
         "caption=2026-08-26",
     )
     assert answered["ok"], label
+    # The minimal interview has no further mandatory questions: answering the
+    # Dates screen must reach interview completion on either family (issue #1,
+    # story 3: same start command, same outcome shape).
+    assert answered["result"]["kind"] == "finished", (label, answered["result"])
 
 
 def test_seek_contract_across_families(family_python, real_workspace):

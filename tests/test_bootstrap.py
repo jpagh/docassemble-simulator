@@ -17,7 +17,13 @@ from stub_runtime import (
     legacy_functions as _legacy_functions,
 )
 from stub_runtime import (
+    purge_docassemble_modules,
+)
+from stub_runtime import (
     stub_legacy_server_modules as _stub_legacy_server_modules,
+)
+from stub_runtime import (
+    stub_legacy_without_background as _stub_legacy_without_background,
 )
 
 from docassemble_simulator._artifacts import (
@@ -213,14 +219,43 @@ class TestLegacyContext:
         config = _install_legacy_modules(monkeypatch, functions)
 
         with runtime_context():
-            pass
-        assert functions.server.daconfig["timezone"] == "America/New_York"
-        assert functions.server.daconfig["debug"] is True
+            assert functions.server.daconfig["timezone"] == "America/New_York"
+            assert functions.server.daconfig["debug"] is True
 
         config.daconfig = {"timezone": "Europe/Paris"}
         with runtime_context():
-            pass
-        assert functions.server.daconfig["timezone"] == "Europe/Paris"
+            assert functions.server.daconfig["timezone"] == "Europe/Paris"
+
+    def test_nested_contexts_restore_outer_server_config(self, monkeypatch):
+        from docassemble_simulator._runtime import runtime_context
+
+        functions = _legacy_functions(daconfig={"timezone": "America/New_York"})
+        config = _install_legacy_modules(monkeypatch, functions)
+
+        with runtime_context():
+            config.daconfig = {"timezone": "Europe/Paris"}
+            with runtime_context():
+                assert functions.server.daconfig["timezone"] == "Europe/Paris"
+            assert functions.server.daconfig["timezone"] == "America/New_York"
+
+    def test_exception_still_restores_server_config(self, monkeypatch):
+        from docassemble_simulator._runtime import runtime_context
+
+        functions = _legacy_functions(daconfig={"timezone": "America/New_York"})
+        config = _install_legacy_modules(monkeypatch, functions)
+
+        with runtime_context():
+            outer = functions.server.daconfig
+            config.daconfig = {"timezone": "Europe/Paris"}
+            with (
+                pytest.raises(RuntimeError, match="boom"),
+                runtime_context(),
+            ):
+                assert functions.server.daconfig["timezone"] == "Europe/Paris"
+                raise RuntimeError("boom")
+            assert functions.server.daconfig == outer
+
+        assert functions.server.daconfig["timezone"] == "America/New_York"
 
     def test_incomplete_runtime_names_missing_capability(self, monkeypatch):
         from docassemble_simulator._runtime import (
@@ -261,6 +296,13 @@ class TestLegacyFakeRedis:
         assert functions.server.server_redis_user is redis_user
 
 
+# Runtime-seam error-classification tests below exercise private helpers
+# (_is_missing_module, _install_relationship_methods,
+# _legacy_functions_or_none, _SimulatorRuntimeBindings) against stub modules.
+# Per ADR-0002's adapter carve-out, these are narrowly focused seam tests for
+# behavior not reachable through the catalog/execution/render/CLI interfaces
+# without a real target runtime; each asserts observable error behavior, never
+# private structure.
 class TestIncompleteRuntime:
     def test_register_hooks_missing_util_is_actionable(self, monkeypatch):
         from docassemble_simulator._runtime import (
@@ -360,12 +402,7 @@ class TestIncompleteRuntime:
 
         from docassemble_simulator._runtime import _SimulatorRuntimeBindings
 
-        for name in [
-            name
-            for name in sys.modules
-            if name == "docassemble" or name.startswith("docassemble.")
-        ]:
-            monkeypatch.delitem(sys.modules, name)
+        purge_docassemble_modules(monkeypatch)
 
         class _Broken(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -386,12 +423,7 @@ class TestIncompleteRuntime:
 
         from docassemble_simulator._runtime import _install_relationship_methods
 
-        for name in [
-            name
-            for name in sys.modules
-            if name == "docassemble" or name.startswith("docassemble.")
-        ]:
-            monkeypatch.delitem(sys.modules, name)
+        purge_docassemble_modules(monkeypatch)
 
         class _Broken(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -412,12 +444,7 @@ class TestIncompleteRuntime:
 
         from docassemble_simulator._runtime import _install_relationship_methods
 
-        for name in [
-            name
-            for name in sys.modules
-            if name == "docassemble" or name.startswith("docassemble.")
-        ]:
-            monkeypatch.delitem(sys.modules, name)
+        purge_docassemble_modules(monkeypatch)
 
         class _Boom(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -436,12 +463,7 @@ class TestIncompleteRuntime:
 
         from docassemble_simulator._runtime import _legacy_functions_or_none
 
-        for name in [
-            name
-            for name in sys.modules
-            if name == "docassemble" or name.startswith("docassemble.")
-        ]:
-            monkeypatch.delitem(sys.modules, name)
+        purge_docassemble_modules(monkeypatch)
 
         class _Broken(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -459,10 +481,10 @@ class TestIncompleteRuntime:
 
 
 class TestLegacyBackgroundFallback:
-    def _stub_legacy_without_background(self, monkeypatch):
+    def _stub_legacy_without_background(self, monkeypatch, *, this_thread=None):
         from stub_runtime import stub_legacy_without_background
 
-        return stub_legacy_without_background(monkeypatch)
+        return stub_legacy_without_background(monkeypatch, this_thread=this_thread)
 
     def test_legacy_background_dispatch_completes_without_background_module(
         self, monkeypatch
@@ -518,12 +540,7 @@ class TestMissingRuntime:
     def no_docassemble(self, monkeypatch):
         from stub_runtime import blocked_docassemble_imports
 
-        for name in [
-            name
-            for name in sys.modules
-            if name == "docassemble" or name.startswith("docassemble.")
-        ]:
-            monkeypatch.delitem(sys.modules, name)
+        purge_docassemble_modules(monkeypatch)
         with blocked_docassemble_imports():
             yield
 
@@ -709,10 +726,8 @@ class TestAttachmentFormats:
         assert seen["valid_formats"] == ["docx"]
 
     def test_pdf_only_attachment_raises_unavailable(self, monkeypatch):
-        from docassemble_simulator import _runtime as runtime_module
+        """PDF-only finalization raises per ADR-0006 (superseding ADR-0001)."""
         from docassemble_simulator._runtime import PDFConversionUnavailable
-
-        monkeypatch.setattr(runtime_module, "_ATTACHMENT_FALLBACK_INSTALLED", False)
 
         class FakeQuestion:
             def finalize_attachment(self, _attachment, result, _user_dict):
@@ -729,6 +744,15 @@ class TestAttachmentFormats:
 
 
 class TestForegroundBackgroundActions:
+    """Foreground background-action behavior via the patched dispatch seam.
+
+    Tests enter through ``_install_background_action_fallback`` — a narrowly
+    focused adapter seam under ADR-0002 (no public operation installs
+    background dispatch without a real runtime) — but dispatch through the
+    same seam docassemble 1.9 calls (``server.bg_action``), asserting task
+    values only.
+    """
+
     def test_foreground_task_runs_event_in_current_context(self, monkeypatch, tmp_path):
         from docassemble_simulator import _runtime as runtime_module
 
@@ -744,13 +768,12 @@ class TestForegroundBackgroundActions:
                 }
             ),
         )
-        functions = types.ModuleType("docassemble.base.functions")
-        functions.this_thread = thread
-        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
+        functions, _ = _stub_legacy_without_background(monkeypatch, this_thread=thread)
         with runtime_module.SimulatorRuntime().activate(
             tmp_path, background_action_mode="foreground"
         ):
-            task = runtime_module._foreground_background_action("event", answer=1)
+            runtime_module._install_background_action_fallback("foreground")
+            task = functions.server.bg_action("event", answer=1)
 
         assert task.ready() and not task.failed()
         assert task.get() == 7
@@ -771,14 +794,12 @@ class TestForegroundBackgroundActions:
             interview_status=object(),
             interview=object(),
         )
-        functions = types.ModuleType("docassemble.base.functions")
-        functions.this_thread = thread
+        functions, _ = _stub_legacy_without_background(monkeypatch, this_thread=thread)
         errors = types.ModuleType("docassemble.base.error")
         errors.BackgroundResponseError = BackgroundResponseError
         errors.BackgroundResponseActionError = type(
             "BackgroundResponseActionError", (Exception,), {}
         )
-        monkeypatch.setitem(sys.modules, "docassemble.base.functions", functions)
         monkeypatch.setitem(sys.modules, "docassemble.base.error", errors)
 
         def action():
@@ -787,19 +808,23 @@ class TestForegroundBackgroundActions:
         with runtime_module.SimulatorRuntime().activate(
             tmp_path, background_action_mode="foreground"
         ):
-            task = runtime_module._foreground_background_action(action)
+            runtime_module._install_background_action_fallback("foreground")
+            task = functions.server.bg_action(action)
 
         assert task.ready() and not task.failed()
         assert task.get() == "done"
         assert thread.current_info == {}
 
-    def test_disabled_mode_retains_pending_task(self, tmp_path):
+    def test_disabled_mode_retains_pending_task(self, monkeypatch, tmp_path):
         from docassemble_simulator import _runtime as runtime_module
+
+        functions, _ = _stub_legacy_without_background(monkeypatch)
 
         with runtime_module.SimulatorRuntime().activate(
             tmp_path, background_action_mode="disabled"
         ):
-            task = runtime_module._foreground_background_action("event")
+            runtime_module._install_background_action_fallback("disabled")
+            task = functions.server.bg_action("event")
         assert not task.ready()
         assert not task.failed()
 

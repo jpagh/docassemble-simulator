@@ -299,6 +299,10 @@ cross-family contract test exercises the modern and legacy runtimes. Use
 `mise run sync:da19` / `mise run sync:da110` to (re)provision one family
 without running the suite.
 
+There is no CI runner for the 1.9.x lane yet: `mise run test:all-da` is the
+manual regression gate that must pass before changes to the runtime
+compatibility layer merge (issue #1, story 23).
+
 The real-runtime tests use the current pytest interpreter when the runtime
 is installed; set `DASIMULATOR_REAL_PYTHON` to use a separate target
 environment and `DASIMULATOR_REAL_PYTHON_19` for the 1.9.x lane. Without

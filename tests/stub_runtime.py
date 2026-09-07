@@ -18,6 +18,16 @@ def docassemble_package():
     return da, base
 
 
+def purge_docassemble_modules(monkeypatch) -> None:
+    """Drop every cached ``docassemble`` module so the next import re-resolves."""
+    for name in [
+        name
+        for name in sys.modules
+        if name == "docassemble" or name.startswith("docassemble.")
+    ]:
+        monkeypatch.delitem(sys.modules, name)
+
+
 def install_modules(monkeypatch, modules, absent=()):
     """Install stub modules, removing names the test declares absent."""
     for name, module in modules.items():
@@ -166,11 +176,8 @@ def blocked_docassemble_imports():
         sys.meta_path.remove(blocker)
 
 
-def stub_legacy_without_background(monkeypatch):
+def stub_legacy_without_background(monkeypatch, *, this_thread=None):
     """Legacy stub with thread state but no modern background module."""
-    from docassemble_simulator import _runtime as runtime_module
-
-    monkeypatch.setattr(runtime_module, "_BACKGROUND_INSTALLED", False)
     da, base = docassemble_package()
     functions = types.ModuleType("docassemble.base.functions")
     functions.server = types.SimpleNamespace()
@@ -181,11 +188,17 @@ def stub_legacy_without_background(monkeypatch):
             )
         }
     )
-    functions.this_thread = types.SimpleNamespace(
-        current_dict={},
-        current_info={},
-        interview_status=object(),
-        interview=interview,
+    functions.this_thread = (
+        this_thread
+        if this_thread is not None
+        else (
+            types.SimpleNamespace(
+                current_dict={},
+                current_info={},
+                interview_status=object(),
+                interview=interview,
+            )
+        )
     )
     config = types.ModuleType("docassemble.base.config")
     config.daconfig = {}

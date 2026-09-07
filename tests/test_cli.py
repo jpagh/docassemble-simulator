@@ -342,19 +342,14 @@ def test_modern_runtime_missing_webapp_reports_structured_input_error(
 
 
 def test_missing_runtime_reports_structured_input_error(monkeypatch, tmp_path, capsys):
-    from stub_runtime import blocked_docassemble_imports
+    from stub_runtime import blocked_docassemble_imports, purge_docassemble_modules
 
     monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
     monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
     monkeypatch.setattr(cli, "load_config", lambda root: {})
     monkeypatch.setattr(cli, "ensure_importable", lambda *args, **kwargs: None)
     monkeypatch.chdir(tmp_path)
-    for name in [
-        name
-        for name in sys.modules
-        if name == "docassemble" or name.startswith("docassemble.")
-    ]:
-        monkeypatch.delitem(sys.modules, name, raising=False)
+    purge_docassemble_modules(monkeypatch)
     saved_argv = list(sys.argv)
     try:
         with blocked_docassemble_imports():
