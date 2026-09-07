@@ -997,9 +997,7 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
             uids=uids,
         )
 
-    def file_number_finder(
-        file_number, filename=None, uids=None, privileged=False
-    ):
+    def file_number_finder(file_number, filename=None, uids=None, privileged=False):
         return bindings.file_number_finder(
             file_number,
             filename=filename,
