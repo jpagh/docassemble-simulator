@@ -33,8 +33,20 @@
     ]
 
 [tasks.test]
-    description = "Run the test suite with pytest"
+    description = "Run the complete test suite with pytest"
     run         = "uv run pytest"
+
+[tasks."test:fast"]
+    description = "Run tests without real runtimes or the external corpus"
+    run         = "uv run pytest -q -m 'not real_runtime and not corpus'"
+
+[tasks."test:runtime"]
+    description = "Run real-runtime contract tests without the external corpus"
+    run         = "uv run pytest -q -m 'real_runtime and not corpus'"
+
+[tasks."test:corpus"]
+    description = "Run tests for the external docassemble corpus"
+    run         = 'DASIMULATOR_CORPUS_JOBS=4 DASIMULATOR_NLTK_CACHE_DIR="$PWD/.simulator/nltk-cache" uv run pytest -q -m corpus'
 
 [tasks."sync:da19"]
     description = "Provision .venv-da19 with docassemble 1.9.x for the real-runtime lane"

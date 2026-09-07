@@ -47,6 +47,12 @@
     # Shared fast-test helpers live in tests/ outside the src import root.
     search-path      = ["src", "tests"]
 
+[tool.pytest.ini_options]
+    markers = [
+        "real_runtime: requires a real docassemble interpreter",
+        "corpus: exercises the external docassemble example corpus",
+    ]
+
 [tool.uv]
     # da19 and da110 pin disjoint versions of the same target packages, so
     # they can never be installed together. Declaring the conflict lets uv

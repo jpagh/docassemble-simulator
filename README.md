@@ -264,11 +264,22 @@ deployment or staging responsibilities.
 
 ## Development
 
-Run the fast suite with:
+Run the complete suite with:
 
 ```sh
-uv run pytest -q
+mise run test
 ```
+
+For fast local feedback, run the tests without real runtimes or the external
+corpus:
+
+```sh
+mise run test:fast
+```
+
+The slower tests are split into explicit lanes. `test:runtime` runs the
+real-docassemble contract tests, while `test:corpus` runs the isolated external
+example corpus. The default `test` task still runs every test.
 
 Real-docassemble fidelity is covered by a separate lane that runs the CLI in a
 target package's interpreter (which supplies `docassemble` and `python-docx`):
@@ -328,7 +339,10 @@ network-denial sandbox, and writes `results.jsonl`, `summary.json`, and
 `tests/demo_corpus_provenance.toml`; regenerate it with
 `--write-provenance-manifest PATH` when the fixture/runtime pair is intentionally
 updated. Missing optional NLTK corpora remain a dependency boundary by default;
-use `--prepare-runtime-data` explicitly when provisioning them is intended. Use
+use `--prepare-runtime-data` explicitly when provisioning them is intended.
+Prepared data is reused in a versioned cache; use `--nltk-cache-dir PATH` to
+choose its root or `--refresh-nltk-cache` to publish a new generation. Use
+`--jobs N` for bounded parallel case execution (serial by default),
 `--match`, `--shard INDEX/COUNT`, and
 `--expectations tests/demo_corpus_expectations.toml` for focused or reviewed
 runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and

@@ -11,6 +11,8 @@ from zipfile import ZipFile
 
 import pytest
 
+pytestmark = pytest.mark.real_runtime
+
 
 class RuntimeProbe(str, Enum):
     """Capability marker distinguishing the supported runtime families."""
@@ -434,6 +436,7 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         _assert_helper_output(artifact)
 
 
+@pytest.mark.corpus
 def test_demo_corpus_runner_canary(real_python, tmp_path):
     fixture_root = Path(
         os.environ.get(
@@ -461,6 +464,10 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
             "--compile",
             "--start",
             "--prepare-runtime-data",
+            "--jobs",
+            os.environ.get("DASIMULATOR_CORPUS_JOBS", "1"),
+            "--nltk-cache-dir",
+            os.environ.get("DASIMULATOR_NLTK_CACHE_DIR", str(tmp_path / "nltk-cache")),
             "--match",
             r"^(yesno|fields|attachment-simple|objects-from-file|age_in_years|sections(-horizontal|-auto-open)?|path-and-mimetype|device(-ip)?|relationships)\.yml$",
             "--output",
@@ -479,6 +486,7 @@ def test_demo_corpus_runner_canary(real_python, tmp_path):
     assert summary["unexpected"] == 0
 
 
+@pytest.mark.corpus
 def test_demo_package_compiles_with_all_includes(real_python):
     package_root = (
         Path(
