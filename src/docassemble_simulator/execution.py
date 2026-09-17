@@ -897,20 +897,72 @@ def _assemble(interview, namespace, status):
     }
 
 
+def _missing_name(error):
+    """Return the undefined name a docassemble-style error carries, if any."""
+    match = re.search(
+        r"'(.*)' (is not defined|referenced before assignment|is undefined|where it is not)",
+        str(error),
+    )
+    return match.group(1) if match else None
+
+
+def _define_sought_roots(interview, namespace, status, variable):
+    """Let the interview define missing roots the way assembly does.
+
+    Assembly drives recursive seeking from the missing name in a failed
+    reference: it extracts the name and seeks it, which can run a code block,
+    a question, or an objects declaration.  Seeking an attribute path has to
+    do the same; otherwise the generic question for a declared object can
+    never be matched, because its root does not exist in the namespace yet.
+
+    Returns a non-continue askfor result when defining a root reached a
+    screen, or ``None`` when the full variable can be asked directly.
+    """
+    tried = set()
+    while True:
+        try:
+            eval(variable, namespace)
+            return None
+        except Exception as error:  # noqa: BLE001 - any evaluation failure
+            missing = _missing_name(error)
+            if missing is None:
+                return None
+        if missing == variable or missing in tried:
+            return None
+        tried.add(missing)
+        try:
+            result = interview.askfor(
+                missing,
+                namespace,
+                dict(namespace),
+                status,
+                seeking=getattr(status, "seeking", []),
+                variable_stack=set(),
+                questions_tried={},
+            )
+        except Exception as error:  # noqa: BLE001 - the full ask reports the failure
+            logger.debug("could not define sought root %r: %s", missing, error)
+            return None
+        if result.get("type") not in ("continue", "re_run"):
+            return result
+
+
 def _seek(interview, namespace, status, variable, trace):
     try:
         interview.assemble(namespace, interview_status=status)
     except Exception as exc:  # noqa: BLE001 - pre-seek assembly is best-effort, ignore any failure
         logger.debug("assemble before seek failed for %r: %s", variable, exc)
-    result = interview.askfor(
-        variable,
-        namespace,
-        dict(namespace),
-        status,
-        seeking=[],
-        variable_stack=set(),
-        questions_tried={},
-    )
+    result = _define_sought_roots(interview, namespace, status, variable)
+    if result is None:
+        result = interview.askfor(
+            variable,
+            namespace,
+            dict(namespace),
+            status,
+            seeking=[],
+            variable_stack=set(),
+            questions_tried={},
+        )
     outcome = {"sought_variable": variable}
     if result.get("type") == "question":
         outcome.update(describe_question_result(result, namespace))

@@ -190,6 +190,7 @@ def real_workspace(tmp_path, real_python):
         "---\n"
         "objects:\n"
         "  - rav: DAObject\n"
+        "  - rav.cos: DAObject\n"
         "---\n"
         "generic object: DAObject\n"
         "question: |\n"
@@ -213,6 +214,33 @@ def real_workspace(tmp_path, real_python):
         "question: Summary\n"
         "subquestion: |\n"
         "  ${ rav.cos.date }\n"
+    )
+    (questions / "generic-code-root.yml").write_text(
+        "---\n"
+        "code: |\n"
+        "  T = DAObject()\n"
+        "---\n"
+        "objects:\n"
+        "  - T.miscellaneous: DAObject\n"
+        "  - T.miscellaneous.rav: DAObject\n"
+        "---\n"
+        "generic object: DAObject\n"
+        "question: |\n"
+        "  What is the date?\n"
+        "fields:\n"
+        "  - label: no label\n"
+        "    field: x.date\n"
+        "    datatype: date\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Start\n"
+        "fields:\n"
+        "  - Start: start\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Summary\n"
+        "subquestion: |\n"
+        "  ${ T.miscellaneous.rav.date }\n"
     )
     (questions / "background.yml").write_text(
         "---\n"
@@ -441,6 +469,70 @@ def test_generic_object_answers_resolve_through_orig_sought(
         interpreter, root, "eval", "--interview", "generic.yml", "rav.date.day"
     )
     assert placeholder["result"]["value"] == "16"
+
+
+def test_seek_defines_missing_roots_without_persisting(real_python, real_workspace):
+    interpreter = real_python
+    root = real_workspace
+    assert _run(interpreter, root, "start", "--interview", "generic.yml")["ok"]
+    session = next((root / ".simulator" / "sessions").glob("*.pkl"))
+    before = session.read_bytes()
+
+    sought = _run(interpreter, root, "seek", "--interview", "generic.yml", "rav.date")[
+        "result"
+    ]
+    assert sought["kind"] == "question"
+    assert sought["sought"].endswith("x.date")
+    assert sought["orig_sought"].endswith("rav.date")
+    assert session.read_bytes() == before
+
+    fresh = _run(
+        interpreter, root, "seek", "--interview", "generic.yml", "rav.date", "--fresh"
+    )["result"]
+    assert fresh["kind"] == "question"
+    assert fresh["orig_sought"].endswith("rav.date")
+
+    assert _run(
+        interpreter,
+        root,
+        "seek",
+        "--interview",
+        "generic.yml",
+        "rav.date",
+        "--activate",
+    )["ok"]
+    persisted = _run(
+        interpreter, root, "eval", "--interview", "generic.yml", "type(rav).__name__"
+    )
+    assert persisted["result"]["value"] == "'DAObject'"
+
+    assert _run(interpreter, root, "start", "--interview", "generic-nested.yml")["ok"]
+    chained = _run(
+        interpreter,
+        root,
+        "seek",
+        "--interview",
+        "generic-nested.yml",
+        "rav.cos.date",
+    )["result"]
+    assert chained["kind"] == "question"
+    assert chained["sought"].endswith("x.date")
+    assert chained["orig_sought"].endswith("rav.cos.date")
+
+    assert _run(interpreter, root, "start", "--interview", "generic-code-root.yml")[
+        "ok"
+    ]
+    code_root = _run(
+        interpreter,
+        root,
+        "seek",
+        "--interview",
+        "generic-code-root.yml",
+        "T.miscellaneous.rav.date",
+    )["result"]
+    assert code_root["kind"] == "question"
+    assert code_root["sought"].endswith("x.date")
+    assert code_root["orig_sought"].endswith("T.miscellaneous.rav.date")
 
 
 def test_generic_object_nested_target_resolves_through_seek(

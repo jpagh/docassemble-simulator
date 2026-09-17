@@ -604,6 +604,97 @@ def test_date_answer_is_field_aware_and_invalid_multi_answer_rolls_back(
     )
 
 
+class DeclaredObjectInterview(FakeInterview):
+    """Defines ``rav`` on demand and asks its generic question afterwards."""
+
+    def populate_non_pickleable(self, namespace):
+        super().populate_non_pickleable(namespace)
+        namespace["DAObject"] = sys.modules["docassemble.base.util"].DAObject
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        if variable == "rav":
+            namespace["rav"] = namespace["DAObject"]("rav")
+            return {"type": "continue", "sought": "rav", "orig_sought": "rav"}
+        if "rav" not in namespace:
+            raise NameError("name 'rav' is not defined")
+        return {
+            "type": "question",
+            "sought": "x.date",
+            "orig_sought": variable,
+            "question": SimpleNamespace(
+                question_type="fields",
+                name=None,
+                validation_code=None,
+                fields=[
+                    SimpleNamespace(saveas="x.date", datatype="date", required=False)
+                ],
+            ),
+            "question_text": "What is the date?",
+            "subquestion_text": None,
+            "continue_label": None,
+            "selectcompute": {},
+        }
+
+
+class RootQuestionInterview(FakeInterview):
+    """A root that needs a screen before its attribute can be asked."""
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        return {
+            "type": "question",
+            "sought": "rav",
+            "orig_sought": "rav",
+            "question": SimpleNamespace(
+                question_type="fields",
+                name=None,
+                validation_code=None,
+                fields=[SimpleNamespace(saveas="rav", datatype="text", required=False)],
+            ),
+            "question_text": "Who is rav?",
+            "subquestion_text": None,
+            "continue_label": None,
+            "selectcompute": {},
+        }
+
+
+def test_seek_returns_the_screen_that_defines_a_missing_root(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, RootQuestionInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    sought = execution.run(Seek("rav.date"))
+
+    assert sought.ok
+    assert sought.result["question_text"] == "Who is rav?"
+    assert sought.result["orig_sought"] == "rav"
+
+
+def test_seek_defines_missing_root_before_asking(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, DeclaredObjectInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+    before = _session_bytes(tmp_path)
+
+    sought = execution.run(Seek("rav.date"))
+
+    assert sought.ok
+    assert sought.result["orig_sought"] == "rav.date"
+    assert _session_bytes(tmp_path) == before
+
+    activated = execution.run(Seek("rav.date", activate=True))
+
+    assert activated.ok
+    assert "rav" in execution.run(Variables("rav")).result
+
+
 def _generic_date_execution(tmp_path, monkeypatch, da_stubs):
     execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, GenericDateInterview)
     monkeypatch.setattr(
