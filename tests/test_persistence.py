@@ -87,6 +87,21 @@ for index in range(20):
     assert snapshot["padding"] == snapshot["marker"] * 200000
 
 
+def test_session_paths_are_qualified_by_config_fingerprint(tmp_path):
+    identity = "docassemble.pkg:data/questions/main.yml"
+
+    legacy = StateStore(tmp_path, identity)
+    configured = StateStore(tmp_path, identity, "abc123")
+    other = StateStore(tmp_path, identity, "def456")
+
+    assert (
+        legacy.path.name
+        == "docassemble.pkg-data-questions-main.yml-63f732779b9359b7.pkl"
+    )
+    assert configured.path != legacy.path
+    assert configured.path != other.path
+
+
 def test_corrupt_payload_has_saved_state_recovery_message(tmp_path):
     from docassemble_simulator.execution import ExecutionFailure
 
@@ -116,6 +131,34 @@ def test_snapshot_open_failure_keeps_state_error_kind_and_display_path(tmp_path)
         "could not load snapshot " + str(snapshot) + ": "
     )
     assert caught.value.kind.value == "state"
+
+
+def test_session_payload_rejects_a_different_configuration(tmp_path):
+    from docassemble_simulator.execution import ExecutionFailure
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    configured = StateStore(tmp_path, identity, "abc123")
+    configured.save({}, {"kind": "executed"})
+
+    copied = StateStore(tmp_path, identity, "def456")
+    copied.path.write_bytes(configured.path.read_bytes())
+
+    with pytest.raises(ExecutionFailure) as caught:
+        copied.load()
+
+    assert "effective configuration" in str(caught.value)
+    assert caught.value.kind.value == "state"
+
+
+def test_snapshots_ignore_the_config_fingerprint(tmp_path):
+    identity = "docassemble.pkg:data/questions/main.yml"
+    snapshot = tmp_path / "snapshot.pkl"
+
+    StateStore(tmp_path, identity, "abc123").save_snapshot(snapshot, {"value": 1})
+
+    loaded = StateStore(tmp_path, identity, "def456").load_snapshot(snapshot)
+
+    assert loaded == {"value": 1}
 
 
 def test_snapshot_with_another_interview_identity_is_rejected(tmp_path):

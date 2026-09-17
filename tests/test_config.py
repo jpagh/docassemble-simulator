@@ -79,6 +79,27 @@ class TestConfigDiscovery:
         )
         assert resolved.report()["config_override"] == str(override.resolve())
 
+    def test_resolved_configuration_fingerprint_tracks_effective_values(self, tmp_path):
+        first = resolve_configuration(
+            tmp_path,
+            base={"jinja-data": {"category": {"family": "Family", "b": "B"}}},
+        )
+        reordered = resolve_configuration(
+            tmp_path,
+            base={"jinja-data": {"category": {"b": "B", "family": "Family"}}},
+        )
+        other = resolve_configuration(
+            tmp_path,
+            base={
+                "jinja-data": {"category": {"family": "Family", "miscellaneous": "M"}}
+            },
+        )
+
+        assert resolve_configuration(tmp_path).fingerprint == ""
+        assert first.fingerprint
+        assert first.fingerprint == reordered.fingerprint
+        assert first.fingerprint != other.fingerprint
+
     def test_simulator_settings_and_secret_redaction(self):
         settings = simulator_settings(
             {

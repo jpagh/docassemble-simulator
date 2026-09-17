@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import tomllib
@@ -211,6 +212,20 @@ class ResolvedConfiguration:
     @property
     def effective_path(self) -> Path:
         return self.root / ".simulator" / "config-effective.yml"
+
+    @property
+    def fingerprint(self) -> str:
+        """A stable digest of the resolved user configuration.
+
+        Built-in defaults are not part of ``values``, so an unconfigured
+        workspace has an empty fingerprint and keeps its interview-only
+        session path.  Identical content from different sources (discovered
+        files, ``--config``, command overrides) yields the same digest.
+        """
+        if not self.values:
+            return ""
+        canonical = yaml.safe_dump(self.values, sort_keys=True)
+        return hashlib.sha256(canonical.encode()).hexdigest()
 
     @property
     def simulator(self) -> dict[str, Any]:

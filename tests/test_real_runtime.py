@@ -423,6 +423,67 @@ def test_seek_contract_across_families(family_python, real_workspace):
     assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
 
 
+def test_sessions_are_isolated_by_effective_config(real_python, real_workspace):
+    interpreter = real_python
+    root = real_workspace
+    default_config = root / ".config" / "simulator" / "config.toml"
+    default_config.parent.mkdir(parents=True, exist_ok=True)
+    default_config.write_text('[jinja-data.category]\nfamily = "Family"\n')
+    override = root / "override.toml"
+    override.write_text(
+        '[jinja-data.category]\nfamily = "Family"\nmiscellaneous = "Miscellaneous"\n'
+    )
+    identical = root / "override-copy.toml"
+    identical.write_text(override.read_text())
+
+    assert _run(interpreter, root, "start")["ok"]
+    sessions = root / ".simulator" / "sessions"
+    assert len(list(sessions.glob("*.pkl"))) == 1
+
+    isolated = _run(
+        interpreter,
+        root,
+        "status",
+        "--config",
+        str(override),
+        expected_code=1,
+    )
+    assert not isolated["ok"]
+    assert isolated["error"]["kind"] == "state"
+    assert "no saved session" in isolated["error"]["message"]
+
+    assert _run(interpreter, root, "start", "--config", str(override))["ok"]
+    assert len(list(sessions.glob("*.pkl"))) == 2
+
+    assert _run(interpreter, root, "status")["ok"]
+    assert _run(interpreter, root, "status", "--config", str(override))["ok"]
+    # Identical content from a different path is the same effective config.
+    assert _run(interpreter, root, "status", "--config", str(identical))["ok"]
+
+    assert _run(
+        interpreter,
+        root,
+        "answer",
+        "--config",
+        str(override),
+        "filing_date=2026-08-26",
+        "caption=2026-08-26",
+    )["ok"]
+    artifact = root / "override.docx"
+    assert _run(
+        interpreter,
+        root,
+        "render",
+        "date.docx",
+        "--config",
+        str(override),
+        "--no-assemble",
+        "--output",
+        str(artifact),
+    )["ok"]
+    assert artifact.is_file()
+
+
 def test_generic_object_answers_resolve_through_orig_sought(
     real_python, real_workspace
 ):

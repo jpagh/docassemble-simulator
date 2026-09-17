@@ -82,10 +82,11 @@ impossible dates are rejected. The same text submitted to a text field remains
 a string. `answer --code` and `exec` retain Python semantics and bypass browser
 coercion.
 
-State is versioned and stored separately for each canonical interview under
-`.simulator/sessions/`. Files are trusted-local pickle payloads. Unsupported or
-stale state fails with an instruction to run `start` again. Mutations hold a
-per-interview advisory lock and commit with atomic replacement.
+State is versioned and stored separately for each canonical interview and
+effective configuration under `.simulator/sessions/`. Files are trusted-local
+pickle payloads. Unsupported or stale state fails with an instruction to run
+`start` again. Mutations hold a per-interview advisory lock and commit with
+atomic replacement.
 
 ## JSON and exit codes
 
@@ -207,8 +208,10 @@ simulator/config.toml .simulator/config.toml .config/simulator.toml
 
 The effective file is generated at `.simulator/config-effective.yml`; TOML
 `jinja-data` is normalized to docassemble's `jinja data`. `--config PATH` adds
-a final YAML (or TOML) override. The `config` command prints redacted values
-and supports `--json`; credentials are never printed or committed.
+a final YAML (or TOML) override. Sessions are isolated per effective
+configuration, so runs under different overrides never share state. The
+`config` command prints redacted values and supports `--json`; credentials are
+never printed or committed.
 
 Simulator-owned settings belong under `[simulator]`, including
 `missing_runtime = "install"|"disabled"`, `background_actions =

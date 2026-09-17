@@ -150,7 +150,9 @@ def _exit_for_error(kind: ErrorKind | str):
 def _execution(args, root):
     from docassemble_simulator.execution import InterviewExecution
 
-    return InterviewExecution(root, args.interview)
+    resolved = getattr(args, "_resolved_configuration", None)
+    fingerprint = resolved.fingerprint if resolved is not None else ""
+    return InterviewExecution(root, args.interview, config_fingerprint=fingerprint)
 
 
 def _config_report(root, config, args=None):

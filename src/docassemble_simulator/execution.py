@@ -223,11 +223,24 @@ def _read_payload(
 
 
 class StateStore:
-    """Versioned, per-interview trusted-local state with atomic replacement."""
+    """Versioned, per-interview trusted-local state with atomic replacement.
 
-    def __init__(self, root: Path, identity: str):
+    The session path and payload are qualified by the effective configuration
+    fingerprint, so a different config can never load or overwrite the state
+    another config produced.
+    """
+
+    def __init__(self, root: Path, identity: str, config_fingerprint: str = ""):
         self.identity = identity
-        digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
+        self.config_fingerprint = config_fingerprint
+        # An unset fingerprint reproduces the original interview-only path so
+        # zero-config workspaces keep their existing saved sessions.
+        if config_fingerprint:
+            digest = hashlib.sha256(
+                f"{identity}\x00{config_fingerprint}".encode()
+            ).hexdigest()[:16]
+        else:
+            digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
         slug = (
             re.sub(r"[^A-Za-z0-9_.-]+", "-", identity).strip("-")[-80:] or "interview"
         )
@@ -245,12 +258,20 @@ class StateStore:
             raise ExecutionFailure(
                 ErrorKind.STATE, "no saved session; run `start` first"
             )
-        return _read_payload(
+        payload = _read_payload(
             self.path,
             identity=self.identity,
             load_namespace=namespace,
             policy=_SAVED_PAYLOAD,
         )
+        stored = payload.get("config_fingerprint") or ""
+        if stored != self.config_fingerprint:
+            raise ExecutionFailure(
+                ErrorKind.STATE,
+                "saved state was produced under a different effective "
+                "configuration; run `start` again",
+            )
+        return payload
 
     def save(
         self,
@@ -261,6 +282,7 @@ class StateStore:
         payload = {
             "schema": STATE_SCHEMA,
             "interview": self.identity,
+            "config_fingerprint": self.config_fingerprint,
             "namespace": pickle.dumps(_picklable_view(namespace)),
             "outcome": _jsonable(outcome),
             "active_seek": active_seek,
@@ -288,11 +310,17 @@ class StateStore:
 class InterviewExecution:
     """Run complete operations; mutable runtime state never crosses this interface."""
 
-    def __init__(self, root: str | Path, selector: str | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        selector: str | None = None,
+        *,
+        config_fingerprint: str = "",
+    ):
         self.root = Path(root).resolve()
         self._catalog = InterviewCatalog(self.root, selector)
         self._identity = self._catalog.identity
-        self._store = StateStore(self.root, self._identity)
+        self._store = StateStore(self.root, self._identity, config_fingerprint)
 
     @_activate_runtime
     def run(self, operation: Operation) -> ExecutionOutcome:
