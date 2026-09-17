@@ -83,10 +83,17 @@ a string. `answer --code` and `exec` retain Python semantics and bypass browser
 coercion.
 
 State is versioned and stored separately for each canonical interview and
-effective configuration under `.simulator/sessions/`. Files are trusted-local
-pickle payloads. Unsupported or stale state fails with an instruction to run
-`start` again. Mutations hold a per-interview advisory lock and commit with
-atomic replacement.
+effective configuration under `.simulator/sessions/`. The effective
+configuration is fingerprinted over its resolved values, so two runs share a
+session exactly when their discovered files, `--config` overrides, and
+command-line policy flags resolve to the same content; changing any of them
+starts a separate session instead of silently rehydrating the old one.
+`config --json` reports this as `config_fingerprint`. Loading state saved under
+a different configuration fails with a message saying so, and the previous
+session stays on disk for the configuration that produced it. Files are
+trusted-local pickle payloads. Unsupported or stale state fails with an
+instruction to run `start` again. Mutations hold a per-interview advisory lock
+and commit with atomic replacement.
 
 ## JSON and exit codes
 
@@ -209,9 +216,10 @@ simulator/config.toml .simulator/config.toml .config/simulator.toml
 The effective file is generated at `.simulator/config-effective.yml`; TOML
 `jinja-data` is normalized to docassemble's `jinja data`. `--config PATH` adds
 a final YAML (or TOML) override. Sessions are isolated per effective
-configuration, so runs under different overrides never share state. The
-`config` command prints redacted values and supports `--json`; credentials are
-never printed or committed.
+configuration, so runs under different overrides never share state; the
+`config` command's `--json` output includes the `config_fingerprint` that
+scopes them. The `config` command prints redacted values and supports
+`--json`; credentials are never printed or committed.
 
 Simulator-owned settings belong under `[simulator]`, including
 `missing_runtime = "install"|"disabled"`, `background_actions =

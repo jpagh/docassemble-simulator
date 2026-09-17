@@ -133,6 +133,45 @@ def test_snapshot_open_failure_keeps_state_error_kind_and_display_path(tmp_path)
     assert caught.value.kind.value == "state"
 
 
+def test_legacy_payload_without_fingerprint_still_loads(tmp_path):
+    import pickle
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    store = StateStore(tmp_path, identity)
+    store.directory.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(
+        pickle.dumps(
+            {
+                "schema": 1,
+                "interview": identity,
+                "namespace": pickle.dumps({"kept": True}),
+                "outcome": {"kind": "executed"},
+                "active_seek": None,
+            }
+        )
+    )
+
+    assert store.load()["namespace"] == {"kept": True}
+
+
+def test_missing_session_names_the_other_configuration(tmp_path):
+    from docassemble_simulator.execution import ExecutionFailure
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    StateStore(tmp_path, identity, "abc123").save({}, {"kind": "executed"})
+
+    with pytest.raises(ExecutionFailure) as caught:
+        StateStore(tmp_path, identity, "def456").load()
+
+    assert "different effective configuration" in str(caught.value)
+    assert caught.value.kind.value == "state"
+
+    with pytest.raises(ExecutionFailure) as missing:
+        StateStore(tmp_path, "docassemble.other:data/questions/main.yml").load()
+
+    assert str(missing.value) == "no saved session; run `start` first"
+
+
 def test_session_payload_rejects_a_different_configuration(tmp_path):
     from docassemble_simulator.execution import ExecutionFailure
 

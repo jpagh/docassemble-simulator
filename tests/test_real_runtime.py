@@ -450,7 +450,7 @@ def test_sessions_are_isolated_by_effective_config(real_python, real_workspace):
     )
     assert not isolated["ok"]
     assert isolated["error"]["kind"] == "state"
-    assert "no saved session" in isolated["error"]["message"]
+    assert "different effective configuration" in isolated["error"]["message"]
 
     assert _run(interpreter, root, "start", "--config", str(override))["ok"]
     assert len(list(sessions.glob("*.pkl"))) == 2

@@ -100,6 +100,15 @@ class TestConfigDiscovery:
         assert first.fingerprint == reordered.fingerprint
         assert first.fingerprint != other.fingerprint
 
+    def test_config_report_exposes_session_fingerprint(self, tmp_path):
+        configured = resolve_configuration(
+            tmp_path, base={"jinja-data": {"category": {"family": "Family"}}}
+        )
+        unset = resolve_configuration(tmp_path)
+
+        assert configured.report()["config_fingerprint"] == configured.fingerprint
+        assert unset.report()["config_fingerprint"] == ""
+
     def test_simulator_settings_and_secret_redaction(self):
         settings = simulator_settings(
             {

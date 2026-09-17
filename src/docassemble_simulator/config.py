@@ -86,6 +86,20 @@ def discover_config_files(
     return files
 
 
+def config_fingerprint(values: dict[str, Any] | None) -> str:
+    """Return a stable digest of resolved user configuration values.
+
+    Built-in defaults are not part of a resolved user configuration, so an
+    unconfigured workspace has an empty fingerprint and keeps its
+    interview-only session path.  Identical content from different sources
+    (discovered files, ``--config``, command overrides) yields the same digest.
+    """
+    if not values:
+        return ""
+    canonical = yaml.safe_dump(values, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     """Translate TOML-friendly names to docassemble's server-config names."""
     normalized = dict(config)
@@ -215,17 +229,8 @@ class ResolvedConfiguration:
 
     @property
     def fingerprint(self) -> str:
-        """A stable digest of the resolved user configuration.
-
-        Built-in defaults are not part of ``values``, so an unconfigured
-        workspace has an empty fingerprint and keeps its interview-only
-        session path.  Identical content from different sources (discovered
-        files, ``--config``, command overrides) yields the same digest.
-        """
-        if not self.values:
-            return ""
-        canonical = yaml.safe_dump(self.values, sort_keys=True)
-        return hashlib.sha256(canonical.encode()).hexdigest()
+        """The digest of the resolved user configuration (see the function)."""
+        return config_fingerprint(self.values)
 
     @property
     def simulator(self) -> dict[str, Any]:
@@ -239,6 +244,7 @@ class ResolvedConfiguration:
         report = {
             "files": [str(path) for path in self.files],
             "effective_config": str(self.effective_path),
+            "config_fingerprint": self.fingerprint,
             "simulator": redact_config(self.simulator),
             "pass_through_keys": sorted(self.pass_through),
             "defaults": {
@@ -320,6 +326,7 @@ __all__ = [
     "PROJECT_CANDIDATES",
     "SIMULATOR_DEFAULTS",
     "ResolvedConfiguration",
+    "config_fingerprint",
     "deep_merge",
     "discover_config_files",
     "global_config_path",

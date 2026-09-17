@@ -22,6 +22,7 @@ from docassemble_simulator.catalog import list_interviews
 from docassemble_simulator.config import (
     DOCASSEMBLE_DEFAULTS,
     SIMULATOR_DEFAULTS,
+    config_fingerprint,
     deep_merge,
     discover_config_files,
     global_config_path,
@@ -172,6 +173,7 @@ def _config_report(root, config, args=None):
                 ),
             ],
             "effective_config": str(root / ".simulator" / "config-effective.yml"),
+            "config_fingerprint": config_fingerprint(config),
             "simulator": redact_config(settings),
             "pass_through_keys": sorted(pass_through_config(config)),
             "defaults": {
@@ -459,7 +461,9 @@ def build_parser():
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--stub-defined", action="store_true")
     parser.add_argument(
-        "--config", default=None, help="override config file (YAML or TOML)"
+        "--config",
+        default=None,
+        help="override config file (YAML or TOML); sessions are scoped by the effective configuration",
     )
     parser.add_argument(
         "--offline", action="store_true", help="do not acquire missing runtime packages"
@@ -475,8 +479,13 @@ def build_parser():
         help="capture the variable-seeking trace (default: capture; off suppresses the trace)",
     )
     common = argparse.ArgumentParser(add_help=False)
-    for flag in ("root", "interview", "config"):
+    for flag in ("root", "interview"):
         common.add_argument(f"--{flag}", default=argparse.SUPPRESS)
+    common.add_argument(
+        "--config",
+        default=argparse.SUPPRESS,
+        help="override config file (YAML or TOML); sessions are scoped by the effective configuration",
+    )
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     common.add_argument(
         "--stub-defined", action="store_true", default=argparse.SUPPRESS
@@ -505,16 +514,17 @@ def build_parser():
     add(
         "config",
         help="inspect effective simulator configuration (secrets redacted)",
-        description="Show discovered config, simulator settings, and redacted pass-through values.",
+        description="Show discovered config, simulator settings, redacted pass-through values, and the config_fingerprint that scopes sessions.",
     ).set_defaults(func=cmd_config)
     add("check", help="compile interview definitions").set_defaults(func=cmd_catalog)
     for name in ("questions", "index"):
         item = add(name, help=f"inspect interview {name}")
         item.add_argument("--var")
         item.set_defaults(func=cmd_catalog)
-    add("start", help="create and assemble a fresh session").set_defaults(
-        func=cmd_execution
-    )
+    add(
+        "start",
+        help="create and assemble a fresh session for the effective configuration",
+    ).set_defaults(func=cmd_execution)
     add("status", help="read the saved outcome without assembly").set_defaults(
         func=cmd_execution
     )

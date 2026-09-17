@@ -241,11 +241,11 @@ class StateStore:
             ).hexdigest()[:16]
         else:
             digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
-        slug = (
+        self.slug = (
             re.sub(r"[^A-Za-z0-9_.-]+", "-", identity).strip("-")[-80:] or "interview"
         )
         self.directory = root / ".simulator" / "sessions"
-        self.path = self.directory / f"{slug}-{digest}.pkl"
+        self.path = self.directory / f"{self.slug}-{digest}.pkl"
         self.lock_path = self.path.with_suffix(".lock")
 
     @contextmanager
@@ -253,8 +253,34 @@ class StateStore:
         with flock(self.lock_path):
             yield
 
+    def _other_configuration(self) -> Path | None:
+        """Return a same-interview session stored under another fingerprint."""
+        for candidate in sorted(self.directory.glob(f"{self.slug}-*.pkl")):
+            if candidate == self.path:
+                continue
+            try:
+                payload = _read_payload(
+                    candidate,
+                    identity=self.identity,
+                    load_namespace=False,
+                    policy=_SAVED_PAYLOAD,
+                )
+            except Exception as error:  # noqa: BLE001 - unrelated or unreadable session files
+                logger.debug("ignoring session file %r: %s", candidate, error)
+                continue
+            if (payload.get("config_fingerprint") or "") != self.config_fingerprint:
+                return candidate
+        return None
+
     def load(self, *, namespace: bool = True) -> dict[str, Any]:
         if not self.path.exists():
+            if self._other_configuration() is not None:
+                raise ExecutionFailure(
+                    ErrorKind.STATE,
+                    "a saved session for this interview exists under a "
+                    "different effective configuration; run `start` to begin "
+                    "one for this configuration",
+                )
             raise ExecutionFailure(
                 ErrorKind.STATE, "no saved session; run `start` first"
             )
