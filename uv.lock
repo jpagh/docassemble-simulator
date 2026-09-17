@@ -3,12 +3,12 @@ revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.13.*' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.12.*' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version < '3.12' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version >= '3.14' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.13.*' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.13.*' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.12.*' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.12.*' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version < '3.12' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version < '3.12' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
     "extra != 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
 ]
@@ -2619,7 +2619,7 @@ wheels = [
 
 [[package]]
 name = "docassemble-simulator"
-version = "26.8.0"
+version = "26.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },

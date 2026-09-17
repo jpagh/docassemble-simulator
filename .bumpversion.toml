@@ -1,6 +1,6 @@
 [tool.bumpversion]
     commit           = true
-    current_version  = "26.8.0"
+    current_version  = "26.9.0"
     message          = "Bump version: {current_version} → {new_version}"
     parse            = """(?x)
 (?P<release>
