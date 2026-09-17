@@ -90,6 +90,13 @@ def _runtime(monkeypatch):
     )
 
 
+class PicklableStubObject(SimpleNamespace):
+    """A stub DAObject that can cross the session pickle boundary."""
+
+    def __init__(self, instanceName=None, **values):
+        super().__init__(instanceName=instanceName, **values)
+
+
 class FakeInterview:
     source = SimpleNamespace(path="main.yml", package="docassemble.pkg")
     questions_by_name: ClassVar[dict] = {}
@@ -99,6 +106,61 @@ class FakeInterview:
 
     def assemble(self, namespace, interview_status):
         raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
+
+
+class GenericDateInterview(FakeInterview):
+    """A generic-object date screen: fields use ``x.date``, target is ``rav.date``."""
+
+    required = False
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="x.date", datatype="date", required=self.required
+                )
+            ],
+        )
+        interview_status.question_text = "What is the date?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.date"
+        interview_status.orig_sought = "rav.date"
+        interview_status.selectcompute = {}
+
+
+class GenericMultiFieldInterview(FakeInterview):
+    """A generic screen whose triggering field is not the only described field."""
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="x.service_type", datatype="text", required=False
+                ),
+                SimpleNamespace(saveas="x.date", datatype="date", required=False),
+            ],
+        )
+        interview_status.question_text = "Service"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.service_type"
+        interview_status.orig_sought = "rav.service_type"
+        interview_status.selectcompute = {}
 
 
 def _execution(tmp_path, monkeypatch, da_stubs, interview=FakeInterview):
@@ -539,4 +601,99 @@ def test_date_answer_is_field_aware_and_invalid_multi_answer_rolls_back(
     assert coded.ok
     assert (
         execution.run(Evaluate("type(filing_date).__name__")).result["value"] == "'str'"
+    )
+
+
+def _generic_date_execution(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, GenericDateInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    return execution
+
+
+def test_generic_object_answer_uses_orig_sought_for_date_coercion(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution = _generic_date_execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("rav.date", "2026-08-26"),)))
+
+    assert accepted.ok
+    assert (
+        execution.run(Evaluate("type(rav.date).__name__")).result["value"]
+        == "'datetime'"
+    )
+
+    before = _session_bytes(tmp_path)
+    rejected = execution.run(Answer((("rav.date", "2026-02-30"),)))
+    assert not rejected.ok and rejected.error.kind == "answer-input"
+    assert _session_bytes(tmp_path) == before
+
+
+def test_generic_object_resolves_every_field_through_the_sought_prefix(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericMultiFieldInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(
+        Answer((("x.service_type", "Electronic"), ("x.date", "2026-10-14")))
+    )
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.service_type")).result["value"] == "'Electronic'"
+    assert execution.run(Evaluate("rav.date.day")).result["value"] == "14"
+
+
+def test_generic_object_answer_precedence_when_both_names_are_supplied(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution = _generic_date_execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(
+        Answer((("rav.date", "2026-01-01"), ("x.date", "2026-02-02")))
+    )
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.date.month")).result["value"] == "2"
+
+
+def test_generic_object_validation_evaluates_resolved_targets(
+    tmp_path, monkeypatch, da_stubs
+):
+    class RequiredDateInterview(GenericDateInterview):
+        required = True
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, RequiredDateInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("rav.date", "2026-08-26"),)))
+
+    assert accepted.ok
+    assert "warnings" not in accepted.result
+
+
+def test_generic_object_answer_resolves_placeholder_field_names(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution = _generic_date_execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.date", "2026-09-09"),)))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.date.day")).result["value"] == "9"
+    assert (
+        execution.run(Evaluate("globals().get('x') is None")).result["value"] == "True"
     )

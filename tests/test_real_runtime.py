@@ -159,6 +159,61 @@ def real_workspace(tmp_path, real_python):
         "  - Caption: caption\n"
         "    required: False\n"
     )
+    (questions / "generic.yml").write_text(
+        "---\n"
+        "objects:\n"
+        "  - rav: DAObject\n"
+        "---\n"
+        "generic object: DAObject\n"
+        "question: |\n"
+        "  What is the date?\n"
+        "fields:\n"
+        "  - label: no label\n"
+        "    field: x.date\n"
+        "    datatype: date\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Start\n"
+        "fields:\n"
+        "  - Start: start\n"
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  rav = DAObject()\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Summary\n"
+        "subquestion: |\n"
+        "  Date: ${ rav.date }\n"
+    )
+    (questions / "generic-nested.yml").write_text(
+        "---\n"
+        "objects:\n"
+        "  - rav: DAObject\n"
+        "---\n"
+        "generic object: DAObject\n"
+        "question: |\n"
+        "  What is the date?\n"
+        "fields:\n"
+        "  - label: no label\n"
+        "    field: x.date\n"
+        "    datatype: date\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Start\n"
+        "fields:\n"
+        "  - Start: start\n"
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  rav = DAObject()\n"
+        "  rav.cos = DAObject()\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Summary\n"
+        "subquestion: |\n"
+        "  ${ rav.cos.date }\n"
+    )
     (questions / "background.yml").write_text(
         "---\n"
         "mandatory: True\n"
@@ -338,6 +393,103 @@ def test_seek_contract_across_families(family_python, real_workspace):
     diagnostics = missing.get("diagnostics") or []
     assert diagnostics, label
     assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
+
+
+def test_generic_object_answers_resolve_through_orig_sought(
+    real_python, real_workspace
+):
+    interpreter = real_python
+    root = real_workspace
+    assert _run(interpreter, root, "start", "--interview", "generic.yml")["ok"]
+
+    screen = _run(
+        interpreter, root, "answer", "--interview", "generic.yml", "start=go"
+    )["result"]
+    assert screen["kind"] == "question"
+    assert screen["sought"].endswith("x.date")
+    assert screen["orig_sought"].endswith("rav.date")
+    assert screen["fields"][0]["variable"] == "x.date"
+    assert screen["fields"][0]["type"] == "date"
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "--interview",
+        "generic.yml",
+        "rav.date=2026-10-15",
+    )
+    assert answered["ok"]
+    resolved = _run(
+        interpreter,
+        root,
+        "eval",
+        "--interview",
+        "generic.yml",
+        "type(rav.date).__name__",
+    )
+    assert resolved["result"]["value"] == "'DADateTime'"
+
+    assert _run(interpreter, root, "start", "--interview", "generic.yml")["ok"]
+    assert _run(interpreter, root, "answer", "--interview", "generic.yml", "start=go")[
+        "ok"
+    ]
+    assert _run(
+        interpreter, root, "answer", "--interview", "generic.yml", "x.date=2026-10-16"
+    )["ok"]
+    placeholder = _run(
+        interpreter, root, "eval", "--interview", "generic.yml", "rav.date.day"
+    )
+    assert placeholder["result"]["value"] == "16"
+
+
+def test_generic_object_nested_target_resolves_through_seek(
+    real_python, real_workspace
+):
+    interpreter = real_python
+    root = real_workspace
+    assert _run(interpreter, root, "start", "--interview", "generic-nested.yml")["ok"]
+    assert _run(
+        interpreter,
+        root,
+        "exec",
+        "--interview",
+        "generic-nested.yml",
+        "--no-assemble",
+        "from docassemble.base.util import DAObject\nrav = DAObject()\nrav.cos = DAObject()",
+    )["ok"]
+
+    screen = _run(
+        interpreter,
+        root,
+        "seek",
+        "--interview",
+        "generic-nested.yml",
+        "rav.cos.date",
+        "--activate",
+    )["result"]
+    assert screen["kind"] == "question"
+    assert screen["sought"].endswith("x.date")
+    assert screen["orig_sought"].endswith("rav.cos.date")
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "--interview",
+        "generic-nested.yml",
+        "rav.cos.date=2026-10-16",
+    )
+    assert answered["ok"]
+    resolved = _run(
+        interpreter,
+        root,
+        "eval",
+        "--interview",
+        "generic-nested.yml",
+        "type(rav.cos.date).__name__",
+    )
+    assert resolved["result"]["value"] == "'DADateTime'"
 
 
 def test_foreground_background_action_contract_across_families(

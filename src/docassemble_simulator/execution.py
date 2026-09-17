@@ -937,16 +937,54 @@ def _seek(interview, namespace, status, variable, trace):
     return outcome
 
 
-def _field_types(screen):
-    return {
+def _screen_field_targets(screen):
+    """Map generic-object placeholder fields to their resolved target paths.
+
+    A generic-object screen describes fields under a placeholder name
+    (``x.date``) while ``orig_sought`` names the resolved target
+    (``rav.date``).  The placeholder root is the first segment of ``sought``;
+    the resolved root is ``orig_sought`` with the same remainder removed.
+    """
+    sought = screen.get("sought")
+    orig_sought = screen.get("orig_sought")
+    if not isinstance(sought, str) or not isinstance(orig_sought, str):
+        return {}
+    if not sought or not orig_sought or sought == orig_sought:
+        return {}
+    root = sought.split(".", 1)[0]
+    suffix = sought[len(root) :]
+    if not orig_sought.endswith(suffix):
+        return {}
+    resolved_root = orig_sought[: len(orig_sought) - len(suffix)]
+    if not resolved_root:
+        return {}
+    targets = {}
+    for field in screen.get("fields") or []:
+        variable = field.get("variable")
+        if not isinstance(variable, str) or not variable:
+            continue
+        if variable == root:
+            targets[variable] = resolved_root
+        elif variable.startswith(root + "."):
+            targets[variable] = resolved_root + variable[len(root) :]
+    return targets
+
+
+def _field_types(screen, targets):
+    types = {
         field.get("variable"): str(field.get("type", "")).lower()
         for field in screen.get("fields") or []
     }
+    for variable, target in targets.items():
+        if variable in types:
+            types.setdefault(target, types[variable])
+    return types
 
 
 def _apply_assignments(namespace, screen, assignments, use_code):
     errors = []
-    field_types = _field_types(screen)
+    targets = _screen_field_targets(screen)
+    field_types = _field_types(screen, targets)
     for variable, raw in assignments:
         temporary = "__dasimulator_value"
         previous = namespace.get(temporary, _MISSING)
@@ -970,8 +1008,9 @@ def _apply_assignments(namespace, screen, assignments, use_code):
                 from docassemble.base.util import DADict
 
                 value = DADict(elements=value)
+            target = targets.get(variable, variable)
             namespace[temporary] = value
-            __builtins__["exec"](f"{variable} = {temporary}", namespace)
+            __builtins__["exec"](f"{target} = {temporary}", namespace)
         except (
             ValueError,
             TypeError,
@@ -1060,25 +1099,37 @@ def _validate(interview, namespace, screen):
         for field in described
         if field.get("visible") is not False and field.get("required") is not False
     ]
+    targets = _screen_field_targets(screen)
     for variable, datatype in checks:
         if not variable or "signature" in str(datatype).lower():
             continue
-        try:
-            eval(variable, namespace)
-        except (
-            NameError,
-            AttributeError,
-            KeyError,
-            IndexError,
-            TypeError,
-            ValueError,
-            SyntaxError,
-            RuntimeError,
-            ImportError,
-            LookupError,
-            OSError,
-        ) as exc:
-            logger.debug("required field %r undefined: %s", variable, exc)
+        candidates = [variable]
+        target = targets.get(variable)
+        if target and target not in candidates:
+            candidates.append(target)
+        error = None
+        for candidate in candidates:
+            try:
+                eval(candidate, namespace)
+            except (
+                NameError,
+                AttributeError,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+                SyntaxError,
+                RuntimeError,
+                ImportError,
+                LookupError,
+                OSError,
+            ) as exc:
+                error = exc
+                continue
+            error = None
+            break
+        if error is not None:
+            logger.debug("required field %r undefined: %s", variable, error)
             warnings.append(
                 f"required field '{variable}' is undefined (the browser would refuse to submit this screen)"
             )
