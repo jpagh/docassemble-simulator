@@ -285,6 +285,31 @@ def real_workspace(tmp_path, real_python):
         "subquestion: |\n"
         '  <a href="${ final_document.docx.url_for() }">Download</a>\n'
     )
+    (questions / "cyclic.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  M.a = DAObject()\n"
+        "  M.b = DAObject()\n"
+        "  M.c = DAObject()\n"
+        "  M.d = DAObject()\n"
+        "  M.a.b = M.b\n"
+        "  M.a.c = M.c\n"
+        "  M.a.d = M.d\n"
+        "  M.b.a = M.a\n"
+        "  M.b.c = M.c\n"
+        "  M.b.d = M.d\n"
+        "  M.c.a = M.a\n"
+        "  M.c.b = M.b\n"
+        "  M.c.d = M.d\n"
+        "  M.d.a = M.a\n"
+        "  M.d.b = M.b\n"
+        "  M.d.c = M.c\n"
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  no_such_variable_xyz\n"
+    )
     generator = """
 import sys
 from pathlib import Path
@@ -422,7 +447,7 @@ def _environment():
     return environment
 
 
-def _run(real_python, root, *arguments, expected_code=0):
+def _run(real_python, root, *arguments, expected_code=0, timeout=120):
     completed = subprocess.run(
         [
             str(real_python),
@@ -437,7 +462,7 @@ def _run(real_python, root, *arguments, expected_code=0):
         text=True,
         check=False,
         env=_environment(),
-        timeout=120,
+        timeout=timeout,
     )
     assert completed.returncode == expected_code, completed.stdout + completed.stderr
     assert completed.stderr == ""
@@ -579,6 +604,34 @@ def test_seek_contract_across_families(family_python, real_workspace):
     diagnostics = missing.get("diagnostics") or []
     assert diagnostics, label
     assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
+
+
+def test_cyclic_namespace_reports_unresolved_variable(family_python, real_workspace):
+    """A dense object graph must not hide the original assembly failure.
+
+    docassemble serializes the whole namespace while handling the failed
+    assembly; without a bounded serializer, a few mutually-referencing
+    DAObjects make that walk exponential and the command never returns.
+    """
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    failed = _run(
+        interpreter,
+        root,
+        "start",
+        "--interview",
+        "cyclic.yml",
+        expected_code=2,
+        timeout=60,
+    )
+    assert not failed["ok"], label
+    assert failed["error"]["kind"] == "unresolved-variable", label
+    assert failed["error"]["details"]["sought_variable"] == "no_such_variable_xyz", (
+        label
+    )
 
 
 def test_sessions_are_isolated_by_effective_config(real_python, real_workspace):

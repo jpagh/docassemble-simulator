@@ -30,6 +30,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import urlparse
 
+from docassemble_simulator._serialization import install_serialization_guard
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_TEXT = """\
@@ -1346,6 +1348,7 @@ def bootstrap(
     preload_installed_modules()
     install_diagnostic_logging()
     install_attachment_filename_fallback()
+    install_serialization_guard()
     _install_background_action_fallback(background_action_mode)
 
 
