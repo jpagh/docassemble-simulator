@@ -40,6 +40,17 @@ from docassemble_simulator._runtime import (
 from docassemble_simulator.config import deep_merge
 
 
+def _install_bare_docassemble(monkeypatch):
+    """Install only the ``docassemble``/``docassemble.base`` package skeleton.
+
+    Injected submodule finders are only reached when the parent package
+    imports; without an installed runtime the import fails at ``docassemble``
+    before the finder can report the broken dependency.
+    """
+    da, base = _docassemble_package()
+    _install_modules(monkeypatch, {"docassemble": da, "docassemble.base": base})
+
+
 class TestRuntimeBindings:
     def test_legacy_runtime_installs_file_metadata_on_existing_server(
         self, monkeypatch
@@ -403,6 +414,7 @@ class TestIncompleteRuntime:
         from docassemble_simulator._runtime import _SimulatorRuntimeBindings
 
         purge_docassemble_modules(monkeypatch)
+        _install_bare_docassemble(monkeypatch)
 
         class _Broken(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -424,6 +436,7 @@ class TestIncompleteRuntime:
         from docassemble_simulator._runtime import _install_relationship_methods
 
         purge_docassemble_modules(monkeypatch)
+        _install_bare_docassemble(monkeypatch)
 
         class _Broken(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -445,6 +458,7 @@ class TestIncompleteRuntime:
         from docassemble_simulator._runtime import _install_relationship_methods
 
         purge_docassemble_modules(monkeypatch)
+        _install_bare_docassemble(monkeypatch)
 
         class _Boom(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
@@ -464,6 +478,7 @@ class TestIncompleteRuntime:
         from docassemble_simulator._runtime import _legacy_functions_or_none
 
         purge_docassemble_modules(monkeypatch)
+        _install_bare_docassemble(monkeypatch)
 
         class _Broken(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):

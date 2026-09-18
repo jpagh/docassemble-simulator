@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from docassemble_simulator.compatibility import (
+    AssemblyLineCompatibilityError,
+    require_assemblyline_compatibility,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -113,7 +118,14 @@ class InterviewCatalog:
         return resolve_interview(self.root, self.selector)[0]
 
     def _compile(self, identity: str | None = None):
-        """Internal definition loader shared with execution."""
+        """Internal definition loader shared with execution.
+
+        The AssemblyLine compatibility probe runs before the target Interview:
+        a runtime pair that cannot compile the standard birthdate metadata
+        would otherwise surface as an authored-looking label error. Authored
+        parse errors after a passing probe keep their compile-error behavior.
+        """
+        require_assemblyline_compatibility()
         from docassemble.base.interview_cache import get_interview
 
         from docassemble_simulator._runtime import runtime_context
@@ -144,6 +156,10 @@ class InterviewCatalog:
                         ),
                     }
                 )
+            except AssemblyLineCompatibilityError:
+                # A runtime-pair incapability is not a per-Interview compile
+                # failure; surface it as one typed environment failure.
+                raise
             except Exception as error:  # noqa: BLE001 - DAError varies by runtime release
                 logger.debug("interview %r failed to compile: %s", identity, error)
                 rows.append(
@@ -213,6 +229,8 @@ class InterviewCatalog:
     def _compile_for_inspection(self):
         try:
             return self._compile()
+        except AssemblyLineCompatibilityError:
+            raise
         except Exception as error:  # includes DAError/DAErrorMissingVariable
             raise CatalogFailure(f"{type(error).__name__}: {error}") from error
 

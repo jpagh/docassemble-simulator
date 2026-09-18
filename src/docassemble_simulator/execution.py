@@ -33,7 +33,11 @@ from docassemble_simulator._files import (
     validate_destinations,
 )
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
-from docassemble_simulator.catalog import InterviewCatalog
+from docassemble_simulator.catalog import CatalogFailure, InterviewCatalog
+from docassemble_simulator.compatibility import (
+    AssemblyLineCompatibilityError,
+    require_assemblyline_compatibility,
+)
 from docassemble_simulator.describe import (
     describe_fields,
     describe_question_result,
@@ -379,6 +383,8 @@ class InterviewExecution:
                 outcome = ExecutionOutcome(
                     False, error=ExecutionError(error.kind, str(error), error.details)
                 )
+            except AssemblyLineCompatibilityError as error:
+                outcome = _compatibility_failure_outcome(error)
             except Exception as error:
                 unresolved = _unresolved_variable(error)
                 if unresolved is not None:
@@ -390,6 +396,8 @@ class InterviewExecution:
                             {"sought_variable": unresolved},
                         ),
                     )
+                elif _is_compile_failure(error):
+                    outcome = _compile_failure_outcome(error)
                 elif isinstance(
                     error,
                     (
@@ -422,6 +430,9 @@ class InterviewExecution:
         )
 
     def _mutate(self, action: Callable[[], Any]) -> ExecutionOutcome:
+        # Run the runtime compatibility gate before acquiring the session lock:
+        # an incompatible environment must not create or mutate Saved state.
+        require_assemblyline_compatibility()
         with self._store.lock():
             result = action()
         if isinstance(result, dict) and result.get("kind") == "error":
@@ -726,6 +737,8 @@ class InterviewExecution:
                 if preparation.save_snapshot:
                     self._store.save_snapshot(preparation.save_snapshot, namespace)
                 return ExecutionOutcome(True, action(namespace))
+        except AssemblyLineCompatibilityError as error:
+            return _compatibility_failure_outcome(error)
         except ExecutionFailure as error:
             return ExecutionOutcome(
                 False, error=ExecutionError(error.kind, str(error), error.details)
@@ -750,6 +763,10 @@ class InterviewExecution:
                     ErrorKind.FAULT, f"{type(error).__name__}: {error}"
                 ),
             )
+        except Exception as error:
+            if _is_compile_failure(error):
+                return _compile_failure_outcome(error)
+            raise
 
     def _prepare(self, interview, namespace: dict[str, Any]) -> None:
         """Restore server request names, then run authored package adapters."""
@@ -1416,6 +1433,47 @@ def _unresolved_variable(error: BaseException) -> str | None:
         return str(variable)
     match = re.search(r"variable ['\"]([^'\"]+)['\"]", str(error))
     return match.group(1) if match else "<unknown>"
+
+
+def _is_compile_failure(error: BaseException) -> bool:
+    """Whether an escaping error is a definition-load/compile failure.
+
+    Runtime assembly failures are converted into outcome payloads earlier, so
+    an escaping docassemble source error belongs to Interview compilation and
+    must keep the structured compile vocabulary instead of a generic fault.
+    """
+    if isinstance(error, CatalogFailure):
+        return True
+    try:
+        from docassemble.base.error import DAError, DANotFoundError
+    except ImportError:
+        return False
+    return isinstance(error, (DAError, DANotFoundError))
+
+
+def _compile_failure_outcome(error: BaseException) -> ExecutionOutcome:
+    message = (
+        str(error)
+        if isinstance(error, CatalogFailure)
+        else f"{type(error).__name__}: {error}"
+    )
+    return ExecutionOutcome(
+        False,
+        error=ExecutionError(
+            ErrorKind.COMPILE, message, {"error_type": type(error).__name__}
+        ),
+    )
+
+
+def _compatibility_failure_outcome(
+    error: AssemblyLineCompatibilityError,
+) -> ExecutionOutcome:
+    return ExecutionOutcome(
+        False,
+        error=ExecutionError(
+            ErrorKind.RUNTIME_COMPATIBILITY, str(error), error.details
+        ),
+    )
 
 
 def _first_line(error):

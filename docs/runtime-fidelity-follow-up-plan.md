@@ -44,6 +44,19 @@ set.
 
 ### A. Target dependency and parser compatibility
 
+Status: resolved by issue #6. The root cause was simulator runtime setup, not a
+docassemble parser change or an unsupported package pair: the webapp's startup
+module preload (which registers `CustomDataType` classes such as ALToolbox's
+`BirthDate`) was missing, so `alMonthLabel` was parsed as a second label. The
+simulator now reproduces that preload pass and compiles an in-memory birthdate
+metadata probe through the real compiler before the target Interview; an
+unsupported pair fails as a structured `runtime-compatibility` result naming
+the runtime family, versions, failing capability, and recovery direction. The
+tested matrix, probe, and failure taxonomy are documented in
+[docs/runtime-compatibility.md](runtime-compatibility.md) and exercised by
+`tests/test_real_runtime.py` via `mise run test:all-da`. No `site-packages`
+edits, parser forks, or metadata stripping are used.
+
 The target entrypoint includes:
 
 ```yaml

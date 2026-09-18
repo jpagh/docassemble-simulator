@@ -19,6 +19,10 @@ from docassemble_simulator._runtime import (
     dyld_fallback_value,
 )
 from docassemble_simulator.catalog import list_interviews
+from docassemble_simulator.compatibility import (
+    AssemblyLineCompatibilityError,
+    compatibility_report,
+)
 from docassemble_simulator.config import (
     DOCASSEMBLE_DEFAULTS,
     SIMULATOR_DEFAULTS,
@@ -137,6 +141,7 @@ EXIT_CODES = {
     ErrorKind.WORKSPACE: 1,
     ErrorKind.CONFIGURATION: 1,
     ErrorKind.FAULT: 3,
+    ErrorKind.RUNTIME_COMPATIBILITY: 2,
 }
 
 
@@ -253,6 +258,7 @@ def cmd_info(args, root):
         "external_pdf_converter": False,
         "background_worker": False,
     }
+    data["runtime_compatibility"] = compatibility_report()
     _emit(_envelope("info", data), args.json)
     return 0
 
@@ -280,6 +286,17 @@ def cmd_catalog(args, root):
             outcome = catalog.questions(args.var)
         else:
             outcome = catalog.index(args.var)
+    except AssemblyLineCompatibilityError as error:
+        _emit(
+            _envelope(
+                args.command,
+                error=Failure(
+                    ErrorKind.RUNTIME_COMPATIBILITY, str(error), error.details
+                ),
+            ),
+            args.json,
+        )
+        return _exit_for_error(ErrorKind.RUNTIME_COMPATIBILITY)
     except CatalogFailure as error:
         _emit(
             _envelope(

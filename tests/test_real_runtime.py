@@ -11,6 +11,8 @@ from zipfile import ZipFile
 
 import pytest
 
+from docassemble_simulator import compatibility
+
 pytestmark = pytest.mark.real_runtime
 
 
@@ -310,6 +312,106 @@ for name, text in contents.items():
     return tmp_path
 
 
+BIRTHDATE_METADATA_FIXTURE = (
+    "---\n"
+    "id: simulator-birthdate-fixture\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Compatibility birthdate\n"
+    "fields:\n"
+    "  - Birthdate: simulator_probe_birthdate\n"
+    "    datatype: BirthDate\n"
+    "    alMonthLabel: ${ word('Month') }\n"
+    "    alDayLabel: ${ word('Day') }\n"
+    "    alYearLabel: ${ word('Year') }\n"
+)
+
+ASSEMBLYLINE_TARGET_FIXTURE = (
+    "---\n"
+    "include:\n"
+    "  - docassemble.AssemblyLine:assembly_line.yml\n"
+    "---\n"
+    "objects:\n"
+    "  - target_client: DAObject\n"
+    "---\n"
+    "generic object: DAObject\n"
+    "question: |\n"
+    "  What is the date?\n"
+    "fields:\n"
+    "  - label: no label\n"
+    "    field: x.date\n"
+    "    datatype: date\n"
+    "---\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  AssemblyLine-backed target start\n"
+    "fields:\n"
+    "  - Name: target_user_name\n"
+    "  - Do you want to provide a date?: target_wants_date\n"
+    "    datatype: yesno\n"
+    "---\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Target summary\n"
+    "subquestion: |\n"
+    "  % if target_wants_date:\n"
+    "  ${ target_client.date }\n"
+    "  % else:\n"
+    "  No date provided.\n"
+    "  % endif\n"
+)
+
+MISSING_INCLUDE_FIXTURE = (
+    "---\n"
+    "include:\n"
+    "  - docassemble.AssemblyLine:does-not-exist.yml\n"
+    "---\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Missing include\n"
+    "fields:\n"
+    "  - Name: missing_user_name\n"
+)
+
+
+@pytest.fixture
+def assemblyline_workspace(tmp_path):
+    """A minimal AssemblyLine compatibility reproducer plus a target smoke path."""
+    package = tmp_path / "docassemble" / "altarget"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "birthdate.yml").write_text(BIRTHDATE_METADATA_FIXTURE)
+    (questions / "main.yml").write_text(ASSEMBLYLINE_TARGET_FIXTURE)
+    (questions / "missing-include.yml").write_text(MISSING_INCLUDE_FIXTURE)
+    return tmp_path
+
+
+@pytest.fixture
+def incompatible_assemblyline_workspace(tmp_path):
+    """A workspace-local ALToolbox whose BirthDate lacks mako parameters.
+
+    The installed distribution metadata still marks AssemblyLine as present,
+    so the compatibility probe runs and the real compiler rejects the
+    standard field metadata.
+    """
+    package = tmp_path / "docassemble" / "altarget"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "birthdate.yml").write_text(BIRTHDATE_METADATA_FIXTURE)
+    toolbox = tmp_path / "docassemble" / "ALToolbox"
+    toolbox.mkdir()
+    (toolbox / "__init__.py").write_text("")
+    (toolbox / "ThreePartsDate.py").write_text(
+        "from docassemble.base.util import CustomDataType\n\n\n"
+        "class BirthDate(CustomDataType):\n"
+        '    name = "BirthDate"\n'
+        '    input_type = "BirthDate"\n'
+    )
+    return tmp_path
+
+
 def _environment():
     root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
@@ -340,6 +442,62 @@ def _run(real_python, root, *arguments, expected_code=0):
     assert completed.returncode == expected_code, completed.stdout + completed.stderr
     assert completed.stderr == ""
     return json.loads(completed.stdout)
+
+
+def _run_human(real_python, root, *arguments, expected_code):
+    completed = subprocess.run(
+        [
+            str(real_python),
+            "-m",
+            "docassemble_simulator",
+            "--root",
+            str(root),
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=180,
+    )
+    assert completed.returncode == expected_code, completed.stdout + completed.stderr
+    return completed.stdout + completed.stderr
+
+
+def _assemblyline_available(interpreter) -> bool:
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            (
+                "import importlib.metadata as m; "
+                "m.version('docassemble-assemblyline'); "
+                "m.version('docassemble-altoolbox')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _module_file(interpreter, module_name) -> Path:
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            (
+                "import importlib.util as u, sys; "
+                f"print(u.find_spec('{module_name}').origin)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return Path(completed.stdout.strip())
 
 
 def _document_xml(path):
@@ -925,3 +1083,174 @@ def test_real_date_answer_formats_and_rejections_roll_back(
         _run(interpreter, root, "eval", "type(filing_date).__name__")["result"]["value"]
         == "'str'"
     ), label
+
+
+def test_assemblyline_birthdate_metadata_compiles_and_starts(
+    family_python, assemblyline_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    if not _assemblyline_available(interpreter):
+        pytest.skip(f"AssemblyLine is not provisioned for {label}")
+    root = assemblyline_workspace
+    _assert_family_interpreter(case)
+
+    checked = _run(interpreter, root, "check", "--interview", "birthdate.yml")
+    assert checked["ok"], label
+    assert checked["result"]["failures"] == 0, label
+
+    questions = _run(interpreter, root, "questions", "--interview", "birthdate.yml")
+    assert questions["ok"], label
+    variables = [
+        block["variables"]
+        for block in questions["result"]["blocks"]
+        if block["variables"]
+    ]
+    assert ["simulator_probe_birthdate"] in variables, label
+
+    indexed = _run(interpreter, root, "index", "--interview", "birthdate.yml")
+    assert indexed["ok"], label
+    assert "simulator_probe_birthdate" in indexed["result"]["index"], label
+
+    sessions = root / ".simulator" / "sessions"
+    assert not sessions.exists() or not list(sessions.glob("*.pkl")), label
+
+    started = _run(interpreter, root, "start", "--interview", "birthdate.yml")
+    assert started["ok"], label
+    screen = started["result"]
+    assert screen["kind"] == "question", label
+    assert screen["fields"][0]["type"] == "BirthDate", label
+    assert screen["fields"][0]["variable"] == "simulator_probe_birthdate", label
+
+    info = _run(interpreter, root, "info")
+    report = info["result"]["runtime_compatibility"]
+    assert report["assemblyline_installed"] is True, label
+    assert report["tested_matrix"], label
+    assert report["probe"]["capability"] == compatibility.PROBE_CAPABILITY, label
+
+
+def test_assemblyline_backed_target_and_baseline_compile(
+    family_python, assemblyline_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    if not _assemblyline_available(interpreter):
+        pytest.skip(f"AssemblyLine is not provisioned for {label}")
+    root = assemblyline_workspace
+
+    target = _run(interpreter, root, "check", "--interview", "main.yml")
+    assert target["ok"], label
+    assert target["result"]["failures"] == 0, label
+    # The include must actually contribute the baseline questions; a bare
+    # target file alone would compile with a handful of blocks.
+    assert target["result"]["results"][0]["blocks"] > 100, label
+
+    baseline = _run(
+        interpreter,
+        root,
+        "check",
+        "--interview",
+        "docassemble.AssemblyLine:data/questions/assembly_line.yml",
+    )
+    assert baseline["ok"], label
+    assert baseline["result"]["failures"] == 0, label
+
+
+def test_compatibility_checks_do_not_mutate_packages_or_sessions(
+    family_python, assemblyline_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    if not _assemblyline_available(interpreter):
+        pytest.skip(f"AssemblyLine is not provisioned for {label}")
+    root = assemblyline_workspace
+    repository = Path(__file__).resolve().parents[1]
+    lock_before = (repository / "uv.lock").read_bytes()
+    toolbox_file = _module_file(interpreter, "docassemble.ALToolbox.ThreePartsDate")
+    toolbox_before = toolbox_file.read_bytes()
+
+    for arguments in (
+        ("check", "--interview", "birthdate.yml"),
+        ("questions", "--interview", "birthdate.yml"),
+        ("index", "--interview", "birthdate.yml"),
+    ):
+        assert _run(interpreter, root, *arguments)["ok"], label
+
+    assert (repository / "uv.lock").read_bytes() == lock_before, label
+    assert toolbox_file.read_bytes() == toolbox_before, label
+    sessions = root / ".simulator" / "sessions"
+    assert not sessions.exists() or not list(sessions.glob("*.pkl")), label
+
+
+def test_missing_assemblyline_include_is_a_structured_compile_failure(
+    family_python, assemblyline_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = assemblyline_workspace
+
+    payload = _run(
+        interpreter,
+        root,
+        "check",
+        "--interview",
+        "missing-include.yml",
+        expected_code=2,
+    )
+
+    assert payload["ok"] is False, label
+    assert payload["error"]["kind"] == "compile", label
+    assert "does-not-exist.yml" in json.dumps(payload["error"]), label
+    sessions = root / ".simulator" / "sessions"
+    assert not sessions.exists() or not list(sessions.glob("*.pkl")), label
+
+
+def test_incompatible_assemblyline_pair_fails_structurally(
+    family_python, incompatible_assemblyline_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    if not _assemblyline_available(interpreter):
+        pytest.skip(f"AssemblyLine is not provisioned for {label}")
+    root = incompatible_assemblyline_workspace
+
+    checked = _run(
+        interpreter,
+        root,
+        "check",
+        "--interview",
+        "birthdate.yml",
+        expected_code=2,
+    )
+    assert checked["ok"] is False, label
+    assert checked["error"]["kind"] == "runtime-compatibility", label
+    details = checked["error"]["details"]
+    assert details["failing_capability"] == compatibility.PROBE_CAPABILITY, label
+    assert "alMonthLabel" in details["underlying_error"], label
+    assert details["recovery"], label
+    sessions = root / ".simulator" / "sessions"
+    assert not sessions.exists() or not list(sessions.glob("*.pkl")), label
+
+    started = _run(
+        interpreter,
+        root,
+        "start",
+        "--interview",
+        "birthdate.yml",
+        expected_code=2,
+    )
+    assert started["error"]["kind"] == "runtime-compatibility", label
+    assert not sessions.exists() or not list(sessions.glob("*.pkl")), label
+
+    human = _run_human(
+        interpreter,
+        root,
+        "check",
+        "--interview",
+        "birthdate.yml",
+        expected_code=2,
+    )
+    assert "runtime compatibility failure" in human, label
+    assert "failing_capability:" in human, label
+    assert details["docassemble_assemblyline"] in human, label
+    assert "recovery:" in human, label

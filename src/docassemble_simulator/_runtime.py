@@ -1338,6 +1338,13 @@ def bootstrap(
     neutralize_argv()
     apply_session_stubs(stub_define_defined=stub_define_defined)
     register_hooks()
+    # Mirror the webapp's startup import pass so installed custom datatypes
+    # (for example ALToolbox's BirthDate) are registered before any interview
+    # is parsed. Without it, standard AssemblyLine field metadata such as
+    # alMonthLabel is rejected as an overwritten label.
+    from docassemble_simulator._preload import preload_installed_modules
+
+    preload_installed_modules()
     install_diagnostic_logging()
     install_attachment_filename_fallback()
     _install_background_action_fallback(background_action_mode)

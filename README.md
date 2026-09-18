@@ -30,9 +30,18 @@ upgrading installed packages. Use `--offline` or `[simulator].offline = true`
 to disable acquisition. An installed package that fails because of a native
 library is reported as an import failure, not silently reinstalled.
 
-The supported compatibility floor is docassemble 1.9.8, including the legacy
-thread-local/server runtime interface; the current 1.10+ family uses its modern
-hook interface. Both paths are exercised by the real-runtime lane. The target
+The simulator tests two runtime families: legacy docassemble 1.9.x (thread-local
+server interface) and modern 1.10.x (hook interface). Supported
+AssemblyLine-backed Interviews are exercised as a tested matrix of
+`docassemble-base`/`docassemble-webapp`/`docassemble.AssemblyLine`/
+`docassemble.ALToolbox` versions; see
+[docs/runtime-compatibility.md](docs/runtime-compatibility.md). The simulator
+reproduces the docassemble webapp's startup module preload so installed custom
+datatypes (for example ALToolbox `BirthDate`) register before parsing, then
+compiles a minimal AssemblyLine birthdate-metadata probe before the target
+Interview. An unsupported pair fails as `runtime-compatibility` with the
+installed versions, failing capability, and recovery direction instead of a raw
+parser error; the probe never installs, upgrades, or edits packages. The target
 package interpreter is authoritative: a global `jda` or unrelated Python
 installation is not a substitute. On macOS, docassemble's native dependencies
 (such as zbar, commonly installed with Homebrew) must also be available to
@@ -115,8 +124,9 @@ may add a top-level `attachments` manifest:
 
 Exit codes are `0` for success (including interview completion and resolved
 lazy seeks), `1` for usage, workspace, configuration, or missing-state
-failures, `2` for validation, unresolved-variable, execution, seek, compile, or
-render failures, and `3` for unexpected simulator faults. Argument-parsing
+failures, `2` for validation, unresolved-variable, execution, seek, compile,
+runtime-compatibility, or render failures, and `3` for unexpected simulator
+faults. Argument-parsing
 failures follow the same envelope when `--json` is present and exit `1`; normal
 `--help` output remains a successful exit.
 
@@ -319,14 +329,17 @@ scripts/test-real-runtime /path/to/1.10/package/.venv/bin/python \
 ```
 
 The repo can provision both target interpreters itself from the `da19` /
-`da110` dependency groups in `pyproject.toml`:
+`da110` dependency groups in `pyproject.toml`, which also pin the tested
+`docassemble.AssemblyLine` / `docassemble.ALToolbox` pair for each family
+(see [docs/runtime-compatibility.md](docs/runtime-compatibility.md)):
 
 ```sh
 mise run test:all-da
 ```
 
 This syncs isolated `.venv-da19` (docassemble 1.9.x) and `.venv-da110`
-(1.10.x) environments and runs the suite once with both lanes wired up
+(1.10.x) environments, including the AssemblyLine compatibility fixture and
+target smoke path, and runs the suite once with both lanes wired up
 (`DASIMULATOR_REAL_PYTHON*` pointing at those interpreters), so every
 cross-family contract test exercises the modern and legacy runtimes. Use
 `mise run sync:da19` / `mise run sync:da110` to (re)provision one family

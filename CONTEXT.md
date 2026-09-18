@@ -8,6 +8,8 @@
 - **Screen outcome**: A typed description of a question, continuation, completion, or reproducible flow error.
 - **Active seek**: A sought screen persisted as the session's active target until answered or refreshed.
 - **Variable-seek diagnostic**: A non-fatal trace event showing which variable or question docassemble considered while trying to resolve an undefined reference.
+- **Runtime compatibility probe**: A non-mutating compile of the standard AssemblyLine birthdate field metadata through the real docassemble compiler, run before the target Interview when AssemblyLine is installed.
+- **AssemblyLine compatibility failure**: The typed result (`runtime-compatibility`) when the installed docassemble/AssemblyLine pair cannot compile the probe; it names the runtime family, package versions, failing capability, and recovery direction, and never creates session state.
 - **Unresolved-variable failure**: The terminal result when docassemble exhausts variable seeking without finding a question or code block capable of defining the sought variable.
 - **Render source**: Exactly one namespace origin for rendering: saved session, fresh state, snapshot, or fixture.
 - **Snapshot**: A versioned, interview-specific namespace capture used as an explicit render source; it is not a saved session.

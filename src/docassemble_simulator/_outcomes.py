@@ -19,6 +19,7 @@ class ErrorKind(StrEnum):
     SEEK = "seek"
     RENDER = "render"
     COMPILE = "compile"
+    RUNTIME_COMPATIBILITY = "runtime-compatibility"
     FAULT = "fault"
     WORKSPACE = "workspace"
     CONFIGURATION = "configuration"
