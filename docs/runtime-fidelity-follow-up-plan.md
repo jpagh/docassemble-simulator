@@ -83,6 +83,15 @@ installation smoke test that imports AssemblyLine and runs simulator `check`.
 
 ### B. Missing runtime dependency acquisition and simulator defaults
 
+Status: the acquisition half is implemented and tested. The default-substitution
+half is resolved differently from the original plan: docassemble's server
+database layer supports only PostgreSQL/MySQL/Oracle and AssemblyLine's session
+metadata writes are PostgreSQL-only, so the simulator substitutes no database
+at all instead of a broken SQLite default. `assembly line.update session
+metadata` defaults to `false` and is overridable with a real `db` configuration
+(see [runtime-compatibility.md](runtime-compatibility.md)). The plan text below
+is kept for the acquisition contract and the remaining configuration rules.
+
 The simulator package intentionally does not declare docassemble as a normal
 Python dependency because it must run inside the target interpreter. When that
 interpreter lacks a core package, however, the failure should be recoverable.

@@ -202,6 +202,7 @@ def _config_report(root, config, args=None):
         "docx": "supported",
         "pdf_conversion": "unavailable (no external converter invoked)",
         "background_actions": "foreground by default; no Celery worker",
+        "session_persistence": ("disabled by default; no server database substituted"),
     }
     report["command_line_overrides"] = command_line
     if args is not None and getattr(args, "config", None):
@@ -257,6 +258,7 @@ def cmd_info(args, root):
         "pdf_message": PDF_UNAVAILABLE_MESSAGE,
         "external_pdf_converter": False,
         "background_worker": False,
+        "session_persistence": "disabled (no server database substituted)",
     }
     data["runtime_compatibility"] = compatibility_report()
     _emit(_envelope("info", data), args.json)
@@ -468,7 +470,8 @@ def build_parser():
         description=(
             "Run and render docassemble interviews locally. Config is discovered "
             "from global and walking-up project TOML files; defaults provide "
-            "SQLite, fake Redis, local storage, and foreground background actions. "
+            "fake Redis, local storage, and foreground background actions, with "
+            "no server database substituted. "
             "DOCX is supported, but PDF conversion/downloads are deployment-only. "
             "JSON uses a stable ok/command/result-or-error envelope."
         ),

@@ -1,9 +1,11 @@
 import pytest
 
 from docassemble_simulator.config import (
+    DOCASSEMBLE_DEFAULTS,
     discover_config_files,
     load_config,
     normalize_config,
+    pass_through_config,
     redact_config,
     resolve_configuration,
     simulator_settings,
@@ -150,3 +152,16 @@ class TestConfigDiscovery:
         )
         with pytest.raises(ValueError, match="seek_diagnostics"):
             simulator_settings({"simulator": {"seek_diagnostics": "sometimes"}})
+
+    def test_no_server_database_default_and_assemblyline_metadata_opt_out(self):
+        assert "db" not in DOCASSEMBLE_DEFAULTS
+        assert DOCASSEMBLE_DEFAULTS["assembly line"] == {
+            "update session metadata": False
+        }
+
+    def test_project_config_can_opt_into_assemblyline_session_metadata(self):
+        passed_through = pass_through_config(
+            {"assembly line": {"update session metadata": True}}
+        )
+
+        assert passed_through == {"assembly line": {"update session metadata": True}}

@@ -193,16 +193,19 @@ YAML, and render output). Authored files live under `.config/simulator/`:
 ```
 
 A fixture is used only when selected explicitly with `--fixture`. A
-zero-config run uses SQLite session/database settings, an in-process fake
-Redis, simulator-local file storage, `debug=true`, localhost, `en_US`, `US`,
-the local timezone (falling back to `America/New_York`), and foreground
-background actions. These are local substitutes, not PostgreSQL, Redis,
-Celery, or server storage. DOCX rendering is supported; PDF conversion is
-unavailable and no external converter is invoked.
+zero-config run uses an in-process fake Redis, simulator-local file storage,
+`debug=true`, localhost, `en_US`, `US`, the local timezone (falling back to
+`America/New_York`), and foreground background actions. No server database is
+substituted: the simulator's own state lives in `.simulator/sessions/`, and
+database-backed AssemblyLine session features are disabled by default rather
+than pointed at a nonexistent PostgreSQL. These are local substitutes, not
+PostgreSQL, Redis, Celery, or server storage. DOCX rendering is supported; PDF
+conversion is unavailable and no external converter is invoked.
 
 | Default | Behavior | Category |
 | --- | --- | --- |
-| SQLite database/session settings | simulator-local database substitute | stub |
+| server database | not substituted; `.simulator/sessions/` holds CLI state | capability boundary |
+| AssemblyLine session metadata | `update session metadata: false`; PostgreSQL-backed upsert off | pass-through default |
 | Redis | in-process `FakeRedis` | stub |
 | File storage | files under `.simulator/files/` | local filesystem |
 | `debug`, host, locale, country | `true`, `localhost`, `en_US`, `US` | pass-through defaults |
@@ -258,6 +261,11 @@ seek_diagnostics = "capture"
 [simulator.render_bindings]
 x = "clients[0]"
 # Alternatively, the legacy top-level spelling is [render-bindings].
+
+# Opt back in to AssemblyLine's PostgreSQL-backed session metadata when this
+# project configures a real database. See docs/runtime-compatibility.md.
+["assembly line"]
+"update session metadata" = true
 ```
 
 Use `render form.docx --bind x=clients[1]` to override a configured binding.
@@ -290,9 +298,12 @@ docassemble context, template evaluation, include passes, and intentional PDF
 policy. Supported `background_action()` events run immediately in the current
 foreground context by default; this does not simulate worker isolation, queue
 latency, retries, or process failures. `background_actions = "disabled"` retains
-a waiting/stub task for diagnosis. Browser HTML, uploads, external services,
-PostgreSQL, real Redis/Celery behavior, and PDF/download verification remain
-deployment or staging responsibilities.
+a waiting/stub task for diagnosis. The simulator substitutes no SQL database at
+all: AssemblyLine's PostgreSQL-backed session metadata, saved answer sets, and
+interview list are disabled by default and remain deployment-only unless the
+project configures a real database and opts back in. Browser HTML, uploads,
+external services, PostgreSQL, real Redis/Celery behavior, and PDF/download
+verification remain deployment or staging responsibilities.
 
 ## Development
 

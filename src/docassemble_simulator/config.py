@@ -48,7 +48,12 @@ SIMULATOR_DEFAULTS: dict[str, Any] = {
 }
 
 DOCASSEMBLE_DEFAULTS: dict[str, Any] = {
-    "db": {"database name": "docassemble-simulator", "driver": "sqlite"},
+    # The simulator substitutes no server database. Assemblies that use one are
+    # deployment-only; AssemblyLine's automatic session-metadata upsert is a
+    # PostgreSQL-only write, so it is off by default and a project can opt in
+    # (with a real ``db`` configuration) via ``assembly line.update session
+    # metadata = true``.
+    "assembly line": {"update session metadata": False},
     "redis": "redis://localhost:6399",
     "debug": True,
     "host": "localhost",

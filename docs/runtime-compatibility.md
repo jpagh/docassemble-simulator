@@ -66,6 +66,44 @@ You can inspect the runtime family, installed versions, and tested matrix with
 `sim info --json` (the `runtime_compatibility` object). The probe itself runs on
 `check`, `questions`, `index`, and every execution command.
 
+## Session persistence
+
+AssemblyLine's baseline includes `al_saved_sessions.yml`, whose `initial: True`
+block writes session metadata through `update_session_metadata`. That function
+is PostgreSQL-only (`pg_advisory_xact_lock`, `jsonb`, `||`, `CAST(... AS
+jsonb)`), and docassemble itself does not support SQLite for its server
+database. The simulator therefore substitutes no database at all:
+
+- the simulator's generated defaults contain no `db` section, so nothing
+  silently points at a nonexistent PostgreSQL server;
+- `assembly line.update session metadata` defaults to `false`, matching a local
+  run that has no server session store. The CLI's own saved state remains
+  `.simulator/sessions/`;
+- the AssemblyLine initial block, saved answer sets, and the interview list are
+  deployment-only features. The simulator does not rewrite installed
+  AssemblyLine functions to make them work locally.
+
+A project can opt back in when it has a real docassemble database:
+
+```toml
+# .config/simulator/config.toml
+["assembly line"]
+"update session metadata" = true
+
+[db]
+prefix = "postgresql+psycopg2://"
+name = "docassemble"
+user = "docassemble"
+password = "..."
+host = "localhost"
+port = 5432
+```
+
+Point this at an existing docassemble database (the `jsonstorage` table must
+already exist); the simulator does not create schemas. Without that database,
+leaving the default off keeps complete main journeys — start, questions,
+documents, downloads — free of database access.
+
 ## Failure taxonomy
 
 | Condition | Command result | What to do |

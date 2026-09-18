@@ -640,6 +640,24 @@ class TestBootstrapConfig:
             loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
         assert loaded["timezone"] == "America/Chicago"
         assert loaded["jinja data"]["category"]["family"] == "Family"
+        # No server database is substituted; AssemblyLine's PostgreSQL-only
+        # session metadata write is off unless the project opts in.
+        assert "db" not in loaded
+        assert loaded["assembly line"]["update session metadata"] is False
+
+    def test_project_config_can_opt_into_assemblyline_session_metadata(
+        self, tmp_path, monkeypatch
+    ):
+        target = tmp_path / ".simulator" / "config-effective.yml"
+        with SimulatorRuntime().activate(
+            tmp_path,
+            config_path=target,
+            extra_config={"assembly line": {"update session metadata": True}},
+        ):
+            import yaml
+
+            loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert loaded["assembly line"]["update session metadata"] is True
 
 
 class TestLocalAttachments:

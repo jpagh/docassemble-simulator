@@ -171,17 +171,20 @@ states the seed-session contract.
 
 ### A5. Defaults and capability boundary
 
-With no configuration, the simulator uses SQLite, an in-process fake Redis,
-local file storage, generated effective YAML, debug mode, localhost, `en_US`,
-`US`, the local timezone (falling back to `America/New_York`), and foreground
-background actions. These are simulator stubs and are not PostgreSQL, Redis,
-Celery, or server storage. DOCX output is supported; generated PDF conversion
-is unavailable, no converter is invoked, and PDF-only download verification is
-deferred to a real deployment/staging environment. Run `info` for this report
-or `config --json` for redacted settings and pass-through keys. The default
-categories are: SQLite, fake Redis, and foreground actions are in-process
-stubs; generated files are local filesystem behavior; debug/host/locale/country
-and timezone are pass-through defaults; DOCX/PDF is a capability boundary.
+With no configuration, the simulator uses an in-process fake Redis, local file
+storage, generated effective YAML, debug mode, localhost, `en_US`, `US`, the
+local timezone (falling back to `America/New_York`), and foreground background
+actions. It substitutes no server database: AssemblyLine's PostgreSQL-backed
+session metadata is disabled by default and can be enabled only alongside a
+real `db` configuration. These are simulator stubs and are not PostgreSQL,
+Redis, Celery, or server storage. DOCX output is supported; generated PDF
+conversion is unavailable, no converter is invoked, and PDF-only download
+verification is deferred to a real deployment/staging environment. Run `info`
+for this report or `config --json` for redacted settings and pass-through keys.
+The default categories are: fake Redis and foreground actions are in-process
+stubs; database-backed session features are a capability boundary; generated
+files are local filesystem behavior; debug/host/locale/country and timezone are
+pass-through defaults; DOCX/PDF is a capability boundary.
 Render
 bindings may be written as `[simulator.render_bindings]` (or legacy top-level
 `[render-bindings]`), with optional `[render-bindings."poa.docx"]` entries.

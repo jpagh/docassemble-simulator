@@ -1155,6 +1155,15 @@ def test_assemblyline_backed_target_and_baseline_compile(
     assert baseline["ok"], label
     assert baseline["result"]["failures"] == 0, label
 
+    # Default configuration must not miss the PostgreSQL-backed AssemblyLine
+    # session metadata write: a fresh start reaches the target screen with no
+    # database configured at all.
+    started = _run(interpreter, root, "start", "--interview", "main.yml")
+    assert started["ok"], label
+    screen = started["result"]
+    assert screen["kind"] == "question", label
+    assert screen["question_text"] == "AssemblyLine-backed target start", label
+
 
 def test_compatibility_checks_do_not_mutate_packages_or_sessions(
     family_python, assemblyline_workspace

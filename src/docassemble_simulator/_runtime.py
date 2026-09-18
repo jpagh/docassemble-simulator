@@ -14,7 +14,7 @@ library assumes a running webapp; these pieces are stubbed:
 | set_sessions_data /       | called by interview setup blocks           | no-op monkeypatch |
 | set_sessions_title_stage /|                                            |            |
 | cleanup_sessions          |                                            |            |
-| DA_CONFIG_FILE            | interviews render Jinja against `jinja data` config | write a config file (sqlite + fake redis + jinja data) and point the env var at it |
+| DA_CONFIG_FILE            | interviews render Jinja against `jinja data` config | write a config file (fake redis + jinja data; no server database) and point the env var at it |
 """
 
 from __future__ import annotations
@@ -33,9 +33,8 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_TEXT = """\
-db:
-  database name: docassemble-simulator
-  driver: sqlite
+assembly line:
+  update session metadata: false
 redis: "redis://localhost:6399"
 debug: true
 host: localhost
