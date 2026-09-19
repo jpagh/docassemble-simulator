@@ -24,6 +24,7 @@ class ErrorKind(StrEnum):
     WORKSPACE = "workspace"
     CONFIGURATION = "configuration"
     UNRESOLVED_VARIABLE = "unresolved-variable"
+    TRACE_MISMATCH = "trace-mismatch"
 
 
 @dataclass(frozen=True)

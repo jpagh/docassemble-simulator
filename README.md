@@ -104,6 +104,54 @@ trusted-local pickle payloads. Unsupported or stale state fails with an
 instruction to run `start` again. Mutations hold a per-interview advisory lock
 and commit with atomic replacement.
 
+## Screen traces
+
+Execution commands can record the screens a run passes through and compare a
+later run against that recording. The trace is an append-only JSONL sidecar;
+saved sessions are untouched.
+
+```sh
+docassemble-simulator start --record run.trace.jsonl --phase intake
+docassemble-simulator answer user_name=Alice --record run.trace.jsonl --phase intake
+docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl
+docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl \
+  --order phased --phases intake,documents,download
+docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl --update
+```
+
+`--record PATH` is accepted by `start`, `refresh`, `answer`, `seek`, and
+`exec`, and takes an optional `--phase NAME` used by phased comparison. Each
+invocation appends one record: sequence, operation, phase, submitted
+assignments, outcome, the screen outcome, and a canonical **screen identity**
+with the rule that produced it. The first line is metadata (interview
+definition, config fingerprint, docassemble/AssemblyLine/simulator versions,
+and the trace schema version); appending to a trace whose metadata disagrees
+with the current run is an input error. A failed answer is recorded against
+the unchanged active screen with the rejected assignments, so validation
+re-asks appear as repeated occurrences of one identity.
+
+Identity ignores generated `Question_<n>` names, resolved occurrence paths,
+random instance names, and rendered text. It falls back from explicit block
+ids through targeted variables, generic-object anchors, and indexed list
+targets to a field-variable tuple or a kind/category. The rule used is stored
+with every key.
+
+`trace compare` reports coverage counts (expected, actual, matched, missing,
+extra, duplicates) in every mode, so a tolerant policy cannot hide collapsing
+coverage. `--order unordered` treats the run as a multiset; `--order phased`
+requires declared phases in order while tolerating order within each phase.
+`--missing allow` and `--extra allow` relax the default strict policies. Field
+facts are compared separately from identity; `--full-text` adds normalized
+question and subquestion text. Known differences belong in a reviewed
+exceptions TOML passed with `--exceptions` (each entry names the interview,
+phase, identity, category, and reason; order violations and simulator faults
+cannot be excused). `--update` rewrites the expected golden from the actual
+trace and is the only write path. A mismatch exits `2` with the full report in
+the `trace-mismatch` error details.
+
+The identity rules and the evidence behind them are documented in
+[docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).
+
 ## JSON and exit codes
 
 Every command accepts `--json` and returns one envelope. Successful variable

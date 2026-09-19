@@ -142,6 +142,7 @@ EXIT_CODES = {
     ErrorKind.CONFIGURATION: 1,
     ErrorKind.FAULT: 3,
     ErrorKind.RUNTIME_COMPATIBILITY: 2,
+    ErrorKind.TRACE_MISMATCH: 2,
 }
 
 
@@ -345,6 +346,7 @@ def cmd_execution(args, root):
         Status,
         Variables,
     )
+    from docassemble_simulator.trace import TraceError
 
     if args.command == "start":
         operation = Start()
@@ -368,7 +370,8 @@ def cmd_execution(args, root):
     else:
         code = Path(args.file).read_text(encoding="utf-8") if args.file else args.code
         operation = Execute(code, not args.no_assemble)
-    outcome = _execution(args, root).run(operation)
+    execution = _execution(args, root)
+    outcome = execution.run(operation)
     payload = (
         _envelope(
             args.command,
@@ -384,10 +387,188 @@ def cmd_execution(args, root):
             attachments=outcome.attachments,
         )
     )
+    if getattr(args, "record", None):
+        try:
+            _record_execution(args, root, execution, operation, payload)
+        except (TraceError, OSError, RuntimeError, ValueError) as error:
+            _emit(
+                _envelope(args.command, error=Failure(ErrorKind.INPUT, str(error), {})),
+                args.json,
+            )
+            return 1
     _emit(payload, args.json)
     if not outcome.ok:
         return _exit_for_error(outcome.error.kind)
     return 0
+
+
+def _trace_metadata(args, root):
+    from importlib import metadata as importlib_metadata
+
+    from docassemble_simulator.catalog import InterviewCatalog
+    from docassemble_simulator.compatibility import collect_environment
+    from docassemble_simulator.trace import TraceMetadata
+
+    resolved = getattr(args, "_resolved_configuration", None)
+    environment = collect_environment()
+    try:
+        simulator = importlib_metadata.version("docassemble-simulator")
+    except importlib_metadata.PackageNotFoundError:
+        simulator = "unknown"
+    return TraceMetadata(
+        interview=InterviewCatalog(root, args.interview).identity,
+        config_fingerprint=resolved.fingerprint if resolved is not None else "",
+        docassemble=environment.versions.get("docassemble-base") or "not installed",
+        assemblyline=environment.versions.get("docassemble-assemblyline")
+        or "not installed",
+        simulator=simulator,
+    )
+
+
+def _record_execution(args, root, execution, operation, payload):
+    """Append the operation's screen outcome to the requested trace sidecar."""
+    from docassemble_simulator.execution import Status
+    from docassemble_simulator.trace import append_trace
+
+    screen = None
+    if payload.get("ok"):
+        result = payload.get("result")
+        if isinstance(result, dict) and "kind" in result:
+            screen = result
+    else:
+        # A failed operation leaves the active screen untouched; the sidecar
+        # still records which screen the user was looking at.
+        try:
+            status = execution.run(Status())
+        except Exception:  # noqa: BLE001 - a missing session is not a record failure
+            status = None
+        if (
+            status is not None
+            and status.ok
+            and isinstance(status.result, dict)
+            and "kind" in status.result
+        ):
+            screen = status.result
+    if screen is None and payload.get("ok"):
+        return
+    append_trace(
+        args.record,
+        _trace_metadata(args, root),
+        operation=args.command,
+        ok=bool(payload.get("ok")),
+        screen=screen,
+        error=payload.get("error"),
+        phase=getattr(args, "phase", None),
+        submitted=dict(getattr(operation, "assignments", ()) or ()),
+    )
+
+
+def _trace_policy(args):
+    from docassemble_simulator.trace import ComparePolicy
+
+    phases = tuple(item for item in (args.phases or "").split(",") if item)
+    return ComparePolicy(
+        order=args.order,
+        missing=args.missing,
+        extra=args.extra,
+        full_text=args.full_text,
+        phases=phases or None,
+    )
+
+
+def _human_trace_report(report, matched):
+    counts = report["counts"]
+    verdict = "match" if matched else "MISMATCH"
+    lines = [
+        f"trace compare: {verdict} ({report['order']})",
+        (
+            f"expected: {counts['expected']}  actual: {counts['actual']}  "
+            f"matched: {counts['matched']}  missing: {counts['missing']}  "
+            f"extra: {counts['extra']}  duplicates: {counts['duplicates']}"
+        ),
+    ]
+    for phase in report["phases"]:
+        lines.append(
+            "phase "
+            f"{phase['phase']}: expected {phase['expected']} actual {phase['actual']} "
+            f"matched {phase['matched']} missing {phase['missing']} extra {phase['extra']}"
+        )
+    for diff in report["diffs"]:
+        label = diff["kind"]
+        if diff["excepted"]:
+            label += f" (excepted: {diff['excepted']})"
+        where = f" #{diff['position']}" if diff.get("position") else ""
+        target = f"{diff['identity']} - " if diff["identity"] else ""
+        lines.append(f"{label}{where}: {target}{diff['detail']}")
+    return "\n".join(lines)
+
+
+def cmd_trace(args, root):
+    from docassemble_simulator.trace import (
+        TraceError,
+        compare_traces,
+        load_exceptions,
+        load_trace,
+        write_trace,
+    )
+
+    try:
+        expected = load_trace(args.expected)
+        actual = load_trace(args.actual)
+        exceptions = load_exceptions(args.exceptions) if args.exceptions else ()
+        comparison = compare_traces(expected, actual, _trace_policy(args), exceptions)
+    except TraceError as error:
+        _emit(
+            _envelope("trace", error=Failure(ErrorKind.INPUT, str(error), {})),
+            args.json,
+        )
+        return 1
+    report = comparison.as_dict()
+    if args.update:
+        try:
+            write_trace(args.expected, actual)
+        except OSError as error:
+            _emit(
+                _envelope(
+                    "trace",
+                    error=Failure(
+                        ErrorKind.INPUT, f"could not update golden: {error}", {}
+                    ),
+                ),
+                args.json,
+            )
+            return 1
+        report = {**report, "updated": str(Path(args.expected).expanduser())}
+        if args.json:
+            _emit(_envelope("trace", report), True)
+        else:
+            print(
+                "trace compare: golden updated "
+                f"{Path(args.expected).expanduser()} "
+                f"({'match' if comparison.matched else 'MISMATCH'} before update)"
+            )
+        return 0
+    if comparison.matched:
+        if args.json:
+            _emit(_envelope("trace", report), True)
+        else:
+            print(_human_trace_report(report, True))
+        return 0
+    if args.json:
+        _emit(
+            _envelope(
+                "trace",
+                error=Failure(
+                    ErrorKind.TRACE_MISMATCH,
+                    "screen trace comparison failed",
+                    report,
+                ),
+            ),
+            True,
+        )
+    else:
+        print(_human_trace_report(report, False))
+    return 2
 
 
 def cmd_render(args, root):
@@ -547,23 +728,43 @@ def build_parser():
         item = add(name, help=f"inspect interview {name}")
         item.add_argument("--var")
         item.set_defaults(func=cmd_catalog)
-    add(
-        "start",
-        help="create and assemble a fresh session for the effective configuration",
+
+    def add_recording(parser_):
+        parser_.add_argument(
+            "--record",
+            metavar="PATH",
+            help="append the produced screen outcome to a trace sidecar",
+        )
+        parser_.add_argument(
+            "--phase",
+            metavar="NAME",
+            help="tag recorded entries with a scenario phase",
+        )
+        return parser_
+
+    add_recording(
+        add(
+            "start",
+            help="create and assemble a fresh session for the effective configuration",
+        )
     ).set_defaults(func=cmd_execution)
     add("status", help="read the saved outcome without assembly").set_defaults(
         func=cmd_execution
     )
-    add("refresh", help="rehydrate and reassemble saved state").set_defaults(
-        func=cmd_execution
+    add_recording(
+        add("refresh", help="rehydrate and reassemble saved state")
+    ).set_defaults(func=cmd_execution)
+    answer = add_recording(
+        add("answer", help="transactionally answer the active screen")
     )
-    answer = add("answer", help="transactionally answer the active screen")
     answer.add_argument("assignments", nargs="+")
     answer.add_argument("--code", action="store_true")
     answer.add_argument("--no-validate", action="store_true")
     answer.add_argument("--strict", action="store_true")
     answer.set_defaults(func=cmd_execution)
-    seek = add("seek", help="seek a variable from saved state by default")
+    seek = add_recording(
+        add("seek", help="seek a variable from saved state by default")
+    )
     seek.add_argument("variable")
     seek.add_argument("--fresh", action="store_true")
     seek.add_argument("--activate", action="store_true")
@@ -572,7 +773,7 @@ def build_parser():
     evaluate = add("eval", help="evaluate an expression without saving")
     evaluate.add_argument("expression")
     evaluate.set_defaults(func=cmd_execution)
-    execute = add("exec", help="execute Python and assemble by default")
+    execute = add_recording(add("exec", help="execute Python and assemble by default"))
     execute.add_argument("code", nargs="?", default="")
     execute.add_argument("--file")
     execute.add_argument("--no-assemble", action="store_true")
@@ -580,6 +781,44 @@ def build_parser():
     variables = add("vars", help="inspect saved variables without saving")
     variables.add_argument("--filter")
     variables.set_defaults(func=cmd_execution)
+    trace = add(
+        "trace",
+        help="record and compare screen traces",
+        description=(
+            "Compare an expected screen-trace sidecar with a recorded run. "
+            "Supports ordered, unordered, and phased matching with always-on "
+            "coverage counts."
+        ),
+    )
+    trace_sub = trace.add_subparsers(dest="trace_command", required=True)
+    trace_compare = trace_sub.add_parser(
+        "compare",
+        parents=[common],
+        command_name="trace",
+        help="compare an expected trace with an actual trace",
+    )
+    trace_compare.add_argument("expected")
+    trace_compare.add_argument("actual")
+    trace_compare.add_argument(
+        "--order", choices=("ordered", "unordered", "phased"), default="ordered"
+    )
+    trace_compare.add_argument(
+        "--missing", choices=("strict", "allow"), default="strict"
+    )
+    trace_compare.add_argument("--extra", choices=("strict", "allow"), default="strict")
+    trace_compare.add_argument("--full-text", action="store_true")
+    trace_compare.add_argument(
+        "--phases", metavar="A,B", help="declared phase order for phased matching"
+    )
+    trace_compare.add_argument(
+        "--exceptions", metavar="FILE", help="reviewed exceptions TOML"
+    )
+    trace_compare.add_argument(
+        "--update",
+        action="store_true",
+        help="rewrite the expected golden from the actual trace",
+    )
+    trace_compare.set_defaults(func=cmd_trace)
     render = add(
         "render",
         help="render a DOCX from one explicit state source",
@@ -635,7 +874,12 @@ def main(argv=None):
         )
         return 1
     try:
-        root = find_package_root(args.root)
+        if args.command == "trace" and not args.root:
+            # Trace comparison reads sidecars and never touches an Interview
+            # package, so it does not require one to be present.
+            root = Path.cwd().resolve()
+        else:
+            root = find_package_root(args.root)
         command_overrides = {}
         if getattr(args, "offline", False):
             command_overrides["offline"] = True
@@ -664,7 +908,7 @@ def main(argv=None):
             background_action_mode=mode,
             seek_diagnostics=settings["seek_diagnostics"],
         ):
-            if args.command not in {"info", "status", "config"}:
+            if args.command not in {"info", "status", "config", "trace"}:
                 if not config and not getattr(args, "offline", False):
                     # Preserve the small composition seam used by embedders that
                     # provide the legacy one-argument preflight callable.

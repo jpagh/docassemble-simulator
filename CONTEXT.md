@@ -6,6 +6,11 @@
 - **Working state**: An operation-local interview namespace and outcome loaded from durable state or created fresh. It never escapes execution.
 - **Saved session**: The versioned, per-interview durable record of a working state and its latest outcome, stored per effective configuration so a different config never rehydrates it.
 - **Screen outcome**: A typed description of a question, continuation, completion, or reproducible flow error.
+- **Screen trace**: An append-only JSONL sidecar recording the screen outcome each execution operation produced, together with its derived canonical identity; it never enters saved state and is distinct from the variable-seek trace.
+- **Screen identity**: The stable canonical key for a screen outcome — explicit block id, targeted variable, generic-object anchor, indexed list target, field tuple, or kind/category — recorded with the rule that produced it.
+- **Trace record**: One recorded execution operation in a screen trace: sequence, operation, phase, submitted assignments, outcome, screen outcome, derived identity, and field facts.
+- **Trace comparison**: The typed verdict of comparing two screen traces under ordered, unordered, or phased matching with missing/extra policy; it always reports coverage counts and identity-level diffs.
+- **Reviewed trace exception**: A reasoned tolerance for one known identity difference, categorized as a deliberate error or capability boundary; it cannot excuse order violations or simulator faults.
 - **Active seek**: A sought screen persisted as the session's active target until answered or refreshed.
 - **Variable-seek diagnostic**: A non-fatal trace event showing which variable or question docassemble considered while trying to resolve an undefined reference.
 - **Runtime compatibility probe**: A non-mutating compile of the standard AssemblyLine birthdate field metadata through the real docassemble compiler, run before the target Interview when AssemblyLine is installed.
