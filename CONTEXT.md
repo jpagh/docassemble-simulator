@@ -6,6 +6,7 @@
 - **Working state**: An operation-local interview namespace and outcome loaded from durable state or created fresh. It never escapes execution.
 - **Saved session**: The versioned, per-interview durable record of a working state and its latest outcome, stored per effective configuration so a different config never rehydrates it.
 - **Screen outcome**: A typed description of a question, continuation, completion, or reproducible flow error.
+- **Screen submission**: The browser-shaped application of one screen outcome as a transaction: submitted field values, prefilled defaults, and blank values for visible optional fields, with visible required fields enforced; the submission is scoped to the fields the screen described.
 - **Screen trace**: An append-only JSONL sidecar recording the screen outcome each execution operation produced, together with its derived canonical identity; it never enters saved state and is distinct from the variable-seek trace.
 - **Screen identity**: The stable canonical key for a screen outcome — explicit block id, targeted variable, generic-object anchor, indexed list target, field tuple, or kind/category — recorded with the rule that produced it.
 - **Trace record**: One recorded execution operation in a screen trace: sequence, operation, phase, submitted assignments, outcome, screen outcome, derived identity, and field facts.

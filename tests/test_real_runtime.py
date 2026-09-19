@@ -1435,3 +1435,238 @@ def test_incompatible_assemblyline_pair_fails_structurally(
     assert "failing_capability:" in human, label
     assert details["docassemble_assemblyline"] in human, label
     assert "recovery:" in human, label
+
+
+WHOLE_SCREEN_FIXTURE = (
+    "---\n"
+    "id: info\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Screen\n"
+    "fields:\n"
+    "  - Required name: person_name\n"
+    "  - Optional nickname: nickname\n"
+    "    required: False\n"
+    "  - Optional date: extra_date\n"
+    "    datatype: date\n"
+    "    required: False\n"
+    "  - Optional count: count\n"
+    "    datatype: integer\n"
+    "    required: False\n"
+    "  - Optional ratio: ratio\n"
+    "    datatype: number\n"
+    "    required: False\n"
+    "  - Agree: agree\n"
+    "    datatype: yesno\n"
+    "    required: False\n"
+    "  - Declined: declined\n"
+    "    datatype: noyes\n"
+    "    required: False\n"
+    "  - Refer: refer\n"
+    "    datatype: yesnoradio\n"
+    "    required: False\n"
+    "  - Topics: topics\n"
+    "    datatype: checkboxes\n"
+    "    required: False\n"
+    "    choices:\n"
+    "      - Housing: housing\n"
+    "      - Benefits: benefits\n"
+    "  - Maybe: maybe\n"
+    "    datatype: yesnomaybe\n"
+    "    required: False\n"
+    "  - Three: three\n"
+    "    datatype: threestate\n"
+    "    required: False\n"
+    "  - Empty topics: empty_topics\n"
+    "    datatype: checkboxes\n"
+    "    required: False\n"
+    "    choices: []\n"
+    "  - Upload: upload\n"
+    "    datatype: file\n"
+    "    required: False\n"
+    "  - Bad default: bad_default\n"
+    "    datatype: date\n"
+    "    required: False\n"
+    "    default: not-a-date\n"
+    "  - Signature: signature_value\n"
+    "    datatype: signature\n"
+    "    required: True\n"
+    "  - Hidden: hidden_value\n"
+    "    required: True\n"
+    "    show if:\n"
+    "      code: |\n"
+    "        False\n"
+    "---\n"
+    "id: summary\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Summary\n"
+    "subquestion: |\n"
+    "  ${ person_name } / ${ nickname } / ${ extra_date } / ${ ratio } /\n"
+    "  ${ agree } / ${ declined } / ${ refer } / ${ topics } /\n"
+    "  [${ signature_value }]\n"
+)
+
+
+def _whole_screen_workspace(tmp_path):
+    package = tmp_path / "docassemble" / "screenanswer"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "main.yml").write_text(WHOLE_SCREEN_FIXTURE)
+    return tmp_path
+
+
+def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = _whole_screen_workspace(tmp_path)
+
+    started = _run(interpreter, root, "start")
+    assert started["ok"] and started["result"]["question_name"] == "ID info", label
+
+    missing = _run(
+        interpreter,
+        root,
+        "answer",
+        "extra_date=2026-01-01",
+        expected_code=2,
+    )
+    assert missing["error"]["kind"] == "validation", (label, missing)
+    assert any(
+        "person_name" in item for item in missing["error"]["details"]["errors"]
+    ), label
+    still_open = _run(interpreter, root, "status")
+    assert still_open["result"]["question_name"] == "ID info", label
+
+    off_screen = _run(
+        interpreter,
+        root,
+        "answer",
+        "person_name=Alice",
+        "off_screen=1",
+        expected_code=2,
+    )
+    assert off_screen["error"]["kind"] == "answer-input", (label, off_screen)
+    assert any(
+        "off_screen" in item for item in off_screen["error"]["details"]["errors"]
+    ), label
+
+    accepted = _run(interpreter, root, "answer", "person_name=Alice")
+    assert accepted["ok"], label
+    # Optional fields were submitted as browser blanks, so the flow reaches the
+    # summary instead of re-seeking the same screen.
+    assert accepted["result"]["question_name"] == "ID summary", (label, accepted)
+    # Untouched inputs keep the value the browser would post: an empty string
+    # for text and dates, and zero for an empty integer.
+    assert _run(interpreter, root, "eval", "nickname")["result"]["value"] == ("''"), (
+        label
+    )
+    assert _run(interpreter, root, "eval", "extra_date")["result"]["value"] == ("''"), (
+        label
+    )
+    assert _run(interpreter, root, "eval", "count")["result"]["value"] == "0", label
+    assert _run(interpreter, root, "eval", "ratio")["result"]["value"] == ("0.0"), label
+    # Checkbox-style booleans take their unchecked value; noyes is True.
+    assert _run(interpreter, root, "eval", "agree is False")["result"]["value"] == (
+        "True"
+    ), label
+    assert _run(interpreter, root, "eval", "declined is True")["result"]["value"] == (
+        "True"
+    ), label
+    assert _run(interpreter, root, "eval", "refer is None")["result"]["value"] == (
+        "True"
+    ), label
+    # An untouched checkbox group is a DADict with every choice false.
+    assert (
+        _run(interpreter, root, "eval", "type(topics).__name__")["result"]["value"]
+        == "'DADict'"
+    ), label
+    assert _run(interpreter, root, "eval", "len(topics)")["result"]["value"] == "2", (
+        label
+    )
+    assert (
+        _run(interpreter, root, "eval", "list(topics.true_values())")["result"]["value"]
+        == "[]"
+    ), label
+    # Gatherable objects repr inside the runtime context instead of failing.
+    topics_repr = _run(interpreter, root, "eval", "topics")["result"]["value"]
+    assert "housing" in topics_repr, label
+    assert "unrepr-able" not in topics_repr, label
+    # Radio/maybe/threestate selections and empty checkbox lists are None, an
+    # untouched file is None, and an unparseable default falls back to the
+    # datatype's blank.
+    for variable in ("maybe", "three", "empty_topics", "upload"):
+        assert (
+            _run(interpreter, root, "eval", f"{variable} is None")["result"]["value"]
+            == "True"
+        ), (label, variable)
+    assert _run(interpreter, root, "eval", "bad_default")["result"]["value"] == (
+        "''"
+    ), label
+    # Signatures are never required; they become DAEmpty so documents render,
+    # and hidden fields are neither assigned nor required.
+    assert (
+        _run(interpreter, root, "eval", "type(signature_value).__name__")["result"][
+            "value"
+        ]
+        == "'DAEmpty'"
+    ), label
+    assert (
+        _run(interpreter, root, "eval", "str(signature_value)")["result"]["value"]
+        == "''"
+    ), label
+    hidden = _run(interpreter, root, "eval", "hidden_value", expected_code=2)
+    assert hidden["error"]["kind"] == "execution", label
+
+    # An explicitly empty submission for a required field is rejected.
+    assert _run(interpreter, root, "start")["ok"], label
+    empty_required = _run(interpreter, root, "answer", "person_name=", expected_code=2)
+    assert empty_required["error"]["kind"] == "validation", (label, empty_required)
+    assert any(
+        "person_name" in item and "is empty" in item
+        for item in empty_required["error"]["details"]["errors"]
+    ), label
+
+    # Explicitly empty submissions follow the same per-datatype conversion.
+    assert _run(interpreter, root, "start")["ok"], label
+    emptied = _run(
+        interpreter,
+        root,
+        "answer",
+        "person_name=Alice",
+        "count=",
+        "ratio=",
+        "agree=",
+    )
+    assert emptied["ok"], label
+    assert _run(interpreter, root, "eval", "count")["result"]["value"] == "0", label
+    assert _run(interpreter, root, "eval", "ratio")["result"]["value"] == ("0.0"), label
+    assert _run(interpreter, root, "eval", "agree is None")["result"]["value"] == (
+        "True"
+    ), label
+
+
+def test_partial_answer_keeps_the_permissive_mode_across_families(
+    family_python, tmp_path
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = _whole_screen_workspace(tmp_path)
+    assert _run(interpreter, root, "start")["ok"], label
+
+    permissive = _run(
+        interpreter,
+        root,
+        "answer",
+        "extra_date=2026-01-01",
+        "--partial",
+    )
+
+    assert permissive["ok"], label
+    assert permissive["result"]["question_name"] == "ID info", (label, permissive)
+    assert any("person_name" in item for item in permissive["result"]["warnings"]), (
+        label
+    )
+    undefined = _run(interpreter, root, "eval", "nickname", expected_code=2)
+    assert undefined["error"]["kind"] == "execution", label

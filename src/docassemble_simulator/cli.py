@@ -377,6 +377,7 @@ def cmd_execution(args, root):
             args.code,
             not args.no_validate,
             args.strict,
+            args.partial,
         )
     elif args.command == "seek":
         operation = Seek(args.variable, args.fresh, args.activate, args.trace)
@@ -800,8 +801,28 @@ def build_parser():
     )
     answer.add_argument("assignments", nargs="+")
     answer.add_argument("--code", action="store_true")
-    answer.add_argument("--no-validate", action="store_true")
-    answer.add_argument("--strict", action="store_true")
+    answer.add_argument(
+        "--no-validate",
+        action="store_true",
+        help=(
+            "skip the interview's validation code; the required-field gate "
+            "still applies unless --partial is also passed"
+        ),
+    )
+    answer.add_argument(
+        "--strict",
+        action="store_true",
+        help="treat the permissive mode's warnings as errors",
+    )
+    answer.add_argument(
+        "--partial",
+        action="store_true",
+        help=(
+            "submit only the given fields instead of the whole screen: missing "
+            "required fields become warnings and visible optional fields are not "
+            "filled in (pre-screen-submission behavior)"
+        ),
+    )
     answer.set_defaults(func=cmd_execution)
     seek = add_recording(
         add(

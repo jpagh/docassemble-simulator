@@ -80,6 +80,7 @@ def _runtime(monkeypatch):
     util = types.ModuleType("docassemble.base.util")
     util.DAObject = DAObject
     util.DADict = DADict
+    util.DAEmpty = PicklableEmpty
     util.DADateTime = DADateTime
     util.as_datetime = as_datetime
     monkeypatch.setitem(sys.modules, "docassemble.base.util", util)
@@ -95,6 +96,16 @@ class PicklableStubObject(SimpleNamespace):
 
     def __init__(self, instanceName=None, **values):
         super().__init__(instanceName=instanceName, **values)
+
+
+class PicklableEmpty:
+    """A stub DAEmpty that can cross the session pickle boundary."""
+
+    def __init__(self, *pargs, **kwargs):
+        self.str = str(kwargs.get("str", ""))
+
+    def __str__(self):
+        return self.str
 
 
 class FakeInterview:
@@ -156,6 +167,138 @@ class GenericMultiFieldInterview(FakeInterview):
             ],
         )
         interview_status.question_text = "Service"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.service_type"
+        interview_status.orig_sought = "rav.service_type"
+        interview_status.selectcompute = {}
+
+
+class MixedRequirementInterview(FakeInterview):
+    """One required and one optional field on the same generic screen."""
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="x.service_type", datatype="text", required=True
+                ),
+                SimpleNamespace(saveas="x.date", datatype="date", required=False),
+            ],
+        )
+        interview_status.question_text = "Service"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.service_type"
+        interview_status.orig_sought = "rav.service_type"
+        interview_status.selectcompute = {}
+
+
+class DefaultedDateInterview(MixedRequirementInterview):
+    """A required date field whose default the browser would prefill."""
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.question.fields[1] = SimpleNamespace(
+            saveas="x.date",
+            datatype="date",
+            required=True,
+            default="2026-01-15",
+        )
+
+
+class PrefilledDateInterview(MixedRequirementInterview):
+    """An optional date field already populated when the screen is shown."""
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        namespace["rav"].date = 5
+
+
+class HiddenFieldInterview(MixedRequirementInterview):
+    """A required field hidden by ``show if`` on the same screen."""
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.question.fields[1] = SimpleNamespace(
+            saveas="x.hidden",
+            datatype="text",
+            required=True,
+            showif_code="False",
+        )
+
+
+class SignatureInterview(MixedRequirementInterview):
+    """A required signature field alongside a required text field."""
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.question.fields[1] = SimpleNamespace(
+            saveas="x.signature",
+            datatype="signature",
+            required=True,
+        )
+
+
+class BadDefaultDateInterview(MixedRequirementInterview):
+    """An optional date whose rendered default cannot be applied."""
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.question.fields[1] = SimpleNamespace(
+            saveas="x.date",
+            datatype="date",
+            required=False,
+            default="not-a-date",
+        )
+
+
+class BooleanStyleInterview(FakeInterview):
+    """One screen covering every boolean input style and numeric blanks."""
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="x.service_type", datatype="text", required=True
+                ),
+                SimpleNamespace(
+                    saveas="x.agree",
+                    datatype="boolean",
+                    inputtype="yesno",
+                    required=False,
+                ),
+                SimpleNamespace(
+                    saveas="x.declined",
+                    datatype="boolean",
+                    inputtype="noyes",
+                    required=False,
+                ),
+                SimpleNamespace(
+                    saveas="x.refer",
+                    datatype="boolean",
+                    inputtype="yesnoradio",
+                    required=False,
+                ),
+                SimpleNamespace(saveas="x.count", datatype="integer", required=False),
+                SimpleNamespace(saveas="x.ratio", datatype="number", required=False),
+            ],
+        )
+        interview_status.question_text = "Styles"
         interview_status.subquestion_text = None
         interview_status.continue_label = None
         interview_status.sought = "x.service_type"
@@ -788,3 +931,245 @@ def test_generic_object_answer_resolves_placeholder_field_names(
     assert (
         execution.run(Evaluate("globals().get('x') is None")).result["value"] == "True"
     )
+
+
+def test_answer_rejects_fields_not_on_the_active_screen(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, MixedRequirementInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    before = _session_bytes(tmp_path)
+    rejected = execution.run(
+        Answer((("x.service_type", "Electronic"), ("off_screen", "1")))
+    )
+
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    assert any("off_screen" in item for item in rejected.error.details["errors"])
+    assert _session_bytes(tmp_path) == before
+
+
+def test_answer_enforces_required_fields_by_default(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, MixedRequirementInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    before = _session_bytes(tmp_path)
+    rejected = execution.run(Answer((("x.date", "2026-10-14"),)))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    assert any("x.service_type" in item for item in rejected.error.details["errors"])
+    assert _session_bytes(tmp_path) == before
+
+
+def test_answer_submits_blank_optional_fields(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, MixedRequirementInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    # The browser would have posted the blank date input as an empty string,
+    # so the flow has nothing left to re-seek.
+    assert accepted.ok
+    assert "warnings" not in accepted.result
+    assert execution.run(Evaluate("rav.date")).result["value"] == "''"
+
+
+def test_answer_applies_field_defaults_like_the_browser(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, DefaultedDateInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.date.day")).result["value"] == "15"
+
+
+def test_answer_keeps_prefilled_optional_values(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, PrefilledDateInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.date")).result["value"] == "5"
+
+
+def test_partial_answer_keeps_warn_only_and_skips_blank_synthesis(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, MixedRequirementInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.date", "2026-10-14"),), partial=True))
+
+    assert accepted.ok
+    assert any("x.service_type" in item for item in accepted.result["warnings"])
+    undefined = execution.run(Evaluate("rav.service_type"))
+    assert not undefined.ok
+
+    strict = execution.run(
+        Answer((("x.date", "2026-10-14"),), partial=True, strict=True)
+    )
+    assert not strict.ok
+    assert strict.error.kind == "validation"
+
+
+def test_answer_synthesizes_browser_boolean_and_numeric_blanks(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, BooleanStyleInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.agree is False")).result["value"] == "True"
+    assert execution.run(Evaluate("rav.declined is True")).result["value"] == "True"
+    assert execution.run(Evaluate("rav.refer is None")).result["value"] == "True"
+    assert execution.run(Evaluate("rav.count")).result["value"] == "0"
+    assert execution.run(Evaluate("rav.ratio")).result["value"] == "0.0"
+
+
+def test_answer_coerces_empty_submitted_values_per_datatype(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, BooleanStyleInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(
+        Answer(
+            (
+                ("x.service_type", "Electronic"),
+                ("x.count", ""),
+                ("x.ratio", ""),
+                ("x.agree", ""),
+            )
+        )
+    )
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.count")).result["value"] == "0"
+    assert execution.run(Evaluate("rav.ratio")).result["value"] == "0.0"
+    assert execution.run(Evaluate("rav.agree is None")).result["value"] == "True"
+
+
+def test_answer_falls_back_when_a_default_cannot_be_applied(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, BadDefaultDateInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.date")).result["value"] == "''"
+
+
+def test_answer_code_mode_rejects_off_screen_variables(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, MixedRequirementInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    rejected = execution.run(Answer((("x.off_screen", "1"),), code=True))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    assert any("off_screen" in item for item in rejected.error.details["errors"])
+
+
+def test_required_empty_submission_is_rejected(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, MixedRequirementInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    for raw in ("", "None"):
+        before = _session_bytes(tmp_path)
+        rejected = execution.run(Answer((("x.service_type", raw),)))
+
+        assert not rejected.ok, raw
+        assert rejected.error.kind == "validation", raw
+        assert any("is empty" in item for item in rejected.error.details["errors"]), raw
+        assert _session_bytes(tmp_path) == before, raw
+
+
+def test_hidden_fields_are_not_assigned_or_required(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, HiddenFieldInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    assert accepted.ok
+    assert "warnings" not in accepted.result
+    hidden = execution.run(Evaluate("rav.hidden"))
+    assert not hidden.ok
+
+
+def test_signature_fields_become_daempty(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SignatureInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.service_type", "Electronic"),)))
+
+    assert accepted.ok
+    assert "warnings" not in accepted.result
+    assert execution.run(Evaluate("rav.signature.str")).result["value"] == "''"
+    assert execution.run(Evaluate("str(rav.signature)")).result["value"] == "''"

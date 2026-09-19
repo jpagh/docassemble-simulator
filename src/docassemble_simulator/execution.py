@@ -39,7 +39,6 @@ from docassemble_simulator.compatibility import (
     require_assemblyline_compatibility,
 )
 from docassemble_simulator.describe import (
-    describe_fields,
     describe_question_result,
     describe_seeking,
 )
@@ -86,6 +85,7 @@ class Answer:
     code: bool = False
     validate: bool = True
     strict: bool = False
+    partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -497,9 +497,14 @@ class InterviewExecution:
             raise ExecutionFailure(
                 ErrorKind.INPUT, "the saved outcome is not an answerable screen"
             )
+        blank_submissions = _blank_submissions(operation)
         with self._prepared_operation(namespace) as (interview, status):
             errors = _apply_assignments(
-                namespace, screen, operation.assignments, operation.code
+                namespace,
+                screen,
+                operation.assignments,
+                operation.code,
+                allowed=_answerable_fields(screen),
             )
             if errors:
                 raise ExecutionFailure(
@@ -507,11 +512,33 @@ class InterviewExecution:
                     "one or more answers could not be applied",
                     {"errors": errors},
                 )
+            if not operation.partial:
+                # The whole screen is submitted: browser defaults and blanks
+                # for optional fields, then the required gate.
+                _submit_screen_fields(namespace, screen)
+            violations = _required_violations(namespace, screen, blank_submissions)
+            if violations and not operation.partial:
+                raise ExecutionFailure(
+                    ErrorKind.VALIDATION,
+                    "screen rejected; all answers were discarded",
+                    {
+                        "errors": [
+                            _required_message(variable, reason)
+                            for variable, reason in violations
+                        ],
+                        "warnings": [],
+                    },
+                )
             validation = (
                 _validate(interview, namespace, screen)
                 if operation.validate
                 else {"errors": [], "warnings": []}
             )
+            if operation.partial and operation.validate:
+                validation["warnings"].extend(
+                    _required_message(variable, reason)
+                    for variable, reason in violations
+                )
             if operation.strict:
                 validation["errors"].extend(validation["warnings"])
                 validation["warnings"] = []
@@ -589,8 +616,11 @@ class InterviewExecution:
                 raise ExecutionFailure(
                     ErrorKind.EXECUTION, f"{type(error).__name__}: {error}"
                 ) from error
+            # Gatherable objects (DADict/DAList) trigger gathering in repr(),
+            # which needs the active runtime context.
+            rendered = _safe_repr(value)
         return ExecutionOutcome(
-            True, {"expression": operation.expression, "value": _safe_repr(value)}
+            True, {"expression": operation.expression, "value": rendered}
         )
 
     def _variables(self, operation: Variables):
@@ -1104,11 +1134,237 @@ def _field_types(screen, targets):
     return types
 
 
-def _apply_assignments(namespace, screen, assignments, use_code):
+def _answerable_fields(screen):
+    """Field names a submission may set, including resolved generic targets."""
+    fields = screen.get("fields")
+    if not fields:
+        # A screen with no described fields (continue, field-less deadend)
+        # keeps the pre-existing behavior of accepting explicit assignments.
+        return None
+    allowed = set(_screen_field_targets(screen).values())
+    for field in fields:
+        variable = field.get("variable")
+        if isinstance(variable, str) and variable:
+            allowed.add(variable)
+    return allowed
+
+
+def _required_message(variable, reason):
+    state = "empty" if reason == "empty" else "undefined"
+    return (
+        f"required field '{variable}' is {state} "
+        "(the browser would refuse to submit this screen)"
+    )
+
+
+def _blank_submissions(operation):
+    """Variables whose submitted value is intentionally empty.
+
+    A browser cannot submit a blank required input; an API caller can, and
+    that explicit clearing must fail the required gate instead of parking an
+    empty value in the namespace.
+    """
+    if operation.code:
+        return set()
+    blanks = set()
+    for variable, raw in operation.assignments:
+        if raw.strip() == "" or parse_value(raw) is None:
+            blanks.add(variable)
+    return blanks
+
+
+def _field_value(namespace, variable, targets):
+    """Return ``(found, value)`` for a screen field, resolved target included."""
+    candidates = [variable]
+    target = targets.get(variable)
+    if target and target not in candidates:
+        candidates.append(target)
+    for candidate in candidates:
+        try:
+            return True, eval(candidate, namespace)
+        except (
+            NameError,
+            AttributeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+            SyntaxError,
+            RuntimeError,
+            ImportError,
+            LookupError,
+            OSError,
+        ):
+            continue
+    return False, None
+
+
+def _is_empty_value(value):
+    if value is None:
+        return True
+    return isinstance(value, str) and value == ""
+
+
+def _required_violations(namespace, screen, blank_submissions):
+    """Return ``(variable, reason)`` for required visible fields that are not
+    answered. Signatures are never required; hidden fields are not shown and
+    therefore not assigned or required."""
+    violations = []
+    targets = _screen_field_targets(screen)
+    for field in screen.get("fields") or []:
+        variable = field.get("variable")
+        if not isinstance(variable, str) or not variable:
+            continue
+        if field.get("visible") is False:
+            continue
+        if str(field.get("type", "")).lower() == "signature":
+            continue
+        if field.get("required") is False:
+            continue
+        found, value = _field_value(namespace, variable, targets)
+        if not found:
+            violations.append((variable, "undefined"))
+        elif variable in blank_submissions or _is_empty_value(value):
+            violations.append((variable, "empty"))
+    return violations
+
+
+def _blankable_fields(namespace, screen):
+    """Yield fields the browser would submit for a shown screen but that are
+    not yet defined: ``(variable, default, required)``."""
+    targets = _screen_field_targets(screen)
+    for field in screen.get("fields") or []:
+        variable = field.get("variable")
+        if not isinstance(variable, str) or not variable:
+            continue
+        if field.get("visible") is False:
+            continue
+        if _field_value(namespace, variable, targets)[0]:
+            continue
+        default = field.get("default")
+        if not isinstance(default, str) or not default.strip():
+            default = None
+        yield variable, default, field.get("required") is not False, field
+
+
+def _submit_screen_fields(namespace, screen):
+    """Define every visible field the browser would submit, like a form POST.
+
+    Defaults become the submitted values (the browser prefills them), optional
+    blanks become the value the browser would post for the datatype, and
+    signature fields become ``DAEmpty()`` so documents can still render them.
+    Required fields with no value are left for the required gate.
+    """
+    blanks = []
+    targets = _screen_field_targets(screen)
+    for variable, default, required, field in _blankable_fields(namespace, screen):
+        signature = str(field.get("type", "")).lower() == "signature"
+        if not signature and default is not None:
+            applied = _apply_assignments(
+                namespace, screen, ((variable, default),), False
+            )
+            if not applied:
+                continue
+            logger.debug("field default %r could not be applied: %s", variable, applied)
+        if required and not signature:
+            continue
+        blank = _browser_blank(field)
+        if blank is not _NO_BLANK:
+            blanks.append((variable, blank))
+    for variable, blank in blanks:
+        _set_namespace_value(namespace, targets.get(variable, variable), blank)
+
+
+#: A field datatype with no faithful browser blank (for example a custom type
+#: whose ``empty()`` value only the runtime knows); it is left undefined.
+_NO_BLANK = object()
+
+
+#: Boolean input types whose unselected state is ``None`` rather than False.
+_RADIO_BOOLEAN_INPUT_TYPES = frozenset(
+    {"yesnomaybe", "noyesmaybe", "yesnoradio", "noyesradio"}
+)
+
+
+def _browser_blank(field):
+    """The value a browser form posts for an untouched visible field.
+
+    docassemble's formatter and form processor derive this from the datatype
+    and the input type: empty inputs stay empty strings, numeric types coerce
+    a blank to zero, radio-style booleans and object selections become
+    ``None``, and a checkbox-style boolean takes its unchecked value (False
+    for ``yesno``, True for ``noyes``, matching the formatter's ``_checkboxes``
+    hidden input). Custom types are left undefined because only their runtime
+    class knows the empty value.
+    """
+    datatype = str(field.get("type", "")).lower()
+    input_type = str(field.get("input_type", "")).lower()
+    if datatype == "signature":
+        from docassemble.base.util import DAEmpty
+
+        return DAEmpty()
+    if datatype == "integer":
+        return 0
+    if datatype in {"number", "float", "currency", "range"}:
+        return 0.0
+    if datatype == "boolean":
+        if input_type in _RADIO_BOOLEAN_INPUT_TYPES:
+            return None
+        return input_type.startswith("noyes")
+    if datatype in {"threestate", "object", "object_radio", "file"}:
+        return None
+    if datatype in {"object_multiselect", "object_checkboxes"}:
+        # Object selections need runtime initialisation; a fabricated empty
+        # object could corrupt interview logic, so leave it undefined.
+        return _NO_BLANK
+    if datatype in {"checkboxes", "multiselect"}:
+        values = [
+            choice.get("value")
+            for choice in field.get("choices") or []
+            if "value" in choice
+        ]
+        if not values:
+            return None
+        from docassemble.base.util import DADict
+
+        return DADict(elements={str(value): False for value in values})
+    if datatype in {
+        "text",
+        "email",
+        "phone",
+        "telephone",
+        "area",
+        "raw",
+        "date",
+        "datetime",
+        "datetime-local",
+        "time",
+    }:
+        return ""
+    return _NO_BLANK
+
+
+def _set_namespace_value(namespace, target, value):
+    temporary = "__dasimulator_value"
+    previous = namespace.get(temporary, _MISSING)
+    namespace[temporary] = value
+    try:
+        __builtins__["exec"](f"{target} = {temporary}", namespace)
+    finally:
+        if previous is _MISSING:
+            namespace.pop(temporary, None)
+        else:
+            namespace[temporary] = previous
+
+
+def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
     errors = []
     targets = _screen_field_targets(screen)
     field_types = _field_types(screen, targets)
     for variable, raw in assignments:
+        if allowed is not None and variable not in allowed:
+            errors.append(f"{variable}: not a field on the active screen")
+            continue
         temporary = "__dasimulator_value"
         previous = namespace.get(temporary, _MISSING)
         try:
@@ -1119,6 +1375,18 @@ def _apply_assignments(namespace, screen, assignments, use_code):
             datatype = field_types.get(variable, "")
             if datatype == "date":
                 value = _coerce_date(raw, value)
+            elif raw.strip() == "":
+                # An empty input is a browser submission too: numeric fields
+                # become zero, booleans become None, and an empty object
+                # selection is not set at all.
+                if datatype == "integer":
+                    value = 0
+                elif datatype in {"number", "float", "currency", "range"}:
+                    value = 0.0
+                elif datatype in {"boolean", "threestate"}:
+                    value = None
+                elif datatype in {"object", "object_radio"}:
+                    continue
             if datatype in {
                 "object",
                 "object_radio",
@@ -1211,50 +1479,6 @@ def _validate(interview, namespace, screen):
         ) as error:
             errors.append(
                 f"validation code crashed ({type(error).__name__}): {_first_line(error)}"
-            )
-    described = (
-        describe_fields(question, namespace)
-        if question is not None
-        else list(screen.get("fields") or [])
-    )
-    checks = [
-        (field.get("variable"), field.get("type"))
-        for field in described
-        if field.get("visible") is not False and field.get("required") is not False
-    ]
-    targets = _screen_field_targets(screen)
-    for variable, datatype in checks:
-        if not variable or "signature" in str(datatype).lower():
-            continue
-        candidates = [variable]
-        target = targets.get(variable)
-        if target and target not in candidates:
-            candidates.append(target)
-        error = None
-        for candidate in candidates:
-            try:
-                eval(candidate, namespace)
-            except (
-                NameError,
-                AttributeError,
-                KeyError,
-                IndexError,
-                TypeError,
-                ValueError,
-                SyntaxError,
-                RuntimeError,
-                ImportError,
-                LookupError,
-                OSError,
-            ) as exc:
-                error = exc
-                continue
-            error = None
-            break
-        if error is not None:
-            logger.debug("required field %r undefined: %s", variable, error)
-            warnings.append(
-                f"required field '{variable}' is undefined (the browser would refuse to submit this screen)"
             )
     return {"errors": errors, "warnings": warnings}
 

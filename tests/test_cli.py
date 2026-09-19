@@ -467,3 +467,19 @@ def test_phases_without_phased_order_is_an_input_error():
     payload = json.loads(completed.stdout)
     assert payload["error"]["kind"] == "input"
     assert "--order phased" in payload["error"]["message"]
+
+
+def test_answer_screen_submission_flags_are_parsed_and_documented():
+    parser = cli.build_parser()
+    partial = parser.parse_args(["answer", "x=1", "--partial"])
+    default = parser.parse_args(["answer", "x=1"])
+
+    assert partial.partial is True
+    assert default.partial is False
+
+    help_result = _run_cli("answer", "--help")
+    help_text = " ".join(help_result.stdout.split())
+    assert help_result.returncode == 0
+    assert "--partial" in help_text
+    assert "whole screen" in help_text
+    assert "field gate" in help_text

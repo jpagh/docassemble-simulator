@@ -160,6 +160,9 @@ def describe_field(
     datatype = getattr(field, "datatype", None)
     fieldtype = getattr(field, "fieldtype", None)
     out["type"] = fieldtype or datatype or "text"
+    input_type = getattr(field, "inputtype", None)
+    if input_type is not None:
+        out["input_type"] = input_type
     label = getattr(field, "label", None)
     if label is not None:
         rendered = _text_of(label, user_dict)

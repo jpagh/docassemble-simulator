@@ -70,9 +70,23 @@ docassemble-simulator seek M.family --activate
 
 - `start` creates fresh state and assembles to a screen, completion, or flow
   error.
-- `answer` applies browser-shaped values to the active saved screen as one
-  transaction, validates, marks it answered, assembles, and commits. Assignment
-  or validation failure discards every submitted value.
+- `answer` submits the active saved screen like a browser form and commits
+  the result as one transaction: submitted values are applied, visible fields
+  with defaults take the default, visible optional fields left blank are
+  defined with the value the browser would post (an empty string for text and
+  dates, `0`/`0.0` for numeric fields, `None` for radio/maybe/object
+  selections, the unchecked value for checkbox-style `yesno`/`noyes`, and an
+  all-false dictionary for checkbox groups), so the same `sets:` question is
+  not re-asked for each variable. Visible required fields left blank, or
+  explicitly emptied (`field=` or `field=None`), reject the submission.
+  Hidden `show if` fields are neither assigned nor required, and signature
+  fields become `DAEmpty()` so documents still render.
+  Fields that are not on the active screen are rejected; use `exec` for
+  deliberate state surgery. `--partial` restores per-field submission
+  (missing required fields become warnings and lazy re-seeking is allowed),
+  and `--no-validate` skips only the interview's validation code, not the
+  required gate. Assignment or validation failure discards every submitted
+  value.
 - `status` only reads the saved outcome. `refresh` explicitly rehydrates and
   reassembles saved state.
 - `seek` starts from saved state by default. `--fresh` is isolated and
@@ -89,7 +103,7 @@ choice fields use the active field metadata. An exact `YYYY-MM-DD` submitted to
 a date field becomes docassemble's timezone-aware `DADateTime`; malformed and
 impossible dates are rejected. The same text submitted to a text field remains
 a string. `answer --code` and `exec` retain Python semantics and bypass browser
-coercion.
+coercion; `--code` is still scoped to the active screen's fields.
 
 State is versioned and stored separately for each canonical interview and
 effective configuration under `.simulator/sessions/`. The effective
