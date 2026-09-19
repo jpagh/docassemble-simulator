@@ -333,7 +333,8 @@ def _compatible_metadata(expected: TraceMetadata, actual: TraceMetadata) -> None
     ):
         if left != right:
             raise TraceError(
-                f"trace {label} mismatch: {left!r} does not match {right!r}"
+                f"trace {label} mismatch: {left!r} does not match {right!r}; "
+                "re-record with a matching interview and configuration"
             )
 
 
@@ -382,7 +383,9 @@ def load_trace(path: str | Path) -> ScreenTrace:
         raise TraceError(f"could not read trace {trace_path}: {error}") from error
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
-        raise TraceError(f"trace is empty: {trace_path}")
+        raise TraceError(
+            f"trace is empty: {trace_path}; record one with a --record execution command"
+        )
     try:
         metadata_data = json.loads(lines[0])
     except json.JSONDecodeError as error:
@@ -828,10 +831,16 @@ def _phased_result(
         list(policy.phases) if policy.phases else list(expected.metadata.phase_order)
     )
     if not declared:
-        raise TraceError("phased comparison requires a declared phase order")
+        raise TraceError(
+            "phased comparison requires a declared phase order: pass the phases "
+            "explicitly or record entries with a phase"
+        )
     for entry in (*expected.entries, *actual.entries):
         if entry.phase is None:
-            raise TraceError("phased comparison requires every entry to carry a phase")
+            raise TraceError(
+                "phased comparison requires every entry to carry a phase; "
+                "record operations with --phase NAME"
+            )
     diffs: list[TraceDiff] = []
     expected_order = _observed_phase_order(expected.entries)
     actual_order = _observed_phase_order(actual.entries)
@@ -966,7 +975,7 @@ def _apply_exceptions(
     unused = [exception for exception in exceptions if exception.key not in used]
     if unused:
         names = ", ".join(exception.identity for exception in unused)
-        raise TraceError(f"unused trace exceptions: {names}")
+        raise TraceError(f"unused trace exceptions: {names}; remove the stale entries")
     return output
 
 

@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+import textwrap
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -50,8 +51,24 @@ class UsageFailure(Exception):
         self.command = command
 
 
+class _MultiLineHelpFormatter(argparse.HelpFormatter):
+    """Wrap description and epilog lines independently, keeping examples intact."""
+
+    def _fill_text(self, text, width, indent):
+        return "\n".join(
+            textwrap.fill(
+                line,
+                width,
+                initial_indent=indent,
+                subsequent_indent=indent + "  ",
+            )
+            for line in text.splitlines()
+        )
+
+
 class UsageParser(argparse.ArgumentParser):
     def __init__(self, *args, command_name: str = "cli", **kwargs):
+        kwargs.setdefault("formatter_class", _MultiLineHelpFormatter)
         super().__init__(*args, **kwargs)
         self.command_name = command_name
 
@@ -500,6 +517,8 @@ def _human_trace_report(report, matched):
         where = f" #{diff['position']}" if diff.get("position") else ""
         target = f"{diff['identity']} - " if diff["identity"] else ""
         lines.append(f"{label}{where}: {target}{diff['detail']}")
+    if not matched:
+        lines.append("pass --update to rewrite the golden after review")
     return "\n".join(lines)
 
 
@@ -729,16 +748,29 @@ def build_parser():
         item.add_argument("--var")
         item.set_defaults(func=cmd_catalog)
 
+    recording_epilog = (
+        "Example:\n"
+        "  docassemble-simulator start --record run.jsonl --phase intake\n"
+        "  docassemble-simulator answer user_name=Alice --record run.jsonl --phase intake\n"
+        "  docassemble-simulator trace compare golden.jsonl run.jsonl"
+    )
+
     def add_recording(parser_):
         parser_.add_argument(
             "--record",
             metavar="PATH",
-            help="append the produced screen outcome to a trace sidecar",
+            help=(
+                "append this operation's screen outcome to a JSONL trace; "
+                "compare traces with `docassemble-simulator trace compare`"
+            ),
         )
         parser_.add_argument(
             "--phase",
             metavar="NAME",
-            help="tag recorded entries with a scenario phase",
+            help=(
+                "tag recorded entries with a scenario phase (requires --record; "
+                "used by `trace compare --order phased`)"
+            ),
         )
         return parser_
 
@@ -746,16 +778,25 @@ def build_parser():
         add(
             "start",
             help="create and assemble a fresh session for the effective configuration",
+            epilog=recording_epilog,
         )
     ).set_defaults(func=cmd_execution)
     add("status", help="read the saved outcome without assembly").set_defaults(
         func=cmd_execution
     )
     add_recording(
-        add("refresh", help="rehydrate and reassemble saved state")
+        add(
+            "refresh",
+            help="rehydrate and reassemble saved state",
+            epilog=recording_epilog,
+        )
     ).set_defaults(func=cmd_execution)
     answer = add_recording(
-        add("answer", help="transactionally answer the active screen")
+        add(
+            "answer",
+            help="transactionally answer the active screen",
+            epilog=recording_epilog,
+        )
     )
     answer.add_argument("assignments", nargs="+")
     answer.add_argument("--code", action="store_true")
@@ -763,7 +804,11 @@ def build_parser():
     answer.add_argument("--strict", action="store_true")
     answer.set_defaults(func=cmd_execution)
     seek = add_recording(
-        add("seek", help="seek a variable from saved state by default")
+        add(
+            "seek",
+            help="seek a variable from saved state by default",
+            epilog=recording_epilog,
+        )
     )
     seek.add_argument("variable")
     seek.add_argument("--fresh", action="store_true")
@@ -773,7 +818,13 @@ def build_parser():
     evaluate = add("eval", help="evaluate an expression without saving")
     evaluate.add_argument("expression")
     evaluate.set_defaults(func=cmd_execution)
-    execute = add_recording(add("exec", help="execute Python and assemble by default"))
+    execute = add_recording(
+        add(
+            "exec",
+            help="execute Python and assemble by default",
+            epilog=recording_epilog,
+        )
+    )
     execute.add_argument("code", nargs="?", default="")
     execute.add_argument("--file")
     execute.add_argument("--no-assemble", action="store_true")
@@ -783,40 +834,81 @@ def build_parser():
     variables.set_defaults(func=cmd_execution)
     trace = add(
         "trace",
-        help="record and compare screen traces",
+        help="compare screen traces recorded with --record",
         description=(
-            "Compare an expected screen-trace sidecar with a recorded run. "
-            "Supports ordered, unordered, and phased matching with always-on "
-            "coverage counts."
+            "Record a screen trace with --record PATH on an execution command, "
+            "then compare a later run against it. Ordered, unordered, and phased "
+            "matching all report coverage counts."
         ),
+        epilog=recording_epilog,
     )
     trace_sub = trace.add_subparsers(dest="trace_command", required=True)
     trace_compare = trace_sub.add_parser(
         "compare",
         parents=[common],
         command_name="trace",
-        help="compare an expected trace with an actual trace",
-    )
-    trace_compare.add_argument("expected")
-    trace_compare.add_argument("actual")
-    trace_compare.add_argument(
-        "--order", choices=("ordered", "unordered", "phased"), default="ordered"
-    )
-    trace_compare.add_argument(
-        "--missing", choices=("strict", "allow"), default="strict"
-    )
-    trace_compare.add_argument("--extra", choices=("strict", "allow"), default="strict")
-    trace_compare.add_argument("--full-text", action="store_true")
-    trace_compare.add_argument(
-        "--phases", metavar="A,B", help="declared phase order for phased matching"
+        help="compare a golden trace with a run's trace",
+        description=(
+            "Compare a golden screen trace with the trace of the run under test. "
+            "Exit 0 on match; 2 on mismatch with the full report; 1 on unreadable, "
+            "malformed, or mismatched traces."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  docassemble-simulator trace compare golden.jsonl run.jsonl\n"
+            "  docassemble-simulator trace compare golden.jsonl run.jsonl --order phased --phases intake,documents\n"
+            "  docassemble-simulator trace compare golden.jsonl run.jsonl --update"
+        ),
     )
     trace_compare.add_argument(
-        "--exceptions", metavar="FILE", help="reviewed exceptions TOML"
+        "expected", help="golden trace recorded from a known-good run"
+    )
+    trace_compare.add_argument("actual", help="trace recorded from the run under test")
+    trace_compare.add_argument(
+        "--order",
+        choices=("ordered", "unordered", "phased"),
+        default="ordered",
+        help=(
+            "ordered pins the exact sequence (default); unordered compares as a "
+            "multiset; phased orders declared phases but not entries within them"
+        ),
+    )
+    trace_compare.add_argument(
+        "--missing",
+        choices=("strict", "allow"),
+        default="strict",
+        help="strict fails on a missing expected screen (default); allow reports it",
+    )
+    trace_compare.add_argument(
+        "--extra",
+        choices=("strict", "allow"),
+        default="strict",
+        help="strict fails on an unexpected screen (default); allow reports it",
+    )
+    trace_compare.add_argument(
+        "--full-text",
+        action="store_true",
+        help="also compare normalized question and subquestion text",
+    )
+    trace_compare.add_argument(
+        "--phases",
+        metavar="P1,P2,...",
+        help=(
+            "declared phase order for --order phased, e.g. intake,documents,download"
+        ),
+    )
+    trace_compare.add_argument(
+        "--exceptions",
+        metavar="FILE",
+        help=(
+            "TOML of reviewed identity tolerances; order violations and "
+            "simulator faults cannot be excused"
+        ),
     )
     trace_compare.add_argument(
         "--update",
         action="store_true",
-        help="rewrite the expected golden from the actual trace",
+        help="rewrite EXPECTED from ACTUAL; the only golden write path",
     )
     trace_compare.set_defaults(func=cmd_trace)
     render = add(
@@ -859,6 +951,23 @@ def _reexec_with_dyld_path():
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
+def _validate_trace_arguments(args):
+    """Fail fast on trace flags that would otherwise be silently ignored."""
+    if getattr(args, "phase", None) and not getattr(args, "record", None):
+        raise InputFailure(
+            "--phase requires --record PATH; phases are only meaningful in a trace"
+        )
+    if (
+        getattr(args, "command", None) == "trace"
+        and getattr(args, "phases", None)
+        and getattr(args, "order", "ordered") != "phased"
+    ):
+        raise InputFailure(
+            "--phases is only used with --order phased; add --order phased "
+            "or drop --phases"
+        )
+
+
 def main(argv=None):
     _reexec_with_dyld_path()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -874,6 +983,7 @@ def main(argv=None):
         )
         return 1
     try:
+        _validate_trace_arguments(args)
         if args.command == "trace" and not args.root:
             # Trace comparison reads sidecars and never touches an Interview
             # package, so it does not require one to be present.

@@ -421,3 +421,49 @@ def test_render_parser_models_orthogonal_request_concerns():
     assert args.fresh and args.no_assemble
     assert args.save_snapshot == "state.pkl"
     assert args.output == "artifact.docx"
+
+
+def test_screen_trace_workflow_is_discoverable_from_help():
+    top = _run_cli("--help")
+    start = _run_cli("start", "--help")
+    compare = _run_cli("trace", "compare", "--help")
+
+    assert top.returncode == 0
+    assert "trace" in top.stdout
+    assert "compare screen traces recorded with --record" in top.stdout
+    assert start.returncode == 0
+    assert "--record PATH" in start.stdout
+    assert "trace compare" in start.stdout
+    assert compare.returncode == 0
+    assert "unordered" in compare.stdout
+    assert "phased" in compare.stdout
+    assert "--update" in compare.stdout
+    assert "golden trace" in compare.stdout
+
+
+def test_phase_without_record_is_an_input_error():
+    completed = _run_cli("--json", "start", "--phase", "intake")
+
+    assert completed.returncode == 1
+    assert completed.stderr == ""
+    payload = json.loads(completed.stdout)
+    assert payload["error"]["kind"] == "input"
+    assert "--record" in payload["error"]["message"]
+
+
+def test_phases_without_phased_order_is_an_input_error():
+    completed = _run_cli(
+        "--json",
+        "trace",
+        "compare",
+        "expected.jsonl",
+        "actual.jsonl",
+        "--phases",
+        "a,b",
+    )
+
+    assert completed.returncode == 1
+    assert completed.stderr == ""
+    payload = json.loads(completed.stdout)
+    assert payload["error"]["kind"] == "input"
+    assert "--order phased" in payload["error"]["message"]

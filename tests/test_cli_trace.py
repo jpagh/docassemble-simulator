@@ -243,3 +243,20 @@ def test_recording_refuses_a_trace_from_another_run(tmp_path, monkeypatch, capsy
     assert code == 1
     assert captured["error"]["kind"] == "input"
     assert "fingerprint" in captured["error"]["message"]
+
+
+def test_trace_compare_human_mismatch_points_at_update(tmp_path, capsys):
+    expected = tmp_path / "expected.jsonl"
+    actual = tmp_path / "actual.jsonl"
+    _write_trace(expected, "id:intro", "id:done")
+    _write_trace(actual, "id:intro")
+    args = _parse(
+        "trace", "compare", str(expected), str(actual), "--order", "unordered"
+    )
+
+    assert cli.cmd_trace(args, tmp_path) == 2
+
+    output = capsys.readouterr().out
+    assert "trace compare: MISMATCH (unordered)" in output
+    assert "missing: id:done" in output
+    assert "pass --update to rewrite the golden after review" in output
