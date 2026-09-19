@@ -41,3 +41,8 @@ never invoke LibreOffice or any external converter — stands.
 Implemented in `_runtime.py`'s attachment finalization wrapper
 (`finalize_with_filename`), which counts the pre-removal PDF formats and raises
 before delegating to the original finalizer when nothing remains.
+
+> **Extended by [ADR-0011](0011-pdf-skip-docx-fallback.md):** at the
+> AssemblyLine document/bundle layer, a generated-PDF request for a DOCX-backed
+> document returns the DOCX rendering (with a `pdf-skip` diagnostic) instead
+> of failing. PDF-only attachments keep the typed failure described here.

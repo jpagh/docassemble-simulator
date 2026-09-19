@@ -176,7 +176,11 @@ are checked for nested WordprocessingML paragraphs and any strict-structure
 finding appears on the attachment as a non-mutating diagnostic.
 
 Generated PDF conversion remains intentionally stubbed: the simulator does not
-invoke an external converter or advertise a skipped PDF link.
+invoke an external converter or fabricate a PDF. When an AssemblyLine document
+or bundle asks for a generated PDF and has a DOCX rendering, the simulator
+skips the PDF conversion, returns the real DOCX artifact (including merged DOCX
+and DOCX ZIP bundles), and records a `pdf-skip` diagnostic. PDF-only
+attachments still raise `PDFConversionUnavailable`.
 
 ## Workspace configuration and defaults
 
@@ -199,8 +203,9 @@ zero-config run uses an in-process fake Redis, simulator-local file storage,
 substituted: the simulator's own state lives in `.simulator/sessions/`, and
 database-backed AssemblyLine session features are disabled by default rather
 than pointed at a nonexistent PostgreSQL. These are local substitutes, not
-PostgreSQL, Redis, Celery, or server storage. DOCX rendering is supported; PDF
-conversion is unavailable and no external converter is invoked.
+PostgreSQL, Redis, Celery, or server storage. DOCX rendering is supported;
+generated PDFs are skipped in favor of the DOCX artifact and no external
+converter is invoked.
 
 | Default | Behavior | Category |
 | --- | --- | --- |
@@ -212,7 +217,7 @@ conversion is unavailable and no external converter is invoked.
 | timezone | local timezone, then `America/New_York` | pass-through default |
 | background actions | foreground, no Celery worker | stub |
 | seek diagnostics | `capture` (default), structured `variable-seek` trace | local capture |
-| DOCX/PDF | DOCX supported; PDF conversion unavailable | capability boundary |
+| DOCX/PDF | DOCX supported; generated PDFs skipped in favor of DOCX, no converter invoked | capability boundary |
 
 Configuration is merged from lowest to highest precedence: the global
 `$DOCASSEMBLE_SIMULATOR_CONFIG` (or
@@ -365,9 +370,9 @@ is installed; set `DASIMULATOR_REAL_PYTHON` to use a separate target
 environment and `DASIMULATOR_REAL_PYTHON_19` for the 1.9.x lane. Without
 either runtime, they skip; a configured target that
 cannot run the tests fails clearly. The fast suite's stubbed runtime tests
-never require `docassemble`. PDF-only download screens are
-intentionally deferred to staging; the simulator gate is DOCX artifact
-rendering and content inspection.
+never require `docassemble`. Generated-PDF download screens are satisfied with
+DOCX artifacts locally; real PDF validation remains a deployment concern, and
+the simulator gate is DOCX artifact rendering and content inspection.
 
 The sibling docassemble-yaml example corpus has an isolated compile/start lane:
 

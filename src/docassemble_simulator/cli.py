@@ -200,7 +200,10 @@ def _config_report(root, config, args=None):
     report["simulator"] = redact_config(settings)
     report["defaults"]["capabilities"] = {
         "docx": "supported",
-        "pdf_conversion": "unavailable (no external converter invoked)",
+        "pdf_conversion": (
+            "unavailable; DOCX is returned when a generated PDF is requested "
+            "for a DOCX document"
+        ),
         "background_actions": "foreground by default; no Celery worker",
         "session_persistence": ("disabled by default; no server database substituted"),
     }
@@ -254,7 +257,10 @@ def cmd_info(args, root):
 
     data["capabilities"] = {
         "docx": "supported",
-        "pdf": "unavailable",
+        "pdf": (
+            "unavailable; a generated-PDF request for a DOCX document is "
+            "skipped and the DOCX artifact is used"
+        ),
         "pdf_message": PDF_UNAVAILABLE_MESSAGE,
         "external_pdf_converter": False,
         "background_worker": False,

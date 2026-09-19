@@ -19,12 +19,15 @@ library assumes a running webapp; these pieces are stubbed:
 
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 import mimetypes
 import os
 import re
 import sys
 import types
+import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -46,9 +49,17 @@ country: US
 
 PDF_UNAVAILABLE_MESSAGE = (
     "PDF output is unavailable in the simulator: generated PDF conversion is "
-    "not supported and no external converter is invoked; use a real "
+    "not supported, no external converter is invoked, and a request with a "
+    "DOCX rendering is skipped in favor of the DOCX artifact; use a real "
     "docassemble deployment for PDF downloads."
 )
+
+PDF_SKIP_DIAGNOSTIC = "pdf-skip"
+_PDF_SKIP_MESSAGE = (
+    "generated PDF conversion is unavailable; the DOCX output was used "
+    "instead of failing or seeking a missing PDF"
+)
+_PDF_SKIP_MARKER = "_dasimulator_docx_pdf_fallback"
 
 
 def _file_metadata(reference, *, resolved_path: Path | None = None) -> dict:
@@ -360,6 +371,76 @@ class FakeRedis:
         return 0
 
 
+def _secure_filename_spaces_ok(filename):
+    """Webapp-compatible secure filename that preserves spaces."""
+    filename = unicodedata.normalize("NFKD", str(filename))
+    filename = filename.encode("ascii", "ignore").decode("ascii")
+    for separator in (os.path.sep, os.path.altsep):
+        if separator:
+            filename = filename.replace(separator, "_")
+    filename = " ".join(filename.split(" "))
+    return re.sub(r"[^A-Za-z0-9\_.\- ]", "", filename).strip("._ ")
+
+
+class _SimulatorSavedFile:
+    """Local stand-in for the webapp's database-backed ``SavedFile``.
+
+    docassemble's ``DAFile.initialize()`` reserves a file number through the
+    server and then asks ``SavedFile.save()`` to materialize the path before
+    the caller writes content.  The simulator registry owns that path, so this
+    adapter only needs to create the placeholder file and clear the registry
+    entry on delete; durability is the registry's job, not a remote store's.
+    """
+
+    def __init__(
+        self,
+        file_number,
+        extension=None,
+        fix=False,
+        section="files",
+        filename="file",
+        subdir=None,
+        should_not_exist=False,
+        must_exist=False,
+        **kwargs,
+    ):
+        self.file_number = int(file_number)
+        self.extension = extension
+        self.section = section
+        self.filename = filename
+        self.subdir = subdir
+
+    @staticmethod
+    def _registry():
+        from docassemble_simulator._artifacts import active_file_registry
+
+        return active_file_registry()
+
+    def save(self, finalize=False):
+        registry = self._registry()
+        metadata = None if registry is None else registry.find(self.file_number)
+        if metadata is None:
+            raise RuntimeError(
+                f"simulator file {self.file_number} was not reserved before save"
+            )
+        path = Path(metadata["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        if finalize:
+            self.finalize()
+
+    def finalize(self):
+        return None
+
+    def delete(self):
+        registry = self._registry()
+        if registry is not None:
+            registry.remove(self.file_number)
+
+    def cloud_path(self, filename=None):
+        return None
+
+
 def _effective_config_text(extra_config: dict | None) -> str:
     text = DEFAULT_CONFIG_TEXT
     if extra_config is None:
@@ -540,6 +621,126 @@ def install_attachment_filename_fallback() -> None:
     Question.finalize_attachment = finalize_with_filename
 
 
+def _missing_pdf_error_type():
+    """The docassemble exception raised for an undefined generated format."""
+    try:
+        from docassemble.base.error import DAAttributeError
+    except ImportError:
+        return None
+    return DAAttributeError
+
+
+def _clear_pending_error() -> None:
+    """Drop docassemble's stale undefined-attribute marker after handling it."""
+    try:
+        from docassemble.base.functions import this_thread
+    except ImportError:
+        return
+    misc = getattr(this_thread, "misc", None)
+    if isinstance(misc, dict):
+        misc.pop("pending_error", None)
+
+
+def _docx_arguments(instance, args, kwargs):
+    """Forward only the arguments the DOCX implementation accepts."""
+    signature = inspect.signature(instance.as_docx)
+    parameters = list(signature.parameters.values())
+    positional = [
+        value
+        for index, value in enumerate(args)
+        if index < len(parameters)
+        and parameters[index].kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    keywords = {
+        name: value for name, value in kwargs.items() if name in signature.parameters
+    }
+    return positional, keywords
+
+
+def _record_pdf_skip(instance) -> None:
+    from docassemble_simulator._diagnostics import record_diagnostic
+
+    record_diagnostic(
+        PDF_SKIP_DIAGNOSTIC,
+        _PDF_SKIP_MESSAGE,
+        {
+            "document": str(getattr(instance, "instanceName", type(instance).__name__)),
+            "format": "docx",
+        },
+    )
+
+
+def _run_docx_fallback(instance, args, kwargs):
+    _record_pdf_skip(instance)
+    positional, keywords = _docx_arguments(instance, args, kwargs)
+    return instance.as_docx(*positional, **keywords)
+
+
+def _docx_pdf_fallback(original):
+    """Skip generated-PDF assembly when the document has a DOCX rendering.
+
+    AssemblyLine's ``as_pdf`` asks the attachment collection for a generated
+    ``pdf`` attribute.  The simulator never creates that attribute (ADR-0001),
+    so the plain method enters docassemble's variable-seeking path and ends in
+    an unresolved ``....pdf`` failure.  When the enabled documents are all
+    DOCX-backed, return the DOCX rendering instead: the flow completes, the
+    real DOCX artifacts are produced, and an explicit ``pdf-skip`` diagnostic
+    records that no PDF was generated.
+
+    Documents without a DOCX rendering keep the original behavior, including
+    the typed :class:`PDFConversionUnavailable` from finalization.
+    """
+
+    @functools.wraps(original)
+    def as_pdf_with_docx_fallback(self, *args, **kwargs):
+        is_docx = getattr(self, "_is_docx", None)
+        if is_docx is None or not hasattr(self, "as_docx"):
+            return original(self, *args, **kwargs)
+        try:
+            if is_docx():
+                return _run_docx_fallback(self, args, kwargs)
+        except Exception as error:  # noqa: BLE001 - let the original report its own failure
+            logger.debug("DOCX pre-check failed for %r: %s", self, error)
+        missing_pdf = _missing_pdf_error_type()
+        try:
+            return original(self, *args, **kwargs)
+        except Exception as error:
+            if missing_pdf is None or not isinstance(error, missing_pdf):
+                raise
+            _clear_pending_error()
+            if not is_docx():
+                raise
+            return _run_docx_fallback(self, args, kwargs)
+
+    as_pdf_with_docx_fallback._dasimulator_docx_pdf_fallback = True
+    return as_pdf_with_docx_fallback
+
+
+def install_pdf_skip_fallback() -> None:
+    """Skip generated-PDF assembly in AssemblyLine bundles when DOCX exists.
+
+    The ``as_pdf`` methods on AssemblyLine's document and bundle classes are
+    wrapped so a generated-PDF request with a DOCX rendering produces the DOCX
+    artifact instead of entering variable seeking for a missing ``pdf``
+    attribute.  Installation is idempotent per class via the wrapper marker and
+    is a no-op when AssemblyLine is not installed.  PDF-only documents keep the
+    typed failure behavior from ADR-0006.
+    """
+    try:
+        from docassemble.AssemblyLine import al_document
+    except ImportError:
+        return
+    for class_name in ("ALDocument", "ALStaticDocument", "ALDocumentBundle"):
+        cls = getattr(al_document, class_name, None)
+        if cls is None:
+            continue
+        original = getattr(cls, "as_pdf", None)
+        if original is None or getattr(original, _PDF_SKIP_MARKER, False):
+            continue
+        cls.as_pdf = _docx_pdf_fallback(original)
+
+
 def install_diagnostic_logging() -> None:
     """Route expected lazy-seek logs through operation diagnostics, not stderr."""
     global _DIAGNOSTIC_LOGGING_INSTALLED
@@ -666,6 +867,30 @@ class _SimulatorRuntimeBindings:
         if registry is None:
             raise RuntimeError("simulator local file registry is not active")
         return registry.save(filename, orig_path)
+
+    def get_new_file_number(self, user_code, file_name, yaml_file_name=None):
+        from docassemble_simulator._artifacts import active_file_registry
+
+        registry = active_file_registry()
+        if registry is None:
+            raise RuntimeError("simulator local file registry is not active")
+        return registry.reserve(file_name)[0]
+
+    def get_saved_file_class(self):
+        return _SimulatorSavedFile
+
+    def secure_filename(self, the_filename):
+        from docassemble.base.functions import secure_filename
+
+        return secure_filename(str(the_filename))
+
+    def secure_filename_unicode_ok(self, the_filename):
+        from docassemble.base.functions import secure_filename_unicode_ok
+
+        return secure_filename_unicode_ok(str(the_filename))
+
+    def secure_filename_spaces_ok(self, filename):
+        return _secure_filename_spaces_ok(filename)
 
     def file_finder(
         self,
@@ -883,6 +1108,28 @@ def _register_pluggy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
                 filename, orig_path, yaml_file_name=yaml_file_name, uid=uid
             )
 
+        @hookimpl
+        def get_new_file_number(self, user_code, file_name, yaml_file_name=None):
+            return bindings.get_new_file_number(
+                user_code, file_name, yaml_file_name=yaml_file_name
+            )
+
+        @hookimpl
+        def get_saved_file_class(self):
+            return bindings.get_saved_file_class()
+
+        @hookimpl
+        def secure_filename(self, filename):
+            return bindings.secure_filename(filename)
+
+        @hookimpl
+        def secure_filename_unicode_ok(self, the_filename):
+            return bindings.secure_filename_unicode_ok(the_filename)
+
+        @hookimpl
+        def secure_filename_spaces_ok(self, filename):
+            return bindings.secure_filename_spaces_ok(filename)
+
         @hookimpl(tryfirst=True)
         def file_finder(
             self,
@@ -1015,6 +1262,15 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     server.file_number_finder = file_number_finder
     server.url_finder = url_finder
     server.save_numbered_file = bindings.save_numbered_file
+    # 1.9's DAFile.initialize() allocates the next number through the server
+    # and materializes the path through SavedFile. The simulator registry
+    # backs both seams, so generated zip/docx files become ordinary local
+    # artifacts without a server database or remote file store.
+    server.get_new_file_number = bindings.get_new_file_number
+    server.SavedFile = bindings.get_saved_file_class()
+    server.secure_filename = bindings.secure_filename
+    server.secure_filename_unicode_ok = bindings.secure_filename_unicode_ok
+    server.secure_filename_spaces_ok = bindings.secure_filename_spaces_ok
     # 1.9 dispatches background_action() through server.bg_action; point that
     # seam at the shared foreground fallback (ADR-0003, no Celery emulation).
     server.bg_action = _foreground_background_action
@@ -1127,6 +1383,27 @@ def _continue_background_response_action(response):
     )
 
 
+#: docassemble binds generic-object placeholders in the interview namespace.
+#: A nested foreground event evaluates attachment questions that rebind them,
+#: so the outer code's `x.generate_downloads_task = background_action(...)`
+#: would otherwise assign to the last attachment object instead of the bundle.
+_GENERIC_PLACEHOLDERS = ("x", "i", "j", "k", "l", "m", "n")
+
+
+def _snapshot_generic_placeholders(namespace):
+    return {
+        name: namespace[name] for name in _GENERIC_PLACEHOLDERS if name in namespace
+    }
+
+
+def _restore_generic_placeholders(namespace, snapshot):
+    for name in _GENERIC_PLACEHOLDERS:
+        if name in snapshot:
+            namespace[name] = snapshot[name]
+        else:
+            namespace.pop(name, None)
+
+
 def _foreground_background_action(action, ui_notification=None, **arguments):
     """Run a supported event in the current request and return a task value."""
     if _active_background_action_mode() == "disabled":
@@ -1147,6 +1424,7 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
 
     info = getattr(this_thread, "current_info", {})
     old = {key: info[key] for key in ("action", "arguments") if key in info}
+    placeholders = _snapshot_generic_placeholders(namespace)
     try:
         info["action"] = action
         info["arguments"] = arguments
@@ -1189,6 +1467,7 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
     except BaseException as error:  # noqa: BLE001 - task must capture authored failures
         return SimulatorTask(error=error)
     finally:
+        _restore_generic_placeholders(namespace, placeholders)
         for key in ("action", "arguments"):
             info.pop(key, None)
         info.update(old)
@@ -1348,6 +1627,7 @@ def bootstrap(
     preload_installed_modules()
     install_diagnostic_logging()
     install_attachment_filename_fallback()
+    install_pdf_skip_fallback()
     install_serialization_guard()
     _install_background_action_fallback(background_action_mode)
 
@@ -1453,6 +1733,7 @@ class SimulatorRuntime:
 
 __all__ = [
     "DEFAULT_CONFIG_TEXT",
+    "PDF_SKIP_DIAGNOSTIC",
     "PDF_UNAVAILABLE_MESSAGE",
     "FakeRedis",
     "PDFConversionUnavailable",
@@ -1468,6 +1749,7 @@ __all__ = [
     "install_attachment_filename_fallback",
     "install_diagnostic_logging",
     "install_fake_redis",
+    "install_pdf_skip_fallback",
     "neutralize_argv",
     "prepare_environment",
     "register_hooks",

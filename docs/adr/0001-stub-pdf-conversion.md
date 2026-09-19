@@ -18,6 +18,10 @@ converter.
 > **Partially superseded by [ADR-0006](0006-pdf-only-attachments-fail.md):**
 > PDF-only attachments now raise `PDFConversionUnavailable` instead of failing
 > silently. The mixed-format and no-external-converter behavior above stands.
+>
+> **Extended by [ADR-0011](0011-pdf-skip-docx-fallback.md):** AssemblyLine
+> document and bundle `as_pdf()` requests on DOCX-backed documents return the
+> DOCX rendering instead of seeking a missing generated `pdf` attribute.
 
 ## Plan
 

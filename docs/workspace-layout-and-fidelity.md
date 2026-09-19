@@ -178,9 +178,11 @@ actions. It substitutes no server database: AssemblyLine's PostgreSQL-backed
 session metadata is disabled by default and can be enabled only alongside a
 real `db` configuration. These are simulator stubs and are not PostgreSQL,
 Redis, Celery, or server storage. DOCX output is supported; generated PDF
-conversion is unavailable, no converter is invoked, and PDF-only download
-verification is deferred to a real deployment/staging environment. Run `info`
-for this report or `config --json` for redacted settings and pass-through keys.
+conversion is unavailable, a generated-PDF request is satisfied with the DOCX
+rendering (with a `pdf-skip` diagnostic), no converter is invoked, and real
+PDF download verification is deferred to a deployment/staging environment. Run
+`info` for this report or `config --json` for redacted settings and
+pass-through keys.
 The default categories are: fake Redis and foreground actions are in-process
 stubs; database-backed session features are a capability boundary; generated
 files are local filesystem behavior; debug/host/locale/country and timezone are

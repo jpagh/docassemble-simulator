@@ -62,6 +62,7 @@ class LocalFileRegistry:
             files = index.setdefault("files", {})
             files[str(number)] = {
                 "path": str(destination),
+                "fullpath": str(destination),
                 "filename": Path(filename).name,
                 "extension": extension,
                 "mimetype": mimetype,
@@ -71,12 +72,55 @@ class LocalFileRegistry:
             self._write_index(index)
         return number, extension, mimetype
 
+    def reserve(self, filename: str, extension: str | None = None) -> tuple[int, str]:
+        """Allocate a number and path for a file the caller will create locally.
+
+        docassemble's ``DAFile.initialize()`` allocates a new numbered file
+        through the server before its content is written.  The simulator backs
+        that seam with this registry so generated DOCX bundles, merged
+        documents, and ZIP archives become ordinary published files once the
+        caller writes to the reserved path.
+        """
+        suffix = Path(filename).suffix or (f".{extension}" if extension else "")
+        resolved_extension = (extension or suffix.lstrip(".")).lower()
+        mimetype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with flock(self.lock_path):
+            index = self._read_index()
+            number = int(index.get("next", 1))
+            index["next"] = number + 1
+            destination = self.directory / f"dasimulator-{number}{suffix}"
+            index.setdefault("files", {})[str(number)] = {
+                "path": str(destination),
+                "fullpath": str(destination),
+                "filename": Path(filename).name,
+                "extension": resolved_extension,
+                "mimetype": mimetype,
+                "persistent": False,
+                "private": True,
+            }
+            self._write_index(index)
+        return number, str(destination)
+
+    def remove(self, file_number: int) -> None:
+        """Forget a numbered file and delete its local artifact if present."""
+        with flock(self.lock_path):
+            index = self._read_index()
+            entry = index.get("files", {}).pop(str(file_number), None)
+            self._write_index(index)
+        if isinstance(entry, dict) and entry.get("path"):
+            Path(entry["path"]).unlink(missing_ok=True)
+
     def find(self, file_number: int, filename: str | None = None) -> dict | None:
         with flock(self.lock_path):
             value = self._read_index().get("files", {}).get(str(file_number))
         if not isinstance(value, dict):
             return None
         found = dict(value)
+        # Index files written before ``fullpath`` existed still resolve for
+        # docassemble's DAFile.path(), which reads the fullpath key.
+        if "fullpath" not in found and found.get("path"):
+            found["fullpath"] = found["path"]
         if filename:
             found["filename"] = Path(filename).name
         return found
@@ -130,6 +174,7 @@ class LocalFileRegistry:
                 extension = match.group(2).lstrip(".").lower()
                 files[str(number)] = {
                     "path": str(path.resolve()),
+                    "fullpath": str(path.resolve()),
                     "filename": path.name,
                     "extension": extension,
                     "mimetype": mimetypes.guess_type(path.name)[0]

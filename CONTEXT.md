@@ -15,3 +15,4 @@
 - **Snapshot**: A versioned, interview-specific namespace capture used as an explicit render source; it is not a saved session.
 - **Artifact**: A successfully rendered DOCX written to an explicit target path.
 - **Published attachment**: A generated local interview file exposed to the user as a logical download result; intermediate rendering files are not published attachments.
+- **PDF skip**: The simulator policy that satisfies a generated-PDF request for a DOCX-backed document with that document's DOCX rendering instead of failing the flow; it never fabricates a PDF, never invokes a converter, and records a `pdf-skip` diagnostic.

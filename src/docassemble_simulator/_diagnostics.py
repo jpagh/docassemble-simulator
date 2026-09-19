@@ -48,6 +48,16 @@ def is_collecting() -> bool:
     return _ACTIVE.get() is not None
 
 
+def record_diagnostic(
+    kind: str, message: str, details: dict[str, Any] | None = None
+) -> None:
+    """Record one non-fatal fact for the active operation, if any."""
+    collected = _ACTIVE.get()
+    if collected is None or not _ENABLED:
+        return
+    collected.append(Diagnostic(kind, message, details or {}))
+
+
 def record_seeking(stages: list[Any] | None) -> None:
     """Convert docassemble's native seeking trace into typed diagnostics."""
     collected = _ACTIVE.get()
@@ -95,6 +105,7 @@ __all__ = [
     "is_capture_enabled",
     "is_collecting",
     "is_lazy_seek_log",
+    "record_diagnostic",
     "record_seeking",
     "set_capture_enabled",
 ]

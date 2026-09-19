@@ -310,6 +310,53 @@ def real_workspace(tmp_path, real_python):
         "code: |\n"
         "  no_such_variable_xyz\n"
     )
+    (questions / "al-bundle.yml").write_text(
+        "---\n"
+        "include:\n"
+        "  - docassemble.AssemblyLine:assembly_line.yml\n"
+        "---\n"
+        "objects:\n"
+        "  - test_doc: ALDocument.using(title='Test', filename='test', "
+        "enabled=True, has_addendum=False)\n"
+        "  - test_doc2: ALDocument.using(title='Test Two', filename='test2', "
+        "enabled=True, has_addendum=False)\n"
+        "  - test_bundle: ALDocumentBundle.using(title='Bundle', "
+        "filename='bundle', elements=[test_doc, test_doc2])\n"
+        "---\n"
+        "attachment:\n"
+        "  name: Test document\n"
+        "  variable name: test_doc[i]\n"
+        "  docx template file: bundle.docx\n"
+        "---\n"
+        "attachment:\n"
+        "  name: Test document two\n"
+        "  variable name: test_doc2[i]\n"
+        "  docx template file: bundle.docx\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Name\n"
+        "fields:\n"
+        "  - Name: bundle_user_name\n"
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  test_bundle.generate_downloads_task = background_action("
+        "test_bundle.attr_name('create_downloads'))\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Waiting\n"
+        "subquestion: |\n"
+        "  ready: ${ test_bundle.generate_downloads_task.ready() }\n"
+        "fields:\n"
+        "  - Task ready: bundle_task_ready\n"
+        "    required: False\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Done\n"
+        "subquestion: |\n"
+        "  ${ test_bundle.download_list_html(format='pdf', include_zip=True, "
+        "include_full_pdf=True, zip_format='pdf', zip_include_pdf=True) }\n"
+    )
     generator = """
 import sys
 from pathlib import Path
@@ -319,6 +366,7 @@ templates = Path(sys.argv[1])
 contents = {
     "helpers.docx": "{{ currency(1234.5) }}|{{ redact('secret') }}|{{ nice_number(2) }}|{{ capitalize('hello') }}|{{ declared_helper('x') }}|{{ format_date(as_datetime('2026-08-26'), 'MM/dd/yyyy') }}",
     "date.docx": "{{ filing_date.format('MM/dd/yyyy') }}|{{ caption }}",
+    "bundle.docx": "Generated bundle document for {{ bundle_user_name }}.",
 }
 for name, text in contents.items():
     document = Document()
@@ -1063,6 +1111,77 @@ def test_generated_attachment_has_durable_local_uri_and_manifest(
     )
     assert refreshed["ok"], label
     assert refreshed["attachments"][0]["uri"] == attachment["uri"], label
+
+
+def test_assemblyline_bundle_pdf_requests_skip_to_docx(family_python, real_workspace):
+    """A PDF bundle request produces DOCX artifacts instead of stalling.
+
+    The interview asks AssemblyLine's ``create_downloads`` background event for
+    a PDF bundle.  The simulator has no PDF converter, so the bundle must
+    complete with the real DOCX renderings, a DOCX ZIP, and a DOCX merge; no
+    ``.pdf`` artifact and no unresolved ``....pdf`` seek may appear.
+    """
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    if not _assemblyline_available(interpreter):
+        pytest.skip(f"AssemblyLine is not provisioned for {label}")
+    _assert_family_interpreter(case)
+    root = real_workspace
+
+    started = _run(interpreter, root, "start", "--interview", "al-bundle.yml")
+    assert started["ok"], label
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "bundle_user_name=Simulator",
+        "--interview",
+        "al-bundle.yml",
+    )
+    assert answered["ok"], label
+    assert answered["result"]["kind"] == "question", label
+    assert any(
+        item["kind"] == "pdf-skip" for item in answered.get("diagnostics", [])
+    ), label
+
+    ready = _run(
+        interpreter,
+        root,
+        "eval",
+        "test_bundle.generate_downloads_task.ready()",
+        "--interview",
+        "al-bundle.yml",
+    )
+    assert ready["result"]["value"] == "True", label
+    failed = _run(
+        interpreter,
+        root,
+        "eval",
+        "test_bundle.generate_downloads_task.failed()",
+        "--interview",
+        "al-bundle.yml",
+    )
+    assert failed["result"]["value"] == "False", label
+
+    done = _run(
+        interpreter,
+        root,
+        "answer",
+        "bundle_task_ready=True",
+        "--interview",
+        "al-bundle.yml",
+    )
+    assert done["ok"], label
+    html = done["result"]["subquestion_text"]
+    assert "file://" in html, label
+    assert ".docx" in html, label
+    assert ".zip" in html, label
+    assert ".pdf" not in html.lower(), label
+    published = {item["extension"] for item in done["attachments"]}
+    assert "docx" in published, label
+    files = sorted(path.suffix for path in (root / ".simulator" / "files").glob("*"))
+    assert ".pdf" not in files, label
+    assert ".docx" in files and ".zip" in files, label
 
 
 def test_real_date_answer_formats_and_rejections_roll_back(

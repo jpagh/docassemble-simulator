@@ -7,6 +7,7 @@ small import-compatible façade for callers that still use its names.
 
 from docassemble_simulator._runtime import (
     DEFAULT_CONFIG_TEXT,
+    PDF_SKIP_DIAGNOSTIC,
     PDF_UNAVAILABLE_MESSAGE,
     FakeRedis,
     PDFConversionUnavailable,
@@ -21,6 +22,7 @@ from docassemble_simulator._runtime import (
     install_attachment_filename_fallback,
     install_diagnostic_logging,
     install_fake_redis,
+    install_pdf_skip_fallback,
     neutralize_argv,
     prepare_environment,
     register_hooks,
@@ -28,6 +30,7 @@ from docassemble_simulator._runtime import (
 
 __all__ = [
     "DEFAULT_CONFIG_TEXT",
+    "PDF_SKIP_DIAGNOSTIC",
     "PDF_UNAVAILABLE_MESSAGE",
     "FakeRedis",
     "PDFConversionUnavailable",
@@ -42,6 +45,7 @@ __all__ = [
     "install_attachment_filename_fallback",
     "install_diagnostic_logging",
     "install_fake_redis",
+    "install_pdf_skip_fallback",
     "neutralize_argv",
     "prepare_environment",
     "register_hooks",

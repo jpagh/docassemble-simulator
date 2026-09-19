@@ -33,6 +33,7 @@ from docassemble_simulator._artifacts import (
 from docassemble_simulator._runtime import (
     SimulatorRuntime,
     _configured_timezone,
+    _SimulatorSavedFile,
     _without_pdf_conversion,
     install_attachment_filename_fallback,
     register_hooks,
@@ -661,6 +662,34 @@ class TestBootstrapConfig:
 
 
 class TestLocalAttachments:
+    def test_registry_reserve_and_saved_file_materialize_local_path(self, tmp_path):
+        with SimulatorRuntime().activate(tmp_path):
+            registry = LocalFileRegistry(tmp_path / ".simulator" / "files")
+            number, path = registry.reserve("Merged Bundle.docx")
+
+            assert number == 1
+            assert not Path(path).exists()
+            metadata = registry.find(number)
+            assert metadata["fullpath"] == path
+            assert metadata["filename"] == "Merged Bundle.docx"
+            assert metadata["extension"] == "docx"
+
+            _SimulatorSavedFile(number, extension="docx").save()
+            assert Path(path).is_file()
+            assert registry.find(number)["fullpath"] == path
+
+            _SimulatorSavedFile(number).delete()
+            assert not Path(path).exists()
+            assert registry.find(number) is None
+
+    def test_registry_reserve_preserves_zip_extension(self, tmp_path):
+        registry = LocalFileRegistry(tmp_path / ".simulator" / "files")
+        number, path = registry.reserve("bundle.zip")
+
+        assert path.endswith(f"dasimulator-{number}.zip")
+        assert registry.find(number)["extension"] == "zip"
+        assert registry.find(number)["mimetype"] == "application/zip"
+
     def test_registry_survives_process_shaped_reconstruction_and_publishes_uri(
         self, tmp_path
     ):
@@ -871,6 +900,39 @@ class TestForegroundBackgroundActions:
         assert task.ready() and not task.failed()
         assert task.get() == "done"
         assert thread.current_info == {}
+
+    def test_foreground_task_restores_generic_placeholders(self, monkeypatch, tmp_path):
+        """Nested attachment questions must not rebind the caller's ``x``."""
+        from docassemble_simulator import _runtime as runtime_module
+
+        outer_bundle = types.SimpleNamespace(instanceName="al_user_bundle")
+        attachment_object = types.SimpleNamespace(instanceName="client")
+
+        def clobbering_askfor(*args, **kwargs):
+            thread.current_dict["x"] = attachment_object
+            thread.current_dict["i"] = 7
+            return {
+                "question": types.SimpleNamespace(
+                    question_type="backgroundresponse", backgroundresponse="ok"
+                )
+            }
+
+        thread = types.SimpleNamespace(
+            current_dict={"x": outer_bundle, "value": 1},
+            current_info={},
+            interview_status=object(),
+            interview=types.SimpleNamespace(askfor=clobbering_askfor),
+        )
+        functions, _ = _stub_legacy_without_background(monkeypatch, this_thread=thread)
+        with runtime_module.SimulatorRuntime().activate(
+            tmp_path, background_action_mode="foreground"
+        ):
+            runtime_module._install_background_action_fallback("foreground")
+            task = functions.server.bg_action("event")
+
+        assert task.get() == "ok"
+        assert thread.current_dict["x"] is outer_bundle
+        assert "i" not in thread.current_dict
 
     def test_disabled_mode_retains_pending_task(self, monkeypatch, tmp_path):
         from docassemble_simulator import _runtime as runtime_module
