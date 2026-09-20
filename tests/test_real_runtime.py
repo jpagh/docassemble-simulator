@@ -1471,6 +1471,11 @@ WHOLE_SCREEN_FIXTURE = (
     "    choices:\n"
     "      - Housing: housing\n"
     "      - Benefits: benefits\n"
+    "  - Required topics: required_topics\n"
+    "    datatype: checkboxes\n"
+    "    choices:\n"
+    "      - Housing: housing\n"
+    "      - Benefits: benefits\n"
     "  - Maybe: maybe\n"
     "    datatype: yesnomaybe\n"
     "    required: False\n"
@@ -1552,7 +1557,29 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
         "off_screen" in item for item in off_screen["error"]["details"]["errors"]
     ), label
 
-    accepted = _run(interpreter, root, "answer", "person_name=Alice")
+    # A required checkbox group with every choice false cannot be submitted;
+    # the browser requires at least one checked option.
+    no_selection = _run(
+        interpreter,
+        root,
+        "answer",
+        "person_name=Alice",
+        'required_topics={"housing": false, "benefits": false}',
+        expected_code=2,
+    )
+    assert no_selection["error"]["kind"] == "validation", (label, no_selection)
+    assert any(
+        "required_topics" in item and "at least one" in item
+        for item in no_selection["error"]["details"]["errors"]
+    ), label
+
+    accepted = _run(
+        interpreter,
+        root,
+        "answer",
+        "person_name=Alice",
+        'required_topics={"housing": true}',
+    )
     assert accepted["ok"], label
     # Optional fields were submitted as browser blanks, so the flow reaches the
     # summary instead of re-seeking the same screen.
@@ -1635,6 +1662,7 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
         root,
         "answer",
         "person_name=Alice",
+        'required_topics={"housing": true}',
         "count=",
         "ratio=",
         "agree=",

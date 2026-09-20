@@ -98,6 +98,13 @@ class PicklableStubObject(SimpleNamespace):
         super().__init__(instanceName=instanceName, **values)
 
 
+class PicklableStubDict(SimpleNamespace):
+    """A stub DADict that can cross the session pickle boundary."""
+
+    def __init__(self, *, elements=None):
+        super().__init__(elements={} if elements is None else elements)
+
+
 class PicklableEmpty:
     """A stub DAEmpty that can cross the session pickle boundary."""
 
@@ -258,6 +265,49 @@ class BadDefaultDateInterview(MixedRequirementInterview):
             required=False,
             default="not-a-date",
         )
+
+
+class CheckboxGroupInterview(FakeInterview):
+    """A required checkbox group beside an optional one on the same screen."""
+
+    CHOICES: ClassVar[list[dict]] = [
+        {"key": "housing", "label": "Housing"},
+        {"key": "benefits", "label": "Benefits"},
+    ]
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="x.service_type", datatype="text", required=True
+                ),
+                SimpleNamespace(
+                    saveas="x.topics",
+                    datatype="checkboxes",
+                    required=True,
+                    choices=self.CHOICES,
+                ),
+                SimpleNamespace(
+                    saveas="x.optional_topics",
+                    datatype="checkboxes",
+                    required=False,
+                    choices=self.CHOICES,
+                ),
+            ],
+        )
+        interview_status.question_text = "Topics"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.service_type"
+        interview_status.orig_sought = "rav.service_type"
+        interview_status.selectcompute = {}
 
 
 class BooleanStyleInterview(FakeInterview):
@@ -1091,6 +1141,48 @@ def test_answer_coerces_empty_submitted_values_per_datatype(
     assert execution.run(Evaluate("rav.count")).result["value"] == "0"
     assert execution.run(Evaluate("rav.ratio")).result["value"] == "0.0"
     assert execution.run(Evaluate("rav.agree is None")).result["value"] == "True"
+
+
+def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, CheckboxGroupInterview
+    )
+    util = sys.modules["docassemble.base.util"]
+    monkeypatch.setattr(util, "DAObject", PicklableStubObject)
+    monkeypatch.setattr(util, "DADict", PicklableStubDict)
+    assert execution.run(Start()).ok
+
+    for raw in ('{"housing": false, "benefits": false}', "{}"):
+        before = _session_bytes(tmp_path)
+        rejected = execution.run(
+            Answer((("x.service_type", "Electronic"), ("x.topics", raw)))
+        )
+
+        assert not rejected.ok, raw
+        assert rejected.error.kind == "validation", raw
+        assert any("x.topics" in item for item in rejected.error.details["errors"]), raw
+        assert any(
+            "at least one" in item for item in rejected.error.details["errors"]
+        ), raw
+        assert _session_bytes(tmp_path) == before, raw
+
+    accepted = execution.run(
+        Answer(
+            (
+                ("x.service_type", "Electronic"),
+                ("x.topics", '{"housing": true}'),
+            )
+        )
+    )
+
+    assert accepted.ok, accepted.error
+    topics_value = execution.run(Evaluate("rav.topics.elements"))
+    assert topics_value.ok, topics_value.error
+    assert topics_value.result["value"] == "{'housing': True}"
+    # The optional group still takes its all-false browser blank.
+    optional_value = execution.run(Evaluate("rav.optional_topics.elements"))
+    assert optional_value.ok, optional_value.error
+    assert optional_value.result["value"] == ("{'housing': False, 'benefits': False}")
 
 
 def test_answer_falls_back_when_a_default_cannot_be_applied(

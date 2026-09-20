@@ -78,7 +78,8 @@ docassemble-simulator seek M.family --activate
   selections, the unchecked value for checkbox-style `yesno`/`noyes`, and an
   all-false dictionary for checkbox groups), so the same `sets:` question is
   not re-asked for each variable. Visible required fields left blank, or
-  explicitly emptied (`field=` or `field=None`), reject the submission.
+  explicitly emptied (`field=` or `field=None`), reject the submission, and a
+  required checkbox group needs at least one true selection.
   Hidden `show if` fields are neither assigned nor required, and signature
   fields become `DAEmpty()` so documents still render.
   Fields that are not on the active screen are rejected; use `exec` for

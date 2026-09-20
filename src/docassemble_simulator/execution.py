@@ -1150,6 +1150,11 @@ def _answerable_fields(screen):
 
 
 def _required_message(variable, reason):
+    if reason == "unselected":
+        return (
+            f"required field '{variable}' has no selected option "
+            "(the browser would require at least one)"
+        )
     state = "empty" if reason == "empty" else "undefined"
     return (
         f"required field '{variable}' is {state} "
@@ -1205,6 +1210,32 @@ def _is_empty_value(value):
     return isinstance(value, str) and value == ""
 
 
+#: Multiple-choice group datatypes the browser refuses to submit empty when
+#: the field is required ("check at least one option").
+_CHECKBOX_GROUP_DATATYPES = frozenset({"checkboxes", "multiselect"})
+_OBJECT_GROUP_DATATYPES = frozenset({"object_checkboxes", "object_multiselect"})
+_GROUP_DATATYPES = _CHECKBOX_GROUP_DATATYPES | _OBJECT_GROUP_DATATYPES
+
+
+def _has_no_selected_option(value) -> bool:
+    """Whether a group value holds no truthy selection.
+
+    docassemble stores groups as ``DADict``/``DAList`` objects; their
+    ``elements`` are read directly so evaluating the required gate never
+    triggers gathering. Plain mappings and sequences are accepted too.
+    """
+    elements = getattr(value, "elements", None)
+    if isinstance(elements, dict):
+        return not any(bool(item) for item in elements.values())
+    if isinstance(elements, (list, tuple, set)):
+        return not elements
+    if isinstance(value, dict):
+        return not any(bool(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return not value
+    return False
+
+
 def _required_violations(namespace, screen, blank_submissions):
     """Return ``(variable, reason)`` for required visible fields that are not
     answered. Signatures are never required; hidden fields are not shown and
@@ -1217,7 +1248,8 @@ def _required_violations(namespace, screen, blank_submissions):
             continue
         if field.get("visible") is False:
             continue
-        if str(field.get("type", "")).lower() == "signature":
+        datatype = str(field.get("type", "")).lower()
+        if datatype == "signature":
             continue
         if field.get("required") is False:
             continue
@@ -1226,6 +1258,8 @@ def _required_violations(namespace, screen, blank_submissions):
             violations.append((variable, "undefined"))
         elif variable in blank_submissions or _is_empty_value(value):
             violations.append((variable, "empty"))
+        elif datatype in _GROUP_DATATYPES and _has_no_selected_option(value):
+            violations.append((variable, "unselected"))
     return violations
 
 
@@ -1313,11 +1347,11 @@ def _browser_blank(field):
         return input_type.startswith("noyes")
     if datatype in {"threestate", "object", "object_radio", "file"}:
         return None
-    if datatype in {"object_multiselect", "object_checkboxes"}:
+    if datatype in _OBJECT_GROUP_DATATYPES:
         # Object selections need runtime initialisation; a fabricated empty
         # object could corrupt interview logic, so leave it undefined.
         return _NO_BLANK
-    if datatype in {"checkboxes", "multiselect"}:
+    if datatype in _CHECKBOX_GROUP_DATATYPES:
         values = [
             choice.get("value")
             for choice in field.get("choices") or []

@@ -20,7 +20,7 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
     hidden input); an untouched checkbox group becomes an all-false `DADict`;
     and an untouched file field becomes `None`. A rendered default that cannot
     be applied falls back to the datatype's blank,
-  - remaining visible required fields reject the submission as a `validation` failure naming each field.
+  - remaining visible required fields reject the submission as a `validation` failure naming each field. A required multiple-choice group (`checkboxes`, `multiselect`, `object_checkboxes`, `object_multiselect`) is empty when it holds no true selection, mirroring the browser's "check at least one option" rule; the submission is rejected with the same naming.
 - The submission is scoped to the fields the screen described, including resolved generic-object targets (`x.date` and `rav.date`). A variable that is not on the active screen is an `answer-input` failure. Screens with no described fields (continue, field-less deadend) keep accepting explicit assignments; `exec` remains the escape hatch for deliberate state surgery.
 - `answer --partial` restores the previous per-field behavior: only the submitted fields are applied, missing required fields become warnings, and lazy re-seeking may re-present the same screen. `--strict` keeps promoting those warnings to errors.
 - `--no-validate` skips only the interview's `validation code`. The required-field gate and blank/default synthesis still apply because they are part of a form submission, not validation code. `--partial` is the explicit opt-out.
@@ -37,7 +37,6 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
 ## Known gaps
 
 - `object_multiselect` and `object_checkboxes`, and custom datatypes, are left undefined because a fabricated empty object or value can corrupt interview logic; the flow may re-seek those optional fields.
-- A required checkbox group whose choices are all false passes the required gate; a browser additionally enforces "check at least one option", which is not yet mirrored.
 
 ## Considered options
 
