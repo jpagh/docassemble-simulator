@@ -1,6 +1,6 @@
 [project]
     name            = "docassemble-simulator"
-    version         = "26.9.0"
+    version         = "26.9.1"
     description     = "Run docassemble interviews locally without a server: a CLI for humans and AI agents to load, step through, answer, and debug interviews."
     readme          = "README.md"
     requires-python = ">=3.11"
