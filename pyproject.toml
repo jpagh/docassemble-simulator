@@ -3,20 +3,20 @@
     version         = "26.9.0"
     description     = "Run docassemble interviews locally without a server: a CLI for humans and AI agents to load, step through, answer, and debug interviews."
     readme          = "README.md"
+    requires-python = ">=3.11"
     license         = "MIT"
     license-files   = ["LICENSE"]
-    requires-python = ">=3.11"
     authors         = [{ name = "Jack Adamson", email = "jackadamson@gmail.com" }]
     dependencies    = [
         "pyyaml>=6.0.3",
     ]
 
+    [project.urls]
+        Repository = "https://github.com/jpagh/docassemble-simulator"
+
     [project.scripts]
         docassemble-simulator = "docassemble_simulator.cli:main"
         sim                   = "docassemble_simulator.cli:main"
-
-[project.urls]
-    Repository = "https://github.com/jpagh/docassemble-simulator"
 
 [dependency-groups]
     dev   = [
