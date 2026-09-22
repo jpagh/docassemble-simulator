@@ -446,26 +446,22 @@ def _trace_metadata(args, root):
 def _record_execution(args, root, execution, operation, payload):
     """Append the operation's screen outcome to the requested trace sidecar."""
     from docassemble_simulator.execution import Status
-    from docassemble_simulator.trace import append_trace
+    from docassemble_simulator.trace import append_trace, is_screen_outcome
 
     screen = None
     if payload.get("ok"):
-        result = payload.get("result")
-        if isinstance(result, dict) and "kind" in result:
-            screen = result
+        if is_screen_outcome(payload.get("result")):
+            screen = payload["result"]
     else:
         # A failed operation leaves the active screen untouched; the sidecar
-        # still records which screen the user was looking at.
+        # still records which screen the user was looking at. A stored error
+        # outcome is the failure itself, not a screen, so it is left for the
+        # error identity below.
         try:
             status = execution.run(Status())
         except Exception:  # noqa: BLE001 - a missing session is not a record failure
             status = None
-        if (
-            status is not None
-            and status.ok
-            and isinstance(status.result, dict)
-            and "kind" in status.result
-        ):
+        if status is not None and status.ok and is_screen_outcome(status.result):
             screen = status.result
     if screen is None and payload.get("ok"):
         return
@@ -915,7 +911,9 @@ def build_parser():
         "--phases",
         metavar="P1,P2,...",
         help=(
-            "declared phase order for --order phased, e.g. intake,documents,download"
+            "declared phase order for --order phased, e.g. "
+            "intake,documents,download; without it the golden's recorded order "
+            "is used"
         ),
     )
     trace_compare.add_argument(

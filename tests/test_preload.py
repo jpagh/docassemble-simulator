@@ -52,45 +52,57 @@ def _package_tree(tmp_path: Path) -> Path:
     return root
 
 
-def test_candidate_modules_mirror_the_webapp_scan(tmp_path):
-    root = _package_tree(tmp_path)
-
-    candidates = set(_preload._candidate_modules({}, [root]))
-
-    assert candidates == {
-        "docassemble.pkg.optin",
-        "docassemble.pkg.update",
-        "docassemble.pkg.withclass",
-    }
+def _preload_tree(root, monkeypatch, config):
+    """Make a stub package tree the target of the preload entrypoint."""
+    monkeypatch.syspath_prepend(str(root.parent))
+    monkeypatch.setattr(_preload, "_package_directories", lambda: [root])
+    monkeypatch.setattr(_preload, "_effective_config", lambda: config)
+    monkeypatch.setattr(_preload, "_runtime_available", lambda: False)
+    purge_docassemble_modules(monkeypatch)
 
 
-def test_whitelist_and_blacklist_control_candidates(tmp_path):
-    root = _package_tree(tmp_path)
+def test_preload_imports_opted_in_modules_and_skips_the_rest(
+    tmp_path, monkeypatch, imported_modules
+):
+    _preload_tree(_package_tree(tmp_path), monkeypatch, {})
 
-    whitelisted = set(
-        _preload._candidate_modules({"module whitelist": ["docassemble.pkg.*"]}, [root])
+    assert _preload.preload_installed_modules() == ()
+
+    assert "docassemble.pkg.withclass" in sys.modules
+    assert "docassemble.pkg.optin" in sys.modules
+    assert "docassemble.pkg.update" in sys.modules
+    assert "docassemble.pkg.donotload" not in sys.modules
+    assert "docassemble.base.ignored" not in sys.modules
+
+
+def test_whitelisted_modules_are_imported(tmp_path, monkeypatch, imported_modules):
+    _preload_tree(
+        _package_tree(tmp_path),
+        monkeypatch,
+        {"module whitelist": ["docassemble.pkg.*"]},
     )
-    assert "docassemble.pkg.donotload" in whitelisted
-    assert "docassemble.pkg.withclass" in whitelisted
 
-    blacklisted = set(
-        _preload._candidate_modules(
-            {"module blacklist": ["docassemble.pkg.update"]}, [root]
-        )
+    assert _preload.preload_installed_modules() == ()
+    assert "docassemble.pkg.donotload" in sys.modules
+    assert "docassemble.pkg.withclass" in sys.modules
+
+
+def test_blacklisted_modules_are_not_imported(tmp_path, monkeypatch, imported_modules):
+    _preload_tree(
+        _package_tree(tmp_path),
+        monkeypatch,
+        {"module blacklist": ["docassemble.pkg.update"]},
     )
-    assert "docassemble.pkg.update" not in blacklisted
-    assert "docassemble.pkg.withclass" in blacklisted
+
+    assert _preload.preload_installed_modules() == ()
+    assert "docassemble.pkg.update" not in sys.modules
+    assert "docassemble.pkg.withclass" in sys.modules
 
 
 def test_preload_imports_class_modules_and_skips_opt_outs(
     tmp_path, monkeypatch, imported_modules
 ):
-    root = _package_tree(tmp_path)
-    monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setattr(_preload, "_package_directories", lambda: [root])
-    monkeypatch.setattr(_preload, "_effective_config", dict)
-    monkeypatch.setattr(_preload, "_runtime_available", lambda: False)
-    purge_docassemble_modules(monkeypatch)
+    _preload_tree(_package_tree(tmp_path), monkeypatch, {})
 
     failures = _preload.preload_installed_modules()
 
@@ -106,10 +118,7 @@ def test_preload_failures_are_reported_but_not_fatal(
     (root / "pkg" / "broken.py").write_text(
         "raise RuntimeError('boom')\nclass AlsoBroken:\n    pass\n"
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setattr(_preload, "_package_directories", lambda: [root])
-    monkeypatch.setattr(_preload, "_effective_config", dict)
-    purge_docassemble_modules(monkeypatch)
+    _preload_tree(root, monkeypatch, {})
 
     failures = _preload.preload_installed_modules()
 

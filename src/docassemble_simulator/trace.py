@@ -30,6 +30,7 @@ __all__ = [
     "append_trace",
     "compare_traces",
     "error_identity",
+    "is_screen_outcome",
     "load_exceptions",
     "load_trace",
     "screen_content",
@@ -130,7 +131,14 @@ def screen_content(screen: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 
 
 def screen_identity(screen: dict[str, Any]) -> ScreenIdentity:
-    """Derive the canonical identity of a screen outcome."""
+    """Derive the canonical identity of a screen outcome.
+
+    A failure outcome is never a screen, so an error envelope yields the
+    ``error:`` identity instead of a ``screen:error`` category key. Screens
+    that carry no ``kind`` are derived as before.
+    """
+    if "kind" in screen and not is_screen_outcome(screen):
+        return error_identity(screen)
     question_name = screen.get("question_name")
     if isinstance(question_name, str) and question_name.startswith(EXPLICIT_ID_PREFIX):
         return ScreenIdentity(
@@ -308,14 +316,33 @@ class ScreenTrace:
     entries: tuple[TraceEntry, ...]
 
 
+def is_screen_outcome(outcome: Any) -> bool:
+    """Whether an outcome value may be treated as a screen the user saw.
+
+    An outcome whose ``kind`` is ``error`` is a failure outcome, not a screen;
+    capture and identity derivation share this one rule so a stored error can
+    never be recorded as a screen.
+    """
+    return (
+        isinstance(outcome, dict)
+        and "kind" in outcome
+        and outcome.get("kind") != "error"
+    )
+
+
 def error_identity(error: dict[str, Any]) -> ScreenIdentity:
-    """Derive an identity for a failure with no active screen."""
+    """Derive an identity for a failure with no active screen.
+
+    The failure kind and sought variable are read from the failure envelope's
+    nested ``details`` or from a bare error outcome, so both documented shapes
+    of an error produce the same key.
+    """
     kind = str(error.get("kind") or "error")
     details = error.get("details")
     details = details if isinstance(details, dict) else {}
-    failure_kind = str(details.get("failure_kind") or kind)
+    failure_kind = str(details.get("failure_kind") or error.get("failure_kind") or kind)
     if failure_kind == "unresolved-variable":
-        variable = details.get("sought_variable")
+        variable = details.get("sought_variable") or error.get("sought_variable")
         stable = (
             _stable_path(variable) if isinstance(variable, str) and variable else None
         )
@@ -323,6 +350,15 @@ def error_identity(error: dict[str, Any]) -> ScreenIdentity:
             return ScreenIdentity(f"error:unresolved:{stable}", "error")
         return ScreenIdentity("error:unresolved", "error")
     return ScreenIdentity(f"error:{failure_kind}", "error")
+
+
+def _screen_and_error(
+    screen: dict[str, Any] | None, error: dict[str, Any] | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Split a recorded outcome into a screen and a failure, if either applies."""
+    if screen is not None and not is_screen_outcome(screen):
+        return None, error if error is not None else screen
+    return screen, error
 
 
 def _compatible_metadata(expected: TraceMetadata, actual: TraceMetadata) -> None:
@@ -437,6 +473,7 @@ def append_trace(
         trace_path.write_text(
             json.dumps(metadata.as_dict(), sort_keys=True) + "\n", encoding="utf-8"
         )
+    screen, error = _screen_and_error(screen, error)
     identity = _assign_identity(screen, error, trace.entries, phase)
     entry = TraceEntry(
         seq=len(trace.entries) + 1,
@@ -831,9 +868,14 @@ def _phased_result(
         list(policy.phases) if policy.phases else list(expected.metadata.phase_order)
     )
     if not declared:
+        # The golden is the reference: when nothing declares an order, the
+        # order its own entries were recorded in is the declaration.
+        declared = _observed_phase_order(expected.entries)
+    if not declared:
         raise TraceError(
-            "phased comparison requires a declared phase order: pass the phases "
-            "explicitly or record entries with a phase"
+            "phased comparison requires a declared phase order: pass "
+            "--phases NAME,NAME or compare against a golden recorded with "
+            "--phase NAME"
         )
     for entry in (*expected.entries, *actual.entries):
         if entry.phase is None:

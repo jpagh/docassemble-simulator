@@ -16,6 +16,25 @@ End-to-end interview tests need to record which screens a run passed through and
 - Comparison supports `ordered`, `unordered` (a multiset), and `phased` (ordered groups of unordered multisets). `missing` and `extra` each take `strict` or `allow`, defaulting to strict; coverage counts are always reported. A trace mismatch is a typed `trace-mismatch` failure and exits 2.
 - `--update` is the only write path that rewrites a golden, and reviewed exceptions record known differences with a reason. Exceptions cannot excuse order violations or simulator faults.
 
+## Amendment
+
+Issue #9 clarified two points the original text left implicit, and the
+implementation now enforces them:
+
+- An outcome envelope whose `kind` is `error` is a failure outcome, never a
+  screen. A failed operation with no active screen is recorded with a null
+  screen and an `error:` identity derived from its error payload, whether the
+  failure kind arrives nested in `details` or at the top level of a bare error
+  outcome. `screen:error` is not a valid identity key. Capture and identity
+  derivation share one predicate for this rule so the adapter and the
+  canonicalizer cannot drift.
+- A phased comparison takes its phase declaration from an explicit override
+  first, then the golden's recorded `phase_order`, then the order the golden's
+  own entries were recorded in. `phase_order` remains reserved for
+  hand-written and driver-written traces: the CLI only ever serializes it as
+  an empty list, never a declaration, so no per-invocation flag can make the
+  metadata-mismatch rule fire.
+
 ## Considered options
 
 1. **Harness-level recording only.** Each test driver wraps the `--json` envelope and writes JSONL itself. Zero simulator changes, but the canonicalizer is duplicated per driver and the identity rule cannot be shared with a server lane.

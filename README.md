@@ -143,7 +143,10 @@ definition, config fingerprint, docassemble/AssemblyLine/simulator versions,
 and the trace schema version); appending to a trace whose metadata disagrees
 with the current run is an input error. A failed answer is recorded against
 the unchanged active screen with the rejected assignments, so validation
-re-asks appear as repeated occurrences of one identity.
+re-asks appear as repeated occurrences of one identity. A failure with no
+active screen is recorded as a failure instead: the entry keeps its error
+payload and carries an `error:` identity (`error:unresolved:<variable>` for an
+undefined reference), never a fabricated screen.
 
 Identity ignores generated `Question_<n>` names, resolved occurrence paths,
 random instance names, and rendered text. It falls back from explicit block
@@ -155,6 +158,10 @@ with every key.
 extra, duplicates) in every mode, so a tolerant policy cannot hide collapsing
 coverage. `--order unordered` treats the run as a multiset; `--order phased`
 requires declared phases in order while tolerating order within each phase.
+The declaration comes from `--phases` when given, else from the golden's
+recorded `phase_order`, else from the order the golden's own entries were
+recorded in — so a golden recorded with `--phase` compares in phased mode
+without repeating the list.
 `--missing allow` and `--extra allow` relax the default strict policies. Field
 facts are compared separately from identity; `--full-text` adds normalized
 question and subquestion text. Known differences belong in a reviewed

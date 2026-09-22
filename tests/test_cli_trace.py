@@ -140,6 +140,86 @@ def test_failed_answer_records_the_unchanged_active_screen(tmp_path, monkeypatch
     assert entry.submitted == {"user_name": "bad"}
 
 
+def test_failed_start_records_the_error_identity(tmp_path, monkeypatch):
+    failure = _outcome(
+        False,
+        error=Failure(
+            ErrorKind.UNRESOLVED_VARIABLE,
+            "name is undefined",
+            {
+                "failure_kind": "unresolved-variable",
+                "sought_variable": "clients[0].name",
+            },
+        ),
+    )
+    stored = _outcome(
+        True,
+        {
+            "kind": "error",
+            "failure_kind": "unresolved-variable",
+            "sought_variable": "clients[0].name",
+            "message": "name is undefined",
+        },
+    )
+    execution = _FakeExecution(failure, stored)
+    monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "run.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--json")
+
+    assert cli.cmd_execution(args, tmp_path) == 2
+
+    entry = load_trace(record).entries[0]
+    assert entry.ok is False
+    assert entry.identity == ScreenIdentity("error:unresolved:clients[i].name", "error")
+    assert entry.screen is None
+    assert entry.error is not None
+    assert entry.error["kind"] == "unresolved-variable"
+    assert entry.error["details"]["sought_variable"] == "clients[0].name"
+
+
+def test_recorded_phases_compare_without_repeating_the_declaration(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    golden = tmp_path / "golden.jsonl"
+    run = tmp_path / "run.jsonl"
+
+    def record_two_phases(path):
+        execution = _FakeExecution(
+            _outcome(True, _screen()), _outcome(True, _screen("ID done"))
+        )
+        monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+        monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+        for phase in ("intake", "download"):
+            args = _parse("start", "--record", str(path), "--phase", phase, "--json")
+            assert cli.cmd_execution(args, tmp_path) == 0
+
+    record_two_phases(golden)
+    record_two_phases(run)
+    capsys.readouterr()
+
+    code = cli.main(
+        [
+            "--json",
+            "trace",
+            "compare",
+            str(golden),
+            str(run),
+            "--order",
+            "phased",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["result"]["matched"] is True
+    assert [phase["phase"] for phase in payload["result"]["phases"]] == [
+        "intake",
+        "download",
+    ]
+
+
 def test_trace_compare_json_reports_a_match(tmp_path, capsys, monkeypatch):
     # Comparison reads only sidecars: no docassemble package or runtime needed.
     monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)

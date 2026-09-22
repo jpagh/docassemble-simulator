@@ -461,6 +461,86 @@ def test_phased_comparison_reports_phase_order_violations():
     assert any(diff.kind == "phase-order" for diff in comparison.diffs)
 
 
+def test_phased_comparison_declares_phases_from_the_golden():
+    expected = _trace(
+        _entry(1, "id:a", phase="intake"),
+        _entry(2, "id:b", phase="intake"),
+        _entry(3, "id:c", phase="download"),
+    )
+    actual = _trace(
+        _entry(1, "id:b", phase="intake"),
+        _entry(2, "id:a", phase="intake"),
+        _entry(3, "id:c", phase="download"),
+    )
+
+    comparison = compare_traces(expected, actual, ComparePolicy(order="phased"))
+
+    assert comparison.matched is True
+    assert [phase.phase for phase in comparison.phases] == ["intake", "download"]
+    assert comparison.phases[0].expected_count == 2
+
+
+def test_phased_comparison_honours_a_recorded_phase_order():
+    expected = _trace(
+        _entry(1, "id:a", phase="intake"),
+        _entry(2, "id:b", phase="download"),
+        metadata=_metadata(phase_order=("intake", "download")),
+    )
+    actual = _trace(
+        _entry(1, "id:b", phase="download"),
+        _entry(2, "id:a", phase="intake"),
+    )
+
+    comparison = compare_traces(expected, actual, ComparePolicy(order="phased"))
+
+    assert comparison.matched is False
+    assert any(diff.kind == "phase-order" for diff in comparison.diffs)
+
+
+def test_explicit_phase_declaration_overrides_the_golden():
+    expected = _trace(
+        _entry(1, "id:a", phase="intake"),
+        _entry(2, "id:b", phase="download"),
+        metadata=_metadata(phase_order=("intake", "download")),
+    )
+    actual = _trace(
+        _entry(1, "id:a", phase="intake"),
+        _entry(2, "id:b", phase="download"),
+    )
+
+    comparison = compare_traces(
+        expected, actual, ComparePolicy(order="phased", phases=("download", "intake"))
+    )
+
+    assert comparison.matched is False
+    assert any(diff.kind == "phase-order" for diff in comparison.diffs)
+
+
+def test_phased_comparison_requires_a_declaration_when_nothing_declares_phases():
+    trace = _trace(_entry(1, "id:a"))
+
+    with pytest.raises(TraceError, match="--phases"):
+        compare_traces(trace, trace, ComparePolicy(order="phased"))
+
+
+def test_a_phase_only_in_the_run_is_a_violation_with_extra_coverage():
+    expected = _trace(
+        _entry(1, "id:a", phase="intake"),
+        _entry(2, "id:b", phase="download"),
+    )
+    actual = _trace(
+        _entry(1, "id:a", phase="intake"),
+        _entry(2, "id:b", phase="download"),
+        _entry(3, "id:post", phase="post"),
+    )
+
+    comparison = compare_traces(expected, actual, ComparePolicy(order="phased"))
+
+    assert comparison.matched is False
+    assert any(diff.kind == "phase-order" for diff in comparison.diffs)
+    assert comparison.extra_count == 1
+
+
 def test_compare_rejects_mismatched_metadata():
     expected = _trace(_entry(1, "id:a"))
     actual = _trace(
@@ -623,3 +703,49 @@ def test_error_identity_never_emits_a_generated_instance_name():
     )
 
     assert identity == ScreenIdentity("error:unresolved", "error")
+
+
+def test_screen_identity_never_invents_a_screen_for_an_error_outcome():
+    identity = screen_identity(
+        {
+            "kind": "error",
+            "failure_kind": "unresolved-variable",
+            "sought_variable": "clients[0].name",
+        }
+    )
+
+    assert identity == ScreenIdentity("error:unresolved:clients[i].name", "error")
+
+
+def test_identity_derivation_does_not_require_a_kind_field():
+    assert screen_identity(
+        {"sought": "user_name", "orig_sought": "user_name"}
+    ) == ScreenIdentity("var:user_name", "targeted-variable")
+
+
+def test_error_identity_reads_a_bare_error_outcome():
+    identity = error_identity(
+        {
+            "kind": "error",
+            "failure_kind": "unresolved-variable",
+            "sought_variable": "clients[0].name",
+        }
+    )
+
+    assert identity == ScreenIdentity("error:unresolved:clients[i].name", "error")
+
+
+def test_append_trace_records_an_error_outcome_as_a_failure(tmp_path):
+    path = tmp_path / "run.trace.jsonl"
+    outcome = {
+        "kind": "error",
+        "failure_kind": "unresolved-variable",
+        "sought_variable": "clients[0].name",
+        "message": "name is undefined",
+    }
+
+    entry = append_trace(path, _metadata(), operation="start", ok=False, screen=outcome)
+
+    assert entry.identity == ScreenIdentity("error:unresolved:clients[i].name", "error")
+    assert entry.screen is None
+    assert entry.error == outcome

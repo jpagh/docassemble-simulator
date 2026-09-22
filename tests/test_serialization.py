@@ -91,14 +91,17 @@ def test_guard_leaves_plain_values_unchanged(monkeypatch):
 
 
 def test_guard_install_is_idempotent(monkeypatch):
-    functions, _ = _install_fake_safe_json(monkeypatch)
+    functions, calls = _install_fake_safe_json(monkeypatch)
 
     install_serialization_guard()
     guarded = functions.safe_json
     install_serialization_guard()
 
     assert functions.safe_json is guarded
-    assert guarded._dasimulator_bounded
+    node: dict = {}
+    node["self"] = node
+    assert functions.safe_json(node) == {"self": None}
+    assert len(calls) == 1
 
 
 def test_guard_is_noop_without_docassemble(monkeypatch):
