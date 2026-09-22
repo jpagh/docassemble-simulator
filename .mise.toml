@@ -13,9 +13,14 @@
     uv                     = "latest"
 
 [tasks.bump]
-    description = "Bump the patch digit (CalVer YY.MM.patch → YY.MM.patch+1) and push"
+    description = "Bump the patch digit (CalVer YY.MM.patch → YY.MM.patch+1) and push; no GitHub release"
     tools       = { node = "latest", uv = "latest" }
     run         = "bump-my-version bump patch && git push --follow-tags"
+
+[tasks.release]
+    description = "Bump the patch digit, push the commit and tag, and publish the GitHub release"
+    tools       = { gh = "latest", uv = "latest" }
+    run         = "scripts/release"
 
 [tasks.lint]
     description = "Lint with ruff, tombi, and pyrefly"
