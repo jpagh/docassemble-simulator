@@ -1,5 +1,8 @@
 # Code-review findings fix plan (PR #2)
 
+Status: implemented — historical record; the findings were fixed before PR #2
+merged.
+
 Review scope: `origin/main...HEAD` on `support-da19x` (11 commits), non-empty diff.
 Spec source: GitHub issue #1 (support end-to-end simulator execution on docassemble 1.9.x).
 Standards sources: `CONTEXT.md`, `docs/adr/0001`–`0005`.

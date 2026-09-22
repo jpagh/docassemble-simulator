@@ -1,5 +1,8 @@
 # Code-review findings fix plan 4 (PR #2)
 
+Status: implemented — historical record; the findings were fixed before PR #2
+merged.
+
 Review scope: `main...HEAD` on `support-da19x` (12 commits), two-axis review
 against issue #1 (spec) and `CONTEXT.md` + `docs/adr/0001`–`0006` (standards).
 

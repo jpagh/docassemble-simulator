@@ -1,12 +1,12 @@
 # Runtime-fidelity follow-up plan
 
-Status: proposal
+Status: implemented.
 Date: 2026-08-26
 
 ## Purpose
 
 Close the simulator gaps found while running the Georgia Estate Planning
-Interview in `/Users/jack/Lemma/docassemble-walkup`, while preserving the
+Interview in a private AssemblyLine target package, while preserving the
 boundary between behavior the simulator can provide locally and behavior that
 requires a real docassemble deployment.
 

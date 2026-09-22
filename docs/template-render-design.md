@@ -1,6 +1,6 @@
 # Template Render Command — Design
 
-Status: proposal, ready for implementation
+Status: implemented — v1 shipped as the render command; §9 remains explicit future work.
 Date: 2026-08-24
 Scope: add a `render` command to `docassemble-simulator` that renders a converted `.docx`
 template through the real docxtpl + docassemble Jinja pipeline, making the simulator a

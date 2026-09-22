@@ -1,9 +1,13 @@
 # Demo interview validation plan
 
+Status: implemented as a manual gate — the corpus runner, reviewed
+expectations, and provenance manifest ship with the repo; automated CI
+canaries remain absent because the project has no CI.
+
 ## Goal
 
 Exercise the simulator against every demo interview in
-`/Users/jack/Projects/docassemble-yaml/lsp/tests/fixtures/examples` and turn the
+`/path/to/docassemble-yaml/lsp/tests/fixtures/examples` and turn the
 results into a repeatable compatibility gate. The gate should distinguish a
 simulator defect from an interview that intentionally errors, requires a real
 server, or depends on an external service.
@@ -208,13 +212,13 @@ those behaviors.
 ```sh
 # Tiny smoke run while developing the runner
 scripts/test-demo-corpus \
-  --fixtures /Users/jack/Projects/docassemble-yaml/lsp/tests/fixtures \
+  --fixtures /path/to/docassemble-yaml/lsp/tests/fixtures \
   --match 'yesno.yml|fields.yml|attachment-simple.yml' \
   --compile --start
 
 # Full local run
 scripts/test-demo-corpus \
-  --fixtures /Users/jack/Projects/docassemble-yaml/lsp/tests/fixtures \
+  --fixtures /path/to/docassemble-yaml/lsp/tests/fixtures \
   --compile --start --output .simulator/demo-corpus-results
 ```
 

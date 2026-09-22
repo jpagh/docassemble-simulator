@@ -1,6 +1,8 @@
 # Render Follow-up — Agent-drive Fidelity, State Capture, Real-mode Includes
 
-Status: proposal, ready for implementation
+Status: implemented — all three gaps closed; the §6 acceptance criteria are
+covered by the render unit and contract tests, and the §5 real-package
+integration pass was manual.
 Date: 2026-08-24
 Scope: three follow-on gaps found while live-testing the `render` command
 (built from `docs/template-render-design.md`) against the

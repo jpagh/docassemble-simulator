@@ -2,7 +2,7 @@
 
 Status: implemented and verified; jda #2 is closed as superseded by the project-local integration model.
 
-Source: https://github.com/jpagh/jda/issues/2
+Source: jda issue #2 (private repository).
 
 ## Decision
 
@@ -28,7 +28,7 @@ In this repo:
 
 ## 3. Remove the jda integration
 
-In jpagh/jda:
+In the private jda project:
 
 - Remove `simulator` from optional dependencies and remove the simulator dependency from `all`; retain `all` as the remaining integrations aggregate, currently LSP only.
 - Remove the simulator proxy module, both command registrations, simulator-specific help/manual/capability entries, and forwarding tests.

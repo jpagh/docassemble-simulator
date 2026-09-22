@@ -1,5 +1,8 @@
 # Code-review findings fix plan (follow-up)
 
+Status: implemented — historical record; the findings were fixed before PR #2
+merged.
+
 Review scope: `main...HEAD` on `support-da19x` (5 commits), non-empty diff.
 Spec source: GitHub issue #1 (support end-to-end simulator execution on docassemble 1.9.x).
 Validation at review time: `ruff check` clean, `ruff format` clean, `tests/test_bootstrap.py` 34 passed.

@@ -8,7 +8,7 @@ Scope: two coupled pieces of work on `docassemble-simulator`:
   `.simulator/` directory that is **entirely gitignored runtime state**, plus
   committed **authored** files under `.config/simulator/`, following the
   [`mise`](https://mise.jdx.dev/configuration.html) / `jda`
-  (`/Users/jack/Projects/jda`) project-config pattern (`.config/mise/config.toml`,
+  project-config pattern (`.config/mise/config.toml`,
   `.config/jda/config.toml`): discovered by walking up from the package root,
   committed defaults plus gitignored local overrides.
 - **B. Flow-fidelity fixes** — five simulator gaps found while live-driving

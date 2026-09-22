@@ -10,6 +10,9 @@ wheels/
 .simulator/
 .config/simulator/config.local.toml
 
+# macOS metadata
+.DS_Store
+
 # Virtual environments
 .venv
 .venv-da*/

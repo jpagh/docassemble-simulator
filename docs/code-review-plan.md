@@ -4,6 +4,9 @@ Review date: 2026-08-23
 Scope: whole project (greenfield), commit `ba15510`
 Reviewer: code review (1 reviewer agent), verdict **REQUEST_CHANGES**
 
+Status: implemented — every finding below was fixed on main or made obsolete by
+the ADR-0002 execution/render refactor; file and line references are historical.
+
 ## Major — must fix before release
 
 ### 1. `--stub-defined` flag is a silent no-op

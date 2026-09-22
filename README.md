@@ -1,5 +1,7 @@
 # docassemble-simulator
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Run a docassemble interview locally without a server. The simulator uses the
 real docassemble compiler, assembly/seek machinery, validation behavior, and
 DOCX/Jinja renderer while providing small commands suitable for humans and
@@ -7,11 +9,14 @@ agents.
 
 ## Install
 
-Run the simulator in the target package's interpreter:
+The simulator is not published to PyPI yet. Install it from the public GitHub
+repository into the target package's interpreter.
+
+For a uv-managed interview package:
 
 ```sh
 # Run these in the interview package's project environment.
-uv add --dev docassemble-simulator
+uv add --dev "git+https://github.com/jpagh/docassemble-simulator"
 uv run sim check
 ```
 
@@ -19,9 +24,13 @@ The canonical command is also available as `docassemble-simulator`. For a
 non-uv project, install it into the target package interpreter:
 
 ```sh
-/path/to/package/.venv/bin/python -m pip install docassemble-simulator
+/path/to/package/.venv/bin/python -m pip install \
+  "git+https://github.com/jpagh/docassemble-simulator"
 /path/to/package/.venv/bin/sim check
 ```
+
+Pin a release tag when reproducibility matters, for example
+`git+https://github.com/jpagh/docassemble-simulator@v26.9.0`.
 
 The simulator must run in the same environment as the target package; a global
 installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
@@ -468,3 +477,7 @@ choose its root or `--refresh-nltk-cache` to publish a new generation. Use
 `--expectations tests/demo_corpus_expectations.toml` for focused or reviewed
 runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
 `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the script itself.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

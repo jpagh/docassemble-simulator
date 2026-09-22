@@ -36,7 +36,7 @@ mise run test:all-da
 
 ## What the simulator verifies
 
-At bootstrap the simulator now mirrors the docassemble webapp's startup import
+At bootstrap the simulator mirrors the docassemble webapp's startup import
 pass: installed `docassemble.<package>` modules that define classes (or opt in
 with `# pre-load`, or call `docassemble.base.util.update`) are imported before
 any interview is parsed. That pass is what registers custom datatypes such as

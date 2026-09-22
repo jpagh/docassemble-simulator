@@ -1,5 +1,8 @@
 # Code-review findings fix plan
 
+Status: implemented — historical record; the findings were fixed before PR #2
+merged.
+
 Review scope: `main...HEAD` (4 commits on `support-da19x`), non-empty diff.
 Spec source: GitHub issue #1 (support end-to-end simulator execution on docassemble 1.9.x).
 Validation at review time: `ruff check` + `ruff format --check` passed; 151 fast tests passed; real-runtime suite reached the demo-corpus test then timed out.

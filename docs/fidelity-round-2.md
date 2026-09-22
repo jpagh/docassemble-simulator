@@ -1,6 +1,7 @@
 # Answer Fidelity and Seed Setup (Round 2)
 
-Status: proposal, ready for implementation
+Status: implemented — see the §5 implementation note for the render-tail
+outcome.
 Date: 2026-08-25
 Scope: findings from live verification of `c2b9e66` against the
 `docassemble-automatedpleading` family flow. One simulator bug to upstream,
