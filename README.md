@@ -478,6 +478,12 @@ choose its root or `--refresh-nltk-cache` to publish a new generation. Use
 runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
 `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the script itself.
 
+Releases are cut with `mise run release`, which bumps the patch digit, pushes
+the commit and annotated tag, and publishes the GitHub release with notes
+generated from the commits since the previous tag. `mise run bump` bumps and
+pushes without creating a release, and `scripts/release --dry-run` previews the
+next bump without writing anything.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
