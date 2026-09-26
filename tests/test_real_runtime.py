@@ -1675,6 +1675,83 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
     ), label
 
 
+OBJECT_NAMESPACE_FIXTURE = (
+    "---\n"
+    "modules:\n"
+    "  - docassemble.regression.namespace_aware\n"
+    "---\n"
+    "objects:\n"
+    "  - alice: DAObject\n"
+    "---\n"
+    "id: shortlist setup\n"
+    "mandatory: True\n"
+    "code: |\n"
+    "  namespace_marker = True\n"
+    "  alice.name = 'Alice'\n"
+    "  if not defined('shortlist'):\n"
+    "      shortlist = NamespaceAwareList('shortlist', auto_gather=False)\n"
+    "---\n"
+    "id: shortlist choice\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Who belongs on the shortlist?\n"
+    "fields:\n"
+    "  - Shortlist: shortlist\n"
+    "    datatype: object_checkboxes\n"
+    "    choices: |\n"
+    "      [alice]\n"
+)
+
+OBJECT_NAMESPACE_HELPER = (
+    "from docassemble.base.functions import get_user_dict\n"
+    "from docassemble.base.util import DAList\n"
+    "\n"
+    "\n"
+    "class NamespaceAwareList(DAList):\n"
+    '    """A list whose append resolves the interview, like walkup references."""\n'
+    "\n"
+    "    def init(self, *args, **kwargs):\n"
+    "        super().init(*args, **kwargs)\n"
+    "        self.auto_gather = False\n"
+    "\n"
+    "    def append(self, item):\n"
+    "        if 'namespace_marker' not in get_user_dict():\n"
+    "            raise RuntimeError('the interview namespace is unavailable to append')\n"
+    "        super().append(item)\n"
+)
+
+
+def _object_namespace_workspace(tmp_path):
+    package = tmp_path / "docassemble" / "regression"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "namespace_aware.py").write_text(OBJECT_NAMESPACE_HELPER)
+    (questions / "main.yml").write_text(OBJECT_NAMESPACE_FIXTURE)
+    return tmp_path
+
+
+def test_object_checkboxes_answer_applies_inside_the_interview_namespace(
+    family_python, tmp_path
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = _object_namespace_workspace(tmp_path)
+
+    started = _run(interpreter, root, "start")
+    assert started["ok"], (label, started)
+    assert started["result"]["question_name"] == "ID shortlist choice", (label, started)
+    token = started["result"]["fields"][0]["choices"][0]["value"]
+
+    accepted = _run(interpreter, root, "answer", f"shortlist={json.dumps([token])}")
+
+    assert accepted["ok"], (label, accepted)
+    assert accepted["result"]["kind"] == "finished", (label, accepted)
+    assert _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == (
+        "1"
+    ), label
+
+
 def test_partial_answer_keeps_the_permissive_mode_across_families(
     family_python, tmp_path
 ):

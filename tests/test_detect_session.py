@@ -115,6 +115,26 @@ class PicklableEmpty:
         return self.str
 
 
+class NamespaceAwareList(list):
+    """A stub object list whose ``append`` requires the interview namespace.
+
+    Docassemble 1.9.x's ``get_user_dict()`` walks the call stack, so an
+    ``append`` that resolves interview state only works when the caller runs
+    inside the interview namespace, as the real server's answer handling does.
+    """
+
+    def __init__(self, values=(), **kwargs):
+        super().__init__(values)
+        self.gathered = False
+
+    def append(self, item):
+        from docassemble.base import functions
+
+        if "frame_probe" not in functions.get_user_dict():
+            raise RuntimeError("the interview namespace is unavailable to append")
+        super().append(item)
+
+
 class FakeInterview:
     source = SimpleNamespace(path="main.yml", package="docassemble.pkg")
     questions_by_name: ClassVar[dict] = {}
@@ -307,6 +327,37 @@ class CheckboxGroupInterview(FakeInterview):
         interview_status.continue_label = None
         interview_status.sought = "x.service_type"
         interview_status.orig_sought = "rav.service_type"
+        interview_status.selectcompute = {}
+
+
+class FrameAwareCheckboxInterview(FakeInterview):
+    """An object checkbox screen whose list only accepts appends in-frame."""
+
+    def assemble(self, namespace, interview_status):
+        namespace.setdefault("frame_probe", True)
+        namespace.setdefault("alice", PicklableStubObject(instanceName="alice"))
+        namespace.setdefault("shortlist", NamespaceAwareList())
+        namespace["_internal"].setdefault("objselections", {})["shortlist"] = {
+            "alice": namespace["alice"]
+        }
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="shortlist choice",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="shortlist",
+                    datatype="object_checkboxes",
+                    required=False,
+                    choices=[{"key": "alice", "label": "Alice"}],
+                )
+            ],
+        )
+        interview_status.question_text = "Who belongs on the shortlist?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "shortlist"
+        interview_status.orig_sought = "shortlist"
         interview_status.selectcompute = {}
 
 
@@ -1183,6 +1234,34 @@ def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stu
     optional_value = execution.run(Evaluate("rav.optional_topics.elements"))
     assert optional_value.ok, optional_value.error
     assert optional_value.result["value"] == ("{'housing': False, 'benefits': False}")
+
+
+def test_object_checkbox_append_runs_inside_the_interview_namespace(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, FrameAwareCheckboxInterview
+    )
+    functions = sys.modules["docassemble.base.functions"]
+
+    def legacy_get_user_dict():
+        # Docassemble 1.9.x resolves the interview by walking frames; 1.10+
+        # keeps it in a context variable that the simulator already sets.
+        frame = sys._getframe(1)
+        while frame is not None:
+            if "_internal" in frame.f_locals:
+                return frame.f_locals
+            frame = frame.f_back
+        return {}
+
+    monkeypatch.setattr(functions, "get_user_dict", legacy_get_user_dict, raising=False)
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", '["alice"]'),)))
+
+    assert accepted.ok, accepted.error
+    assert execution.run(Evaluate("len(shortlist)")).result["value"] == "1"
+    assert execution.run(Evaluate("shortlist.gathered")).result["value"] == "True"
 
 
 def test_answer_falls_back_when_a_default_cannot_be_applied(

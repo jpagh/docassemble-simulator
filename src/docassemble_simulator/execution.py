@@ -1569,7 +1569,7 @@ def _apply_object(namespace, variable, datatype, value):
     if unknown:
         raise ValueError(f"unknown object choices for {variable}: {unknown!r}")
     try:
-        target = eval(variable, namespace)
+        eval(variable, namespace)
     except (
         NameError,
         AttributeError,
@@ -1587,14 +1587,22 @@ def _apply_object(namespace, variable, datatype, value):
         from docassemble.base.parse import ensure_object_exists
 
         ensure_object_exists(variable, datatype, namespace)
-        target = eval(variable, namespace)
-    target.clear()
-    for key in selected:
-        target.append(selections[key])
+    # The server applies checkbox answers by exec'ing
+    # ``<list>.append(<object>)`` with ``user_dict`` as globals, so interview
+    # code runs in the namespace docassemble's frame-walking utilities (such
+    # as 1.9.x's ``get_user_dict()``) can see.
+    namespace["__dasimulator_object"] = None
     try:
-        target.gathered = True
-    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
-        logger.debug("setting gathered failed: %s", exc)
+        __builtins__["exec"](f"{variable}.clear()", namespace)
+        for key in selected:
+            namespace["__dasimulator_object"] = selections[key]
+            __builtins__["exec"](f"{variable}.append(__dasimulator_object)", namespace)
+        try:
+            __builtins__["exec"](f"{variable}.gathered = True", namespace)
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            logger.debug("setting gathered failed: %s", exc)
+    finally:
+        namespace.pop("__dasimulator_object", None)
 
 
 def _register_global_roots(namespace):
