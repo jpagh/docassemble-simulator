@@ -8,7 +8,7 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
 
 ## Decision
 
-- A browser submits the whole page. docassemble's webapp adds blank visible fields as `None` (`_empties`), unchecked checkboxes with their false values, and hidden fields as `None`, then filters the submission to the current question's `authorized_fields`. `answer` now does the equivalent for the active screen outcome:
+- A browser submits the whole page. docassemble's webapp adds blank visible fields as `None` (`_empties`), unchecked checkboxes with their false values, and fields whose choices resolved empty as `None`, then filters the submission to the current question's `authorized_fields`. `answer` now does the equivalent for the active screen outcome:
   - submitted assignments are applied first and take precedence,
   - visible fields not submitted take their rendered default when one exists (the browser posts the prefilled value),
   - remaining visible optional fields take the value the browser would post for
@@ -31,12 +31,20 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
 ## Hidden fields, empty answers, and signatures
 
 - Hidden (`show if`) fields are not defined and not assigned. The user submitted the visible page, and assigning a field the page did not offer can stomp state the flow set elsewhere. Hidden fields are therefore never required either.
+
+  **Correction (ADR-0014).** The justification above does not match the server, and the difference is recorded rather than fixed here. Two separate mechanisms were conflated:
+
+  - The `_empties` input this bullet cited is emitted from the formatter's `hiddens`, which is populated by `is_empty_mc` — a multiple-choice field whose resolved choices came back empty (`standardformatter.py:1293-1297`, `parse.py:302-313`) — not by `show if`.
+  - A `show if` field is still rendered, hidden with `display: none` (`standardformatter.py:1331-1343`), so a browser does post it.
+
+  The rule above therefore stands as a deliberate simulator decision, not a server mirror. Reconciling it with the server is an open question for its own ADR.
 - An explicitly empty submission for a visible required field (`field=`, `field=None`, or a value that coerces to `None`) fails the required gate with an "is empty" message; a quoted `"None"` remains an ordinary string value. This is the API equivalent of a browser refusing to submit a blank required input. `--partial` downgrades it to a warning like any other missing required field.
 - Signature fields are never required and become `DAEmpty()` when untouched, so templates and documents that reference them render as empty instead of failing the flow. Signature capture itself is not part of the CLI submission path.
 
 ## Known gaps
 
-- `object_multiselect` and `object_checkboxes`, and custom datatypes, are left undefined because a fabricated empty object or value can corrupt interview logic; the flow may re-seek those optional fields.
+- Custom datatypes are left undefined because a fabricated empty value can corrupt interview logic; the flow may re-seek those optional fields.
+- `object_multiselect` and `object_checkboxes` are no longer a gap: ADR-0014 specifies both server paths, including the empty-choice case that clears the group and marks it gathered.
 
 ## Considered options
 

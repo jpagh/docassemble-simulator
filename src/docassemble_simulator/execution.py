@@ -1302,6 +1302,16 @@ def _submit_screen_fields(namespace, screen):
             logger.debug("field default %r could not be applied: %s", variable, applied)
         if required and not signature:
             continue
+        datatype = str(field.get("type", "")).lower()
+        if datatype in _OBJECT_GROUP_DATATYPES and not (field.get("choices") or []):
+            # The browser still posts a group whose choices resolved empty, and
+            # docassemble clears it rather than leaving it undefined
+            # (ADR-0014). Like the other blanks, this lands on the resolved
+            # target rather than a generic-object placeholder.
+            _clear_empty_object_group(
+                namespace, targets.get(variable, variable), datatype
+            )
+            continue
         blank = _browser_blank(field)
         if blank is not _NO_BLANK:
             blanks.append((variable, blank))
@@ -1378,17 +1388,42 @@ def _browser_blank(field):
     return _NO_BLANK
 
 
-def _set_namespace_value(namespace, target, value):
-    temporary = "__dasimulator_value"
-    previous = namespace.get(temporary, _MISSING)
-    namespace[temporary] = value
+#: Namespace slots the simulator uses to carry a Python value into an exec'd
+#: interview statement. Interview code sees the namespace as its globals, so a
+#: carrier is briefly visible to it and the value it displaced is restored.
+_CARRIER_VALUE = "__dasimulator_value"
+_CARRIER_OBJECT = "__dasimulator_object"
+
+
+def _exec_in_namespace(namespace, source, carrier=None, value=None):
+    """exec ``source`` with the interview namespace as globals.
+
+    ``carrier``, when given, is bound to ``value`` for the duration and the
+    value it displaced is restored afterwards. Answers are applied by exec'ing
+    in the namespace rather than by calling methods directly because
+    docassemble resolves the interview from the caller's frame: 1.9's
+    ``get_user_dict()`` scans frames for ``_internal`` and 1.10 reads a context
+    variable. Interview code that resolves interview state (walkup's
+    registry-backed ``ObjectReferenceList``, for example) therefore only works
+    when the caller runs inside the namespace, which is where the server runs
+    it.
+    """
+    if carrier is None:
+        __builtins__["exec"](source, namespace)
+        return
+    previous = namespace.get(carrier, _MISSING)
+    namespace[carrier] = value
     try:
-        __builtins__["exec"](f"{target} = {temporary}", namespace)
+        __builtins__["exec"](source, namespace)
     finally:
         if previous is _MISSING:
-            namespace.pop(temporary, None)
+            namespace.pop(carrier, None)
         else:
-            namespace[temporary] = previous
+            namespace[carrier] = previous
+
+
+def _set_namespace_value(namespace, target, value):
+    _exec_in_namespace(namespace, f"{target} = {_CARRIER_VALUE}", _CARRIER_VALUE, value)
 
 
 def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
@@ -1399,11 +1434,9 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
         if allowed is not None and variable not in allowed:
             errors.append(f"{variable}: not a field on the active screen")
             continue
-        temporary = "__dasimulator_value"
-        previous = namespace.get(temporary, _MISSING)
         try:
             if use_code:
-                __builtins__["exec"](f"{variable} = {raw}", namespace)
+                _exec_in_namespace(namespace, f"{variable} = {raw}")
                 continue
             value = parse_value(raw)
             datatype = field_types.get(variable, "")
@@ -1434,8 +1467,9 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
 
                 value = DADict(elements=value)
             target = targets.get(variable, variable)
-            namespace[temporary] = value
-            __builtins__["exec"](f"{target} = {temporary}", namespace)
+            _exec_in_namespace(
+                namespace, f"{target} = {_CARRIER_VALUE}", _CARRIER_VALUE, value
+            )
         except (
             ValueError,
             TypeError,
@@ -1450,11 +1484,6 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
             SyntaxError,
         ) as error:
             errors.append(f"{variable}: {type(error).__name__}: {error}")
-        finally:
-            if previous is _MISSING:
-                namespace.pop(temporary, None)
-            else:
-                namespace[temporary] = previous
     return errors
 
 
@@ -1540,6 +1569,13 @@ def _mark_answered(interview, namespace, name):
 
 
 def _apply_object(namespace, variable, datatype, value):
+    """Apply one object answer, following the server's two paths.
+
+    Which path applies is decided by whether the screen rendered any choices
+    (docassemble's ``parse.is_empty_mc``): a field that rendered choices is
+    applied per choice, and a field that rendered none is cleared and marked
+    gathered. ADR-0014 records both.
+    """
     selections = (
         namespace.get("_internal", {}).get("objselections", {}).get(variable, {})
     )
@@ -1553,21 +1589,22 @@ def _apply_object(namespace, variable, datatype, value):
             raise ValueError(f"unknown object choice {key!r} for {variable}")
         else:
             selected = selections[key]
-        namespace["__dasimulator_object"] = selected
-        try:
-            __builtins__["exec"](f"{variable} = __dasimulator_object", namespace)
-        finally:
-            namespace.pop("__dasimulator_object", None)
-        return
-    keys = value.keys() if isinstance(value, dict) else value
-    if keys is None or isinstance(keys, (str, bytes)):
-        raise ValueError(
-            f"object checkbox answer for {variable} must be a mapping or list"
+        _exec_in_namespace(
+            namespace, f"{variable} = {_CARRIER_OBJECT}", _CARRIER_OBJECT, selected
         )
-    selected = [key for key in keys if not isinstance(value, dict) or value[key]]
-    unknown = [key for key in selected if key not in selections]
-    if unknown:
-        raise ValueError(f"unknown object choices for {variable}: {unknown!r}")
+        return
+    if not selections:
+        _clear_empty_object_group(namespace, variable, datatype)
+        return
+    _apply_object_choice(namespace, variable, datatype, value, selections)
+
+
+def _ensure_object_target(namespace, variable, datatype):
+    """Define the group target when the flow has not created it yet.
+
+    The browser posts ``<var>.gathered`` for an object group, and the server
+    uses that to create the list before applying the per-choice answer.
+    """
     try:
         eval(variable, namespace)
     except (
@@ -1587,22 +1624,94 @@ def _apply_object(namespace, variable, datatype, value):
         from docassemble.base.parse import ensure_object_exists
 
         ensure_object_exists(variable, datatype, namespace)
-    # The server applies checkbox answers by exec'ing
-    # ``<list>.append(<object>)`` with ``user_dict`` as globals, so interview
-    # code runs in the namespace docassemble's frame-walking utilities (such
-    # as 1.9.x's ``get_user_dict()``) can see.
-    namespace["__dasimulator_object"] = None
+
+
+def _object_choice_state(raw):
+    """The browser's checkbox state for one rendered choice.
+
+    ``None`` means the server skips the key and leaves the element alone, which
+    is also what it does with any value outside the ``True``/``False``/``None``
+    trio.
+    """
+    if raw is True or raw == "True":
+        return True
+    if raw is False or raw == "False":
+        return False
+    return None
+
+
+def _apply_object_choice(namespace, variable, datatype, value, choices):
+    """Apply a group answer the way the server does when choices were rendered.
+
+    Every rendered choice carries a checkbox, and the formatter registers all of
+    them in ``_checkboxes`` as ``'False'``, so a choice missing from the
+    submission is unticked. A ticked choice is appended only when absent and an
+    unticked choice is removed only when present, mirroring the server's
+    ``.elements`` guards. The list is never cleared, so an element with no
+    checkbox on the page survives.
+    """
+    if value is None or isinstance(value, (str, bytes)):
+        raise ValueError(
+            f"object checkbox answer for {variable} must be a mapping or list"
+        )
+    posted = list(
+        value.items() if isinstance(value, dict) else ((key, True) for key in value)
+    )
+    unknown = [key for key, _ in posted if key not in choices]
+    if unknown:
+        raise ValueError(f"unknown object choices for {variable}: {unknown!r}")
+    states = {key: False for key in choices}
+    for key, raw in posted:
+        states[key] = _object_choice_state(raw)
+    _ensure_object_target(namespace, variable, datatype)
+    for key, state in states.items():
+        if state is None:
+            continue
+        selection = choices[key]
+        if state:
+            _exec_in_namespace(
+                namespace,
+                f"if {_CARRIER_OBJECT} not in {variable}.elements:\n"
+                f"    {variable}.append({_CARRIER_OBJECT})",
+                _CARRIER_OBJECT,
+                selection,
+            )
+        else:
+            _exec_in_namespace(
+                namespace,
+                f"if {_CARRIER_OBJECT} in {variable}.elements:\n"
+                f"    {variable}.remove({_CARRIER_OBJECT})",
+                _CARRIER_OBJECT,
+                selection,
+            )
+    _mark_object_gathered(namespace, variable)
+
+
+def _clear_empty_object_group(namespace, variable, datatype):
+    """Apply the server's path for a field that rendered no choices.
+
+    docassemble routes a multiple-choice field whose resolved choices came back
+    empty through the formatter's ``hiddens``; the answer handling clears the
+    group and marks it gathered.
+    """
+    from docassemble.base.parse import ensure_object_exists
+
+    ensure_object_exists(variable, datatype, namespace)
+    _exec_in_namespace(namespace, f"{variable}.clear()")
+    _mark_object_gathered(namespace, variable)
+
+
+def _mark_object_gathered(namespace, variable):
+    """Mark an object group gathered.
+
+    The server does not do this for a group that rendered choices, and the
+    simulator must, or the screen's ``<var>.gathered`` seek never resolves and
+    the same screen re-asks forever (docs/fidelity-round-2.md §1).
+    """
     try:
-        __builtins__["exec"](f"{variable}.clear()", namespace)
-        for key in selected:
-            namespace["__dasimulator_object"] = selections[key]
-            __builtins__["exec"](f"{variable}.append(__dasimulator_object)", namespace)
-        try:
-            __builtins__["exec"](f"{variable}.gathered = True", namespace)
-        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
-            logger.debug("setting gathered failed: %s", exc)
-    finally:
-        namespace.pop("__dasimulator_object", None)
+        _exec_in_namespace(namespace, f"{variable}.gathered = True")
+    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+        logger.debug("setting gathered failed: %s", exc)
 
 
 def _register_global_roots(namespace):

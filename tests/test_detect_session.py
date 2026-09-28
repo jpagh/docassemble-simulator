@@ -115,24 +115,65 @@ class PicklableEmpty:
         return self.str
 
 
-class NamespaceAwareList(list):
-    """A stub object list whose ``append`` requires the interview namespace.
+class NamespaceAwareList:
+    """A stub object list modelling the ``DAList`` surface the answer path uses.
 
-    Docassemble 1.9.x's ``get_user_dict()`` walks the call stack, so an
-    ``append`` that resolves interview state only works when the caller runs
-    inside the interview namespace, as the real server's answer handling does.
+    docassemble stores ``object_checkboxes``/``object_multiselect`` answers in
+    a ``DAList`` whose ``elements`` attribute is the underlying Python list.
+    Docassemble 1.9.x's ``get_user_dict()`` walks the call stack, so a mutation
+    that resolves interview state only works when the caller runs inside the
+    interview namespace, as the real server's answer handling does. Every
+    mutation is frame-checked for the same reason.
     """
 
     def __init__(self, values=(), **kwargs):
-        super().__init__(values)
+        self.elements = list(values)
         self.gathered = False
 
-    def append(self, item):
+    def _require_frame(self, operation):
         from docassemble.base import functions
 
         if "frame_probe" not in functions.get_user_dict():
-            raise RuntimeError("the interview namespace is unavailable to append")
-        super().append(item)
+            raise RuntimeError(f"the interview namespace is unavailable to {operation}")
+
+    def append(self, item):
+        self._require_frame("append")
+        self.elements.append(item)
+
+    def remove(self, item):
+        self._require_frame("remove")
+        self.elements.remove(item)
+
+    def clear(self):
+        self._require_frame("clear")
+        self.elements.clear()
+
+    def __len__(self):
+        return len(self.elements)
+
+    def names(self):
+        return [item.instanceName for item in self.elements]
+
+
+@pytest.fixture
+def legacy_frame_resolution(monkeypatch):
+    """Install docassemble 1.9.x's frame-walking ``get_user_dict()``.
+
+    1.10+ keeps the interview in a context variable that the simulator already
+    sets; 1.9 walks the call stack looking for the frame that owns
+    ``_internal``.
+    """
+    functions = sys.modules["docassemble.base.functions"]
+
+    def legacy_get_user_dict():
+        frame = sys._getframe(1)
+        while frame is not None:
+            if "_internal" in frame.f_locals:
+                return frame.f_locals
+            frame = frame.f_back
+        return {}
+
+    monkeypatch.setattr(functions, "get_user_dict", legacy_get_user_dict, raising=False)
 
 
 class FakeInterview:
@@ -331,14 +372,25 @@ class CheckboxGroupInterview(FakeInterview):
 
 
 class FrameAwareCheckboxInterview(FakeInterview):
-    """An object checkbox screen whose list only accepts appends in-frame."""
+    """An object checkbox screen whose list only accepts in-frame mutations.
+
+    ``SEEDED`` names objects the list already holds before the screen is shown;
+    ``CHOICES`` is what the screen offers. The two differ when a test needs a
+    list element with no matching checkbox.
+    """
+
+    SEEDED: ClassVar[tuple[str, ...]] = ()
+    CHOICES: ClassVar[dict[str, str]] = {"alice": "Alice"}
 
     def assemble(self, namespace, interview_status):
         namespace.setdefault("frame_probe", True)
         namespace.setdefault("alice", PicklableStubObject(instanceName="alice"))
-        namespace.setdefault("shortlist", NamespaceAwareList())
+        namespace.setdefault("bob", PicklableStubObject(instanceName="bob"))
+        if "shortlist" not in namespace:
+            seeded = [namespace[name] for name in self.SEEDED]
+            namespace["shortlist"] = NamespaceAwareList(seeded)
         namespace["_internal"].setdefault("objselections", {})["shortlist"] = {
-            "alice": namespace["alice"]
+            key: namespace[key] for key in self.CHOICES
         }
         interview_status.question = SimpleNamespace(
             question_type="fields",
@@ -349,7 +401,10 @@ class FrameAwareCheckboxInterview(FakeInterview):
                     saveas="shortlist",
                     datatype="object_checkboxes",
                     required=False,
-                    choices=[{"key": "alice", "label": "Alice"}],
+                    choices=[
+                        {"key": key, "label": label}
+                        for key, label in self.CHOICES.items()
+                    ],
                 )
             ],
         )
@@ -1237,24 +1292,11 @@ def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stu
 
 
 def test_object_checkbox_append_runs_inside_the_interview_namespace(
-    tmp_path, monkeypatch, da_stubs
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
 ):
     execution, _, _ = _execution(
         tmp_path, monkeypatch, da_stubs, FrameAwareCheckboxInterview
     )
-    functions = sys.modules["docassemble.base.functions"]
-
-    def legacy_get_user_dict():
-        # Docassemble 1.9.x resolves the interview by walking frames; 1.10+
-        # keeps it in a context variable that the simulator already sets.
-        frame = sys._getframe(1)
-        while frame is not None:
-            if "_internal" in frame.f_locals:
-                return frame.f_locals
-            frame = frame.f_back
-        return {}
-
-    monkeypatch.setattr(functions, "get_user_dict", legacy_get_user_dict, raising=False)
     assert execution.run(Start()).ok
 
     accepted = execution.run(Answer((("shortlist", '["alice"]'),)))
@@ -1262,6 +1304,273 @@ def test_object_checkbox_append_runs_inside_the_interview_namespace(
     assert accepted.ok, accepted.error
     assert execution.run(Evaluate("len(shortlist)")).result["value"] == "1"
     assert execution.run(Evaluate("shortlist.gathered")).result["value"] == "True"
+
+
+class OffScreenSelectionCheckboxInterview(FrameAwareCheckboxInterview):
+    """A shortlist that already holds an object the screen does not offer."""
+
+    SEEDED = ("bob",)
+    CHOICES: ClassVar[dict[str, str]] = {"alice": "Alice"}
+
+
+class EmptyChoiceCheckboxInterview(FakeInterview):
+    """A screen whose object group resolved to no choices at all, beside a
+    plain field the caller answers."""
+
+    def assemble(self, namespace, interview_status):
+        namespace["_internal"].setdefault("objselections", {})["shortlist"] = {}
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="empty shortlist",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(saveas="note", datatype="text", required=True),
+                SimpleNamespace(
+                    saveas="shortlist",
+                    datatype="object_checkboxes",
+                    required=False,
+                    choices=[],
+                ),
+            ],
+        )
+        interview_status.question_text = "Anything to note?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "note"
+        interview_status.orig_sought = "note"
+        interview_status.selectcompute = {}
+
+
+def test_object_checkbox_keeps_elements_the_screen_did_not_offer(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, OffScreenSelectionCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", '["alice"]'),)))
+
+    assert accepted.ok, accepted.error
+    assert (
+        execution.run(
+            Evaluate("[item.instanceName for item in shortlist.elements]")
+        ).result["value"]
+        == "['bob', 'alice']"
+    )
+
+
+def test_empty_choice_object_group_is_cleared_and_gathered(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, EmptyChoiceCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("note", "'hello'"),)))
+
+    assert accepted.ok, accepted.error
+    assert execution.run(Evaluate("len(shortlist)")).result["value"] == "0"
+    assert execution.run(Evaluate("shortlist.gathered")).result["value"] == "True"
+
+
+class UnsubmittedChoiceCheckboxInterview(FakeInterview):
+    """A screen that offers choices for a group the caller never submits."""
+
+    def assemble(self, namespace, interview_status):
+        namespace.setdefault("alice", PicklableStubObject(instanceName="alice"))
+        namespace["_internal"].setdefault("objselections", {})["shortlist"] = {
+            "alice": namespace["alice"]
+        }
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="unsubmitted shortlist",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(saveas="memo", datatype="text", required=True),
+                SimpleNamespace(
+                    saveas="shortlist",
+                    datatype="object_checkboxes",
+                    required=False,
+                    choices=[{"key": "alice", "label": "Alice"}],
+                ),
+            ],
+        )
+        interview_status.question_text = "Anything to note?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "memo"
+        interview_status.orig_sought = "memo"
+        interview_status.selectcompute = {}
+
+
+def test_unsubmitted_object_group_with_choices_stays_undefined(
+    tmp_path, monkeypatch, da_stubs
+):
+    """The boundary ADR-0014 records: only a zero-choice group is cleared.
+
+    A visible group that rendered choices is left undefined when the caller does
+    not submit it, because resolving that interacts with ADR-0013's "prefilled
+    values are never overwritten" rule. This pins the boundary rather than
+    asserting it is correct.
+    """
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, UnsubmittedChoiceCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("memo", "'hello'"),)))
+
+    assert accepted.ok, accepted.error
+    assert not execution.run(Evaluate("shortlist")).ok
+
+
+def _shortlist_names(execution):
+    return execution.run(
+        Evaluate("[item.instanceName for item in shortlist.elements]")
+    ).result["value"]
+
+
+class TwoChoiceCheckboxInterview(FrameAwareCheckboxInterview):
+    """Two rendered choices, so one can be left unticked."""
+
+    CHOICES: ClassVar[dict[str, str]] = {"alice": "Alice", "bob": "Bob"}
+
+
+class ReversedOrderCheckboxInterview(TwoChoiceCheckboxInterview):
+    """A list already holding both choices in the opposite order."""
+
+    SEEDED = ("bob", "alice")
+
+
+class SeededChoiceCheckboxInterview(FrameAwareCheckboxInterview):
+    """A list holding an off-screen object and a choice the screen offers."""
+
+    SEEDED = ("bob", "alice")
+    CHOICES: ClassVar[dict[str, str]] = {"alice": "Alice"}
+
+
+def test_object_checkbox_preserves_the_order_of_existing_selections(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, ReversedOrderCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", '["alice", "bob"]'),)))
+
+    assert accepted.ok, accepted.error
+    # Both were already present, so neither is removed and re-appended.
+    assert _shortlist_names(execution) == "['bob', 'alice']"
+
+
+def test_object_checkbox_removes_an_unticked_choice(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, ReversedOrderCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", '["alice"]'),)))
+
+    assert accepted.ok, accepted.error
+    # ``bob`` is rendered and unticked. The stub list frame-checks ``remove``,
+    # so this also proves the removal ran inside the interview namespace.
+    assert _shortlist_names(execution) == "['alice']"
+
+
+def test_object_checkbox_empty_answer_untickes_every_rendered_choice(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, SeededChoiceCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", "[]"),)))
+
+    assert accepted.ok, accepted.error
+    assert _shortlist_names(execution) == "['bob']"
+
+
+def test_object_checkbox_leaves_an_element_alone_when_told_none(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, OffScreenSelectionCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", '{"alice": "None"}'),)))
+
+    assert accepted.ok, accepted.error
+    # ``None`` is outside the browser's True/False pair, so the server skips the
+    # key rather than ticking or unticking it.
+    assert _shortlist_names(execution) == "['bob']"
+
+
+def test_object_checkbox_rejects_an_unticked_unknown_choice(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, FrameAwareCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    rejected = execution.run(Answer((("shortlist", '{"carol": false}'),)))
+
+    assert not rejected.ok and rejected.error.kind == "answer-input"
+    assert any("carol" in item for item in rejected.error.details["errors"])
+
+
+class FrameAwareRadioInterview(FakeInterview):
+    """An object radio screen whose assignment must run in the namespace."""
+
+    def assemble(self, namespace, interview_status):
+        namespace.setdefault("frame_probe", True)
+        namespace.setdefault("alice", PicklableStubObject(instanceName="alice"))
+        namespace.setdefault("selection", None)
+        namespace["_internal"].setdefault("objselections", {})["selection"] = {
+            "alice": namespace["alice"]
+        }
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="selection",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="selection",
+                    datatype="object_radio",
+                    required=False,
+                    choices=[{"key": "alice", "label": "Alice"}],
+                )
+            ],
+        )
+        interview_status.question_text = "Pick one"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "selection"
+        interview_status.orig_sought = "selection"
+        interview_status.selectcompute = {}
+
+
+def test_object_radio_assigns_the_selected_object(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, FrameAwareRadioInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("selection", "alice"),)))
+
+    assert accepted.ok, accepted.error
+    assert (
+        execution.run(Evaluate("selection.instanceName")).result["value"] == "'alice'"
+    )
 
 
 def test_answer_falls_back_when_a_default_cannot_be_applied(

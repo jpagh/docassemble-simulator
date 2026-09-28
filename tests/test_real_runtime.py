@@ -1682,14 +1682,20 @@ OBJECT_NAMESPACE_FIXTURE = (
     "---\n"
     "objects:\n"
     "  - alice: DAObject\n"
+    "  - bob: DAObject\n"
+    "  - carol: DAObject\n"
     "---\n"
     "id: shortlist setup\n"
     "mandatory: True\n"
     "code: |\n"
     "  namespace_marker = True\n"
     "  alice.name = 'Alice'\n"
+    "  bob.name = 'Bob'\n"
+    "  carol.name = 'Carol'\n"
     "  if not defined('shortlist'):\n"
     "      shortlist = NamespaceAwareList('shortlist', auto_gather=False)\n"
+    "      shortlist.append(bob)\n"
+    "      shortlist.append(carol)\n"
     "---\n"
     "id: shortlist choice\n"
     "mandatory: True\n"
@@ -1699,7 +1705,7 @@ OBJECT_NAMESPACE_FIXTURE = (
     "  - Shortlist: shortlist\n"
     "    datatype: object_checkboxes\n"
     "    choices: |\n"
-    "      [alice]\n"
+    "      [alice, carol]\n"
 )
 
 OBJECT_NAMESPACE_HELPER = (
@@ -1708,16 +1714,25 @@ OBJECT_NAMESPACE_HELPER = (
     "\n"
     "\n"
     "class NamespaceAwareList(DAList):\n"
-    '    """A list whose append resolves the interview, like walkup references."""\n'
+    '    """A list whose mutations resolve the interview, like walkup references."""\n'
     "\n"
     "    def init(self, *args, **kwargs):\n"
     "        super().init(*args, **kwargs)\n"
     "        self.auto_gather = False\n"
     "\n"
-    "    def append(self, item):\n"
+    "    def _require_namespace(self, operation):\n"
     "        if 'namespace_marker' not in get_user_dict():\n"
-    "            raise RuntimeError('the interview namespace is unavailable to append')\n"
+    "            raise RuntimeError(\n"
+    "                'the interview namespace is unavailable to ' + operation\n"
+    "            )\n"
+    "\n"
+    "    def append(self, item):\n"
+    "        self._require_namespace('append')\n"
     "        super().append(item)\n"
+    "\n"
+    "    def remove(self, item):\n"
+    "        self._require_namespace('remove')\n"
+    "        super().remove(item)\n"
 )
 
 
@@ -1741,14 +1756,77 @@ def test_object_checkboxes_answer_applies_inside_the_interview_namespace(
     started = _run(interpreter, root, "start")
     assert started["ok"], (label, started)
     assert started["result"]["question_name"] == "ID shortlist choice", (label, started)
-    token = started["result"]["fields"][0]["choices"][0]["value"]
+    choices = started["result"]["fields"][0]["choices"]
+    assert len(choices) == 2, (label, started)
+    alice = choices[0]["value"]
 
-    accepted = _run(interpreter, root, "answer", f"shortlist={json.dumps([token])}")
+    accepted = _run(interpreter, root, "answer", f"shortlist={json.dumps([alice])}")
 
     assert accepted["ok"], (label, accepted)
     assert accepted["result"]["kind"] == "finished", (label, accepted)
-    assert _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == (
-        "1"
+    # Bob has no checkbox on the screen, so he survives. Carol is rendered and
+    # unticked, so she is removed. Alice is ticked and appended.
+    assert (
+        _run(
+            interpreter,
+            root,
+            "eval",
+            "[item.name for item in shortlist.elements]",
+        )["result"]["value"]
+        == "['Bob', 'Alice']"
+    ), label
+    assert (
+        _run(interpreter, root, "eval", "shortlist.gathered")["result"]["value"]
+        == "True"
+    ), label
+
+
+EMPTY_CHOICE_OBJECT_FIXTURE = (
+    "---\n"
+    "id: empty shortlist\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Anything to note?\n"
+    "fields:\n"
+    "  - Note: memo\n"
+    "    datatype: text\n"
+    "  - Shortlist: shortlist\n"
+    "    datatype: object_checkboxes\n"
+    "    required: False\n"
+    "    choices: |\n"
+    "      []\n"
+)
+
+
+def _empty_choice_object_workspace(tmp_path):
+    package = tmp_path / "docassemble" / "regression"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "main.yml").write_text(EMPTY_CHOICE_OBJECT_FIXTURE)
+    return tmp_path
+
+
+def test_empty_choice_object_group_is_cleared_and_gathered(family_python, tmp_path):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = _empty_choice_object_workspace(tmp_path)
+
+    started = _run(interpreter, root, "start")
+    assert started["ok"], (label, started)
+    assert started["result"]["question_name"] == "ID empty shortlist", (label, started)
+
+    accepted = _run(interpreter, root, "answer", "memo=hello")
+
+    assert accepted["ok"], (label, accepted)
+    # The group rendered no choices, so the answer path clears it and marks it
+    # gathered rather than leaving it undefined.
+    assert (
+        _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == "0"
+    ), label
+    assert (
+        _run(interpreter, root, "eval", "shortlist.gathered")["result"]["value"]
+        == "True"
     ), label
 
 
