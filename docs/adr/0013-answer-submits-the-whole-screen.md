@@ -38,7 +38,7 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
   - A `show if` field is still rendered, hidden with `display: none` (`standardformatter.py:1331-1343`), so a browser does post it.
 
   The rule above therefore stands as a deliberate simulator decision, not a server mirror. Reconciling it with the server is an open question for its own ADR.
-- An explicitly empty submission for a visible required field (`field=`, `field=None`, or a value that coerces to `None`) fails the required gate with an "is empty" message; a quoted `"None"` remains an ordinary string value. This is the API equivalent of a browser refusing to submit a blank required input. `--partial` downgrades it to a warning like any other missing required field.
+- An explicitly empty submission for a visible required field (`field=`, `field=None`, or a value that coerces to `None`) fails the required gate with an "is empty" message; a quoted `"None"` remains an ordinary string value. This is the API equivalent of a browser refusing to submit a blank required input. `--partial` downgrades it to a warning like any other missing required field. An object group field that rendered no choices is exempt: docassemble clears and gathers it rather than applying a selection (ADR-0014), so there is none to demand.
 - Signature fields are never required and become `DAEmpty()` when untouched, so templates and documents that reference them render as empty instead of failing the flow. Signature capture itself is not part of the CLI submission path.
 
 ## Known gaps

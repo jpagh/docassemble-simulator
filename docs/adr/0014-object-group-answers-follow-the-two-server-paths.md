@@ -62,7 +62,17 @@ Both paths are implemented, and the two are mutually exclusive.
 
   The simulator does the same. This path is also reached for a visible
   zero-choice group the caller never submitted, because the browser still posts
-  such a field as empty.
+  such a field as empty. A *required* zero-choice group is cleared and gathered
+  too, and is exempt from the simulator's required gate: the field offers
+  nothing to tick, so demanding a selection would reject a screen the server
+  accepts (ADR-0013 records the gate exemption).
+
+- **Every mutation lands on the field's resolved target.** On a generic-object
+  screen the field is posted under the placeholder (`x.shortlist`) while
+  `orig_sought` names the resolved root (`rav.shortlist`). Both paths resolve
+  the name through the same `targets` map the other field assignments use, so
+  an explicit submission and the blank-synthesis path never operate on two
+  different lists.
 
 - **Answers are applied by exec'ing in the interview namespace, not by calling
   methods directly.** docassemble's frame-walking utilities resolve the

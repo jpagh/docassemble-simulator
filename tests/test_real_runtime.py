@@ -1733,16 +1733,20 @@ OBJECT_NAMESPACE_HELPER = (
     "    def remove(self, item):\n"
     "        self._require_namespace('remove')\n"
     "        super().remove(item)\n"
+    "\n"
+    "    def clear(self):\n"
+    "        self._require_namespace('clear')\n"
+    "        super().clear()\n"
 )
 
 
-def _object_namespace_workspace(tmp_path):
+def _object_namespace_workspace(tmp_path, question_fixture=OBJECT_NAMESPACE_FIXTURE):
     package = tmp_path / "docassemble" / "regression"
     questions = package / "data" / "questions"
     questions.mkdir(parents=True)
     (package / "__init__.py").write_text("")
     (package / "namespace_aware.py").write_text(OBJECT_NAMESPACE_HELPER)
-    (questions / "main.yml").write_text(OBJECT_NAMESPACE_FIXTURE)
+    (questions / "main.yml").write_text(question_fixture)
     return tmp_path
 
 
@@ -1792,25 +1796,54 @@ EMPTY_CHOICE_OBJECT_FIXTURE = (
     "    datatype: text\n"
     "  - Shortlist: shortlist\n"
     "    datatype: object_checkboxes\n"
+    "    choices: |\n"
+    "      []\n"
+)
+
+
+EMPTY_CHOICE_NAMESPACE_FIXTURE = (
+    "---\n"
+    "modules:\n"
+    "  - docassemble.regression.namespace_aware\n"
+    "---\n"
+    "id: empty namespace shortlist setup\n"
+    "mandatory: True\n"
+    "code: |\n"
+    "  namespace_marker = True\n"
+    "  if not defined('shortlist'):\n"
+    "      shortlist = NamespaceAwareList('shortlist', auto_gather=False)\n"
+    "---\n"
+    "id: empty namespace shortlist\n"
+    "mandatory: True\n"
+    "question: |\n"
+    "  Anything to note?\n"
+    "fields:\n"
+    "  - Note: memo\n"
+    "    datatype: text\n"
+    "    required: False\n"
+    "  - Shortlist: shortlist\n"
+    "    datatype: object_checkboxes\n"
     "    required: False\n"
     "    choices: |\n"
     "      []\n"
 )
 
 
-def _empty_choice_object_workspace(tmp_path):
+def _plain_question_workspace(tmp_path, fixture):
     package = tmp_path / "docassemble" / "regression"
     questions = package / "data" / "questions"
     questions.mkdir(parents=True)
     (package / "__init__.py").write_text("")
-    (questions / "main.yml").write_text(EMPTY_CHOICE_OBJECT_FIXTURE)
+    (questions / "main.yml").write_text(fixture)
     return tmp_path
 
 
-def test_empty_choice_object_group_is_cleared_and_gathered(family_python, tmp_path):
+def test_required_empty_choice_object_group_is_cleared_and_gathered(
+    family_python, tmp_path
+):
     case = family_python
     label, interpreter = case.label, case.interpreter
-    root = _empty_choice_object_workspace(tmp_path)
+    root = _plain_question_workspace(tmp_path, EMPTY_CHOICE_OBJECT_FIXTURE)
 
     started = _run(interpreter, root, "start")
     assert started["ok"], (label, started)
@@ -1819,8 +1852,37 @@ def test_empty_choice_object_group_is_cleared_and_gathered(family_python, tmp_pa
     accepted = _run(interpreter, root, "answer", "memo=hello")
 
     assert accepted["ok"], (label, accepted)
-    # The group rendered no choices, so the answer path clears it and marks it
-    # gathered rather than leaving it undefined.
+    # The group is required (the YAML sets no ``required: False``) and rendered
+    # no choices, so the answer path clears and gathers it instead of failing
+    # the required gate on a selection it could never receive.
+    assert (
+        _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == "0"
+    ), label
+    assert (
+        _run(interpreter, root, "eval", "shortlist.gathered")["result"]["value"]
+        == "True"
+    ), label
+
+
+def test_empty_choice_object_group_clears_inside_the_interview_namespace(
+    family_python, tmp_path
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = _object_namespace_workspace(tmp_path, EMPTY_CHOICE_NAMESPACE_FIXTURE)
+
+    started = _run(interpreter, root, "start")
+    assert started["ok"], (label, started)
+    assert started["result"]["question_name"] == "ID empty namespace shortlist", (
+        label,
+        started,
+    )
+
+    accepted = _run(interpreter, root, "answer", "memo=hello", "shortlist=[]")
+
+    assert accepted["ok"], (label, accepted)
+    # The list existed before the screen and refuses mutations from outside the
+    # interview namespace, so clearing it proves the exec'd path.
     assert (
         _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == "0"
     ), label

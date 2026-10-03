@@ -1217,6 +1217,16 @@ _OBJECT_GROUP_DATATYPES = frozenset({"object_checkboxes", "object_multiselect"})
 _GROUP_DATATYPES = _CHECKBOX_GROUP_DATATYPES | _OBJECT_GROUP_DATATYPES
 
 
+def _rendered_no_object_choices(datatype, field):
+    """Whether an object group reached the browser with an empty choice list.
+
+    docassemble calls this ``is_empty_mc``: the field's resolved choices came
+    back empty, so the formatter hides it and the answer path clears and
+    gathers rather than applying per-choice updates (ADR-0014).
+    """
+    return datatype in _OBJECT_GROUP_DATATYPES and not (field.get("choices") or [])
+
+
 def _has_no_selected_option(value) -> bool:
     """Whether a group value holds no truthy selection.
 
@@ -1252,6 +1262,11 @@ def _required_violations(namespace, screen, blank_submissions):
         if datatype == "signature":
             continue
         if field.get("required") is False:
+            continue
+        if _rendered_no_object_choices(datatype, field):
+            # A zero-choice group cannot be selected, and the answer path clears
+            # and gathers it (ADR-0014), so the required gate must not demand a
+            # selection it cannot receive.
             continue
         found, value = _field_value(namespace, variable, targets)
         if not found:
@@ -1292,7 +1307,19 @@ def _submit_screen_fields(namespace, screen):
     blanks = []
     targets = _screen_field_targets(screen)
     for variable, default, required, field in _blankable_fields(namespace, screen):
-        signature = str(field.get("type", "")).lower() == "signature"
+        datatype = str(field.get("type", "")).lower()
+        if _rendered_no_object_choices(datatype, field):
+            # The browser still posts a group whose choices resolved empty, and
+            # docassemble clears it rather than leaving it undefined
+            # (ADR-0014). Like the other blanks, this lands on the resolved
+            # target rather than a generic-object placeholder. A required
+            # zero-choice group is cleared too: it has nothing to tick, so
+            # requiring a selection would make the screen unanswerable.
+            _clear_empty_object_group(
+                namespace, targets.get(variable, variable), datatype
+            )
+            continue
+        signature = datatype == "signature"
         if not signature and default is not None:
             applied = _apply_assignments(
                 namespace, screen, ((variable, default),), False
@@ -1301,16 +1328,6 @@ def _submit_screen_fields(namespace, screen):
                 continue
             logger.debug("field default %r could not be applied: %s", variable, applied)
         if required and not signature:
-            continue
-        datatype = str(field.get("type", "")).lower()
-        if datatype in _OBJECT_GROUP_DATATYPES and not (field.get("choices") or []):
-            # The browser still posts a group whose choices resolved empty, and
-            # docassemble clears it rather than leaving it undefined
-            # (ADR-0014). Like the other blanks, this lands on the resolved
-            # target rather than a generic-object placeholder.
-            _clear_empty_object_group(
-                namespace, targets.get(variable, variable), datatype
-            )
             continue
         blank = _browser_blank(field)
         if blank is not _NO_BLANK:
@@ -1395,7 +1412,7 @@ _CARRIER_VALUE = "__dasimulator_value"
 _CARRIER_OBJECT = "__dasimulator_object"
 
 
-def _exec_in_namespace(namespace, source, carrier=None, value=None):
+def _exec_in_namespace(namespace, source, carrier=_MISSING, value=None):
     """exec ``source`` with the interview namespace as globals.
 
     ``carrier``, when given, is bound to ``value`` for the duration and the
@@ -1408,7 +1425,7 @@ def _exec_in_namespace(namespace, source, carrier=None, value=None):
     when the caller runs inside the namespace, which is where the server runs
     it.
     """
-    if carrier is None:
+    if carrier is _MISSING:
         __builtins__["exec"](source, namespace)
         return
     previous = namespace.get(carrier, _MISSING)
@@ -1454,22 +1471,20 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
                     value = None
                 elif datatype in {"object", "object_radio"}:
                     continue
+            target = targets.get(variable, variable)
             if datatype in {
                 "object",
                 "object_radio",
                 "object_multiselect",
                 "object_checkboxes",
             }:
-                _apply_object(namespace, variable, datatype, value)
+                _apply_object(namespace, variable, target, datatype, value)
                 continue
             if datatype == "checkboxes" and isinstance(value, dict):
                 from docassemble.base.util import DADict
 
                 value = DADict(elements=value)
-            target = targets.get(variable, variable)
-            _exec_in_namespace(
-                namespace, f"{target} = {_CARRIER_VALUE}", _CARRIER_VALUE, value
-            )
+            _set_namespace_value(namespace, target, value)
         except (
             ValueError,
             TypeError,
@@ -1568,17 +1583,23 @@ def _mark_answered(interview, namespace, name):
             logger.debug("mark_as_answered failed for %r: %s", name, exc)
 
 
-def _apply_object(namespace, variable, datatype, value):
+def _object_selections(namespace, variable):
+    """The objects the screen offered for one object field, keyed by choice."""
+    return namespace.get("_internal", {}).get("objselections", {}).get(variable, {})
+
+
+def _apply_object(namespace, variable, target, datatype, value):
     """Apply one object answer, following the server's two paths.
 
-    Which path applies is decided by whether the screen rendered any choices
+    ``variable`` is the field as the screen named and posted it; ``target`` is
+    the resolved name the answer is applied to (the same name on an ordinary
+    screen, the generic-object target on a placeholder screen). Which path
+    applies is decided by whether the screen rendered any choices
     (docassemble's ``parse.is_empty_mc``): a field that rendered choices is
     applied per choice, and a field that rendered none is cleared and marked
     gathered. ADR-0014 records both.
     """
-    selections = (
-        namespace.get("_internal", {}).get("objselections", {}).get(variable, {})
-    )
+    selections = _object_selections(namespace, variable)
     if not isinstance(selections, dict):
         raise TypeError(f"no object selections are available for {variable}")
     if datatype in {"object", "object_radio"}:
@@ -1590,13 +1611,13 @@ def _apply_object(namespace, variable, datatype, value):
         else:
             selected = selections[key]
         _exec_in_namespace(
-            namespace, f"{variable} = {_CARRIER_OBJECT}", _CARRIER_OBJECT, selected
+            namespace, f"{target} = {_CARRIER_OBJECT}", _CARRIER_OBJECT, selected
         )
         return
     if not selections:
-        _clear_empty_object_group(namespace, variable, datatype)
+        _clear_empty_object_group(namespace, target, datatype)
         return
-    _apply_object_choice(namespace, variable, datatype, value, selections)
+    _apply_object_choice(namespace, variable, target, datatype, value, selections)
 
 
 def _ensure_object_target(namespace, variable, datatype):
@@ -1640,15 +1661,16 @@ def _object_choice_state(raw):
     return None
 
 
-def _apply_object_choice(namespace, variable, datatype, value, choices):
+def _apply_object_choice(namespace, variable, target, datatype, value, choices):
     """Apply a group answer the way the server does when choices were rendered.
 
-    Every rendered choice carries a checkbox, and the formatter registers all of
-    them in ``_checkboxes`` as ``'False'``, so a choice missing from the
-    submission is unticked. A ticked choice is appended only when absent and an
-    unticked choice is removed only when present, mirroring the server's
-    ``.elements`` guards. The list is never cleared, so an element with no
-    checkbox on the page survives.
+    ``variable`` names the field for diagnostics and selection lookup; every
+    mutation lands on ``target``. Every rendered choice carries a checkbox, and
+    the formatter registers all of them in ``_checkboxes`` as ``'False'``, so a
+    choice missing from the submission is unticked. A ticked choice is appended
+    only when absent and an unticked choice is removed only when present,
+    mirroring the server's ``.elements`` guards. The list is never cleared, so
+    an element with no checkbox on the page survives.
     """
     if value is None or isinstance(value, (str, bytes)):
         raise ValueError(
@@ -1663,7 +1685,7 @@ def _apply_object_choice(namespace, variable, datatype, value, choices):
     states = {key: False for key in choices}
     for key, raw in posted:
         states[key] = _object_choice_state(raw)
-    _ensure_object_target(namespace, variable, datatype)
+    _ensure_object_target(namespace, target, datatype)
     for key, state in states.items():
         if state is None:
             continue
@@ -1671,20 +1693,20 @@ def _apply_object_choice(namespace, variable, datatype, value, choices):
         if state:
             _exec_in_namespace(
                 namespace,
-                f"if {_CARRIER_OBJECT} not in {variable}.elements:\n"
-                f"    {variable}.append({_CARRIER_OBJECT})",
+                f"if {_CARRIER_OBJECT} not in {target}.elements:\n"
+                f"    {target}.append({_CARRIER_OBJECT})",
                 _CARRIER_OBJECT,
                 selection,
             )
         else:
             _exec_in_namespace(
                 namespace,
-                f"if {_CARRIER_OBJECT} in {variable}.elements:\n"
-                f"    {variable}.remove({_CARRIER_OBJECT})",
+                f"if {_CARRIER_OBJECT} in {target}.elements:\n"
+                f"    {target}.remove({_CARRIER_OBJECT})",
                 _CARRIER_OBJECT,
                 selection,
             )
-    _mark_object_gathered(namespace, variable)
+    _mark_object_gathered(namespace, target)
 
 
 def _clear_empty_object_group(namespace, variable, datatype):
@@ -1692,11 +1714,11 @@ def _clear_empty_object_group(namespace, variable, datatype):
 
     docassemble routes a multiple-choice field whose resolved choices came back
     empty through the formatter's ``hiddens``; the answer handling clears the
-    group and marks it gathered.
+    group and marks it gathered. ``ensure_object_exists`` leaves an existing
+    target alone, so the target is created only when the flow has not defined
+    it yet.
     """
-    from docassemble.base.parse import ensure_object_exists
-
-    ensure_object_exists(variable, datatype, namespace)
+    _ensure_object_target(namespace, variable, datatype)
     _exec_in_namespace(namespace, f"{variable}.clear()")
     _mark_object_gathered(namespace, variable)
 

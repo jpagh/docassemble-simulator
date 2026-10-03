@@ -1,6 +1,7 @@
 # Code-review findings fix plan 5 (0384cbc)
 
-Status: proposed — not yet implemented.
+Status: implemented (0384cbc, 59eda10). A later review's required-group and
+resolved-target follow-ups are recorded in ADR-0014.
 
 Review scope: `origin/main...HEAD` on `main` (1 commit, 3 files, +172/−8),
 two-axis review of `0384cbc fix: apply object checkbox answers in the interview

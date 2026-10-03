@@ -166,6 +166,9 @@ def legacy_frame_resolution(monkeypatch):
     functions = sys.modules["docassemble.base.functions"]
 
     def legacy_get_user_dict():
+        # The scan stops at the module-level frame ``exec(source, namespace)``
+        # creates, whose ``f_locals`` is the live namespace dict itself, so a
+        # caller that mutated the result would mutate the interview.
         frame = sys._getframe(1)
         while frame is not None:
             if "_internal" in frame.f_locals:
@@ -1317,6 +1320,8 @@ class EmptyChoiceCheckboxInterview(FakeInterview):
     """A screen whose object group resolved to no choices at all, beside a
     plain field the caller answers."""
 
+    REQUIRED: ClassVar[bool] = False
+
     def assemble(self, namespace, interview_status):
         namespace["_internal"].setdefault("objselections", {})["shortlist"] = {}
         interview_status.question = SimpleNamespace(
@@ -1328,7 +1333,7 @@ class EmptyChoiceCheckboxInterview(FakeInterview):
                 SimpleNamespace(
                     saveas="shortlist",
                     datatype="object_checkboxes",
-                    required=False,
+                    required=self.REQUIRED,
                     choices=[],
                 ),
             ],
@@ -1365,6 +1370,32 @@ def test_empty_choice_object_group_is_cleared_and_gathered(
 ):
     execution, _, _ = _execution(
         tmp_path, monkeypatch, da_stubs, EmptyChoiceCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("note", "'hello'"),)))
+
+    assert accepted.ok, accepted.error
+    assert execution.run(Evaluate("len(shortlist)")).result["value"] == "0"
+    assert execution.run(Evaluate("shortlist.gathered")).result["value"] == "True"
+
+
+class RequiredEmptyChoiceCheckboxInterview(EmptyChoiceCheckboxInterview):
+    """A zero-choice object group that is also a required field.
+
+    A field with no rendered choices cannot be selected at all; the server
+    clears and gathers it whether or not it is required, so the answer path
+    must not reject it for having nothing to tick.
+    """
+
+    REQUIRED = True
+
+
+def test_required_empty_choice_object_group_is_cleared_and_gathered(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, RequiredEmptyChoiceCheckboxInterview
     )
     assert execution.run(Start()).ok
 
@@ -1426,6 +1457,102 @@ def test_unsubmitted_object_group_with_choices_stays_undefined(
     assert not execution.run(Evaluate("shortlist")).ok
 
 
+class GenericObjectCheckboxInterview(FakeInterview):
+    """A generic-object screen whose group lives under the placeholder root.
+
+    The field is posted as ``x.shortlist`` while the resolved target is
+    ``rav.shortlist``, so every object mutation must land on ``rav``.
+    """
+
+    CHOICES: ClassVar[dict[str, str]] = {}
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        namespace["_internal"].setdefault("objselections", {})["x.shortlist"] = {
+            key: namespace[key] for key in self.CHOICES
+        }
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="x.shortlist",
+                    datatype="object_checkboxes",
+                    required=False,
+                    choices=[
+                        {"key": key, "label": label}
+                        for key, label in self.CHOICES.items()
+                    ],
+                )
+            ],
+        )
+        interview_status.question_text = "Who belongs on the shortlist?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.shortlist"
+        interview_status.orig_sought = "rav.shortlist"
+        interview_status.selectcompute = {}
+
+
+def test_empty_choice_object_group_lands_on_the_resolved_target(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericObjectCheckboxInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.shortlist", "[]"),)))
+
+    assert accepted.ok, accepted.error
+    assert execution.run(Evaluate("len(rav.shortlist)")).result["value"] == "0"
+    assert execution.run(Evaluate("rav.shortlist.gathered")).result["value"] == "True"
+    assert (
+        execution.run(Evaluate("globals().get('x') is None")).result["value"] == "True"
+    )
+
+
+class GenericObjectChoiceCheckboxInterview(GenericObjectCheckboxInterview):
+    """The same generic screen with one rendered choice."""
+
+    CHOICES: ClassVar[dict[str, str]] = {"alice": "Alice"}
+
+    def assemble(self, namespace, interview_status):
+        namespace.setdefault("alice", PicklableStubObject(instanceName="alice"))
+        super().assemble(namespace, interview_status)
+
+
+def test_object_choice_lands_on_the_resolved_target(tmp_path, monkeypatch, da_stubs):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericObjectChoiceCheckboxInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.shortlist", '["alice"]'),)))
+
+    assert accepted.ok, accepted.error
+    assert (
+        execution.run(
+            Evaluate("[item.instanceName for item in rav.shortlist.elements]")
+        ).result["value"]
+        == "['alice']"
+    )
+    assert execution.run(Evaluate("rav.shortlist.gathered")).result["value"] == "True"
+    assert (
+        execution.run(Evaluate("globals().get('x') is None")).result["value"] == "True"
+    )
+
+
 def _shortlist_names(execution):
     return execution.run(
         Evaluate("[item.instanceName for item in shortlist.elements]")
@@ -1482,7 +1609,7 @@ def test_object_checkbox_removes_an_unticked_choice(
     assert _shortlist_names(execution) == "['alice']"
 
 
-def test_object_checkbox_empty_answer_untickes_every_rendered_choice(
+def test_object_checkbox_empty_answer_unticks_every_rendered_choice(
     tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
 ):
     execution, _, _ = _execution(
@@ -1555,6 +1682,67 @@ class FrameAwareRadioInterview(FakeInterview):
         interview_status.sought = "selection"
         interview_status.orig_sought = "selection"
         interview_status.selectcompute = {}
+
+
+class PredefinedEmptyChoiceCheckboxInterview(FakeInterview):
+    """A zero-choice group whose list already exists and only accepts
+    mutations from inside the interview namespace."""
+
+    def assemble(self, namespace, interview_status):
+        namespace.setdefault("frame_probe", True)
+        if "shortlist" not in namespace:
+            namespace["shortlist"] = NamespaceAwareList(
+                [PicklableStubObject(instanceName="bob")]
+            )
+        namespace["_internal"].setdefault("objselections", {})["shortlist"] = {}
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="empty shortlist",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="shortlist",
+                    datatype="object_checkboxes",
+                    required=False,
+                    choices=[],
+                )
+            ],
+        )
+        interview_status.question_text = "Who belongs on the shortlist?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "shortlist"
+        interview_status.orig_sought = "shortlist"
+        interview_status.selectcompute = {}
+
+
+def test_empty_choice_object_group_clears_inside_the_interview_namespace(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, PredefinedEmptyChoiceCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("shortlist", "[]"),)))
+
+    assert accepted.ok, accepted.error
+    assert execution.run(Evaluate("len(shortlist)")).result["value"] == "0"
+    assert execution.run(Evaluate("shortlist.gathered")).result["value"] == "True"
+
+
+def test_object_checkbox_rejects_a_ticked_unknown_choice(
+    tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, FrameAwareCheckboxInterview
+    )
+    assert execution.run(Start()).ok
+
+    rejected = execution.run(Answer((("shortlist", '{"carol": true}'),)))
+
+    assert not rejected.ok and rejected.error.kind == "answer-input"
+    assert any("carol" in item for item in rejected.error.details["errors"])
 
 
 def test_object_radio_assigns_the_selected_object(
