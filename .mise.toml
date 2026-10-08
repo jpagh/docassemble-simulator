@@ -67,7 +67,10 @@
     run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-da110 DASIMULATOR_REAL_PYTHON=\"$PWD/.venv-da110/bin/python\" DASIMULATOR_REAL_PYTHON_19=\"$PWD/.venv-da19/bin/python\" uv run --group da110 pytest -q"
 
 [tasks.pre-commit]
-    description = "Lint and format the whole project"
+    description = "Lint, format, and fast-test before committing"
+    # The real-runtime and corpus lanes need a provisioned docassemble
+    # interpreter plus the external corpus checkout and cost minutes, so they
+    # stay out of the commit hook: run `mise run test` to gate a release.
     run         = [
-        { tasks = ["lint", "format", "test"] },
+        { tasks = ["lint", "format", "test:fast"] },
     ]
