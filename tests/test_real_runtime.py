@@ -492,6 +492,17 @@ def _environment():
     if environment.get("PYTHONPATH"):
         python_path.append(environment["PYTHONPATH"])
     environment["PYTHONPATH"] = os.pathsep.join(python_path)
+    # A module warns while it is *compiled*, so a third-party package with an
+    # invalid escape sequence or a `break` in a `finally` block writes to
+    # stderr on its first import after a reinstall, then stays silent once its
+    # bytecode is cached. That is environment noise, not simulator output, and
+    # the stderr assertions in _run/_command are about the latter. Appended
+    # filters take precedence, so an outer PYTHONWARNINGS setting survives.
+    filters = (
+        [environment["PYTHONWARNINGS"]] if environment.get("PYTHONWARNINGS") else []
+    )
+    filters.append("ignore::SyntaxWarning")
+    environment["PYTHONWARNINGS"] = ",".join(filters)
     return environment
 
 
