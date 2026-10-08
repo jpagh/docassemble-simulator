@@ -1,0 +1,25 @@
+# Dependabot version updates.
+#
+# This file only controls scheduled version-update pull requests. It cannot
+# suppress Dependabot *security alerts*, which are produced from the dependency
+# graph regardless of this config; those are handled by dismissal under the
+# accepted-risk decision in docs/adr/0015-compatibility-matrix-alerts-are-accepted.md.
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      # These packages are the runtime compatibility matrix fixture, not
+      # shipped dependencies. The `da19` lane is intentionally old, and moving
+      # any of them rewrites uv.lock's transitive pins, so it must be a
+      # deliberate change gated on `mise run test:all-da`
+      # (see docs/runtime-compatibility.md) rather than a scheduled PR.
+      - dependency-name: "docassemble-base"
+      - dependency-name: "docassemble-webapp"
+      - dependency-name: "docassemble-demo"
+      - dependency-name: "docassemble-assemblyline"
+      - dependency-name: "docassemble-altoolbox"

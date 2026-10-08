@@ -15,7 +15,7 @@ groups in `pyproject.toml` and exercised by the real-runtime lane
 | Runtime family | docassemble-base | docassemble-webapp | docassemble.AssemblyLine | docassemble.ALToolbox |
 | --- | --- | --- | --- | --- |
 | legacy 1.9.x | 1.9.13 | 1.9.13 | 4.8.0 | 0.19.0 |
-| modern 1.10.x | 1.10.10 | 1.10.10 | 4.8.0 | 0.19.0 |
+| modern 1.10.x | 1.10.13 | 1.10.13 | 4.8.0 | 0.19.0 |
 
 Both lanes run on CPython 3.12+; the AssemblyLine release requires it. The
 `da19` / `da110` groups attach the AssemblyLine packages only on Python 3.12+
@@ -33,6 +33,28 @@ mise run sync:da19
 mise run sync:da110
 mise run test:all-da
 ```
+
+## Dependency pinning and security alerts
+
+`docassemble-base` and `docassemble-webapp` pin their entire dependency tree
+with `==`, so each lane installs the versions upstream chose rather than the
+newest compatible ones. GitHub's dependency graph reports the resulting
+advisories against `uv.lock`; they belong to the emulated runtime, not to the
+simulator.
+
+- The published package depends only on `pyyaml`, so no advisory reaching the
+  lock through `da19`/`da110` reaches an installed `docassemble-simulator`.
+- The lanes deliberately keep upstream's exact pins. Overriding them would make
+  the real-runtime lane exercise a dependency set that no docassemble server
+  runs, which is the one thing that lane exists to prevent.
+- Refreshing a lane is a deliberate act, not a scheduled bump. The group
+  specifiers float within `<1.11`, so `uv lock --upgrade` silently moves the
+  lane: re-run `mise run test:all-da`, then update the matrix row above.
+
+Four of those advisories have no patched release at all, so a fully green
+security tab is not reachable while the matrix exists. The accepted-risk
+decision, with the measured effect of each alternative, is recorded in
+[ADR-0015](adr/0015-compatibility-matrix-alerts-are-accepted.md).
 
 ## What the simulator verifies
 

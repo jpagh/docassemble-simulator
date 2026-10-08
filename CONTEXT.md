@@ -14,6 +14,7 @@
 - **Reviewed trace exception**: A reasoned tolerance for one known identity difference, categorized as a deliberate error or capability boundary; it cannot excuse order violations or simulator faults.
 - **Active seek**: A sought screen persisted as the session's active target until answered or refreshed.
 - **Variable-seek diagnostic**: A non-fatal trace event showing which variable or question docassemble considered while trying to resolve an undefined reference.
+- **Runtime compatibility lane**: One of the two provisioned target interpreters (`da19` for docassemble 1.9.x, `da110` for 1.10.x) whose dependency group pins a tested docassemble/AssemblyLine pair; it is a test fixture the real-runtime lane exercises, never a dependency of the published package, and it keeps upstream's exact transitive pins even where those pins carry known advisories.
 - **Runtime compatibility probe**: A non-mutating compile of the standard AssemblyLine birthdate field metadata through the real docassemble compiler, run before the target Interview when AssemblyLine is installed.
 - **AssemblyLine compatibility failure**: The typed result (`runtime-compatibility`) when the installed docassemble/AssemblyLine pair cannot compile the probe; it names the runtime family, package versions, failing capability, and recovery direction, and never creates session state.
 - **Unresolved-variable failure**: The terminal result when docassemble exhausts variable seeking without finding a question or code block capable of defining the sought variable.

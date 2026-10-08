@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
@@ -2516,7 +2516,7 @@ wheels = [
 
 [[package]]
 name = "docassemble-base"
-version = "1.10.10"
+version = "1.10.13"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -2711,9 +2711,9 @@ dependencies = [
     { name = "yarl", version = "1.24.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "zipp", version = "4.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1a/2c/835a7b1c54ab7903ed2925652c8a01bd48eca58f44cce9d15d9bc2668d80/docassemble_base-1.10.10.tar.gz", hash = "sha256:ada5341a4742a94282c53172669e2ddedbb5c40698daeea73f5f46c89b1f3934", size = 11047991, upload-time = "2026-09-13T00:00:39.618Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/b1/aeae60a7907b82578c15df08f18e8f4663da67862064684886024717ecdb/docassemble_base-1.10.13.tar.gz", hash = "sha256:e1fe7ec1544186e846143e9c3bccf47951843897e51d50808c9824b24499194b", size = 11048741, upload-time = "2026-10-02T03:20:30.652Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/0f/cdd19640e38b9b626b0aeae4f17493b0154836656f3750058af4c661a29d/docassemble_base-1.10.10-py3-none-any.whl", hash = "sha256:12de3d90e21a78cd8b79daa9e20a1aaa1084abc41050b0ee3f07d8ee476dd47e", size = 11451583, upload-time = "2026-09-13T00:00:34.367Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/ff/15ee72e6b1e5e26c36a7e6a3b9876481bf3a2e15a4441e7936ec45da1bea/docassemble_base-1.10.13-py3-none-any.whl", hash = "sha256:59164e724e87c93384118ec9d36a60bed141085e758fa7a585f3d483f68eadca", size = 11452033, upload-time = "2026-10-02T03:20:25.974Z" },
 ]
 
 [[package]]
@@ -2754,7 +2754,7 @@ wheels = [
 
 [[package]]
 name = "docassemble-demo"
-version = "1.10.10"
+version = "1.10.13"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -2765,11 +2765,11 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "docassemble-base", version = "1.10.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "docassemble-base", version = "1.10.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/05/be/56d7617747ce3f033605aa8398da952804651fba0f1e0c3508d3caae45a4/docassemble_demo-1.10.10.tar.gz", hash = "sha256:99bcbce0d28300aea4841aa831b6b96c9ad5c8b190d9525e5a9b8148b704519f", size = 8131457, upload-time = "2026-09-13T00:00:49.529Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/20/4c5447caf520f4f000b5c3850145141b672a8eb866cc8644760be9cf1e88/docassemble_demo-1.10.13.tar.gz", hash = "sha256:8f18b76a2da8fc0ad073dc95130cfab14801146d06f14cc5c0e2e8603f60740c", size = 8131512, upload-time = "2026-10-02T03:20:40.572Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/67/ff92f10eb958de285cab8c152ac55e9bad739fb22b98f70ad7aa06bbcf36/docassemble_demo-1.10.10-py3-none-any.whl", hash = "sha256:7cffa1370c8de6bdabf9d2c7a22537c3380f1440dfc7c34329ac5711ac4f50e1", size = 8408025, upload-time = "2026-09-13T00:00:45.558Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/91/115d6bfb1d7c79e2f51a046a01d35079e13457dfc0eb2cb6e048cae1b34d/docassemble_demo-1.10.13-py3-none-any.whl", hash = "sha256:7f7c8b56f0600d16ab76025ae19721ac4de7fc7521b292f3204acec63c052a74", size = 8408033, upload-time = "2026-10-02T03:20:36.93Z" },
 ]
 
 [[package]]
@@ -2883,9 +2883,9 @@ dependencies = [
 da110 = [
     { name = "docassemble-assemblyline", marker = "python_full_version >= '3.12'" },
     { name = "docassemble-base", version = "1.10.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'group-21-docassemble-simulator-da110') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
-    { name = "docassemble-base", version = "1.10.10", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'group-21-docassemble-simulator-da110') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
+    { name = "docassemble-base", version = "1.10.13", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'group-21-docassemble-simulator-da110') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
     { name = "docassemble-webapp", version = "1.10.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'group-21-docassemble-simulator-da110') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
-    { name = "docassemble-webapp", version = "1.10.10", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'group-21-docassemble-simulator-da110') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
+    { name = "docassemble-webapp", version = "1.10.13", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'group-21-docassemble-simulator-da110') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
 ]
 da19 = [
     { name = "docassemble-assemblyline", marker = "python_full_version >= '3.12'" },
@@ -3462,7 +3462,7 @@ wheels = [
 
 [[package]]
 name = "docassemble-webapp"
-version = "1.10.10"
+version = "1.10.13"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -3525,8 +3525,8 @@ dependencies = [
     { name = "deprecation", marker = "python_full_version >= '3.12'" },
     { name = "dnspython", marker = "python_full_version >= '3.12'" },
     { name = "docassemble-backports", marker = "python_full_version >= '3.12'" },
-    { name = "docassemble-base", version = "1.10.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "docassemble-demo", version = "1.10.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "docassemble-base", version = "1.10.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "docassemble-demo", version = "1.10.13", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "docassemble-flask-user", version = "0.6.32", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "docassemble-mako", marker = "python_full_version >= '3.12'" },
     { name = "docassemble-pattern", marker = "python_full_version >= '3.12'" },
@@ -3727,9 +3727,9 @@ dependencies = [
     { name = "zope-event", version = "6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "zope-interface", version = "8.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/96/a0/2f5855b5312528da9222d8a9f26ba5e19131cbaef9fc06d1ff41ca9fccb2/docassemble_webapp-1.10.10.tar.gz", hash = "sha256:9518d50c340adf4a3d932b0ba14cf025be8590f9b5e0f182cc02b14e190b4a39", size = 35790288, upload-time = "2026-09-13T00:01:17.433Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/a5/ae97cf3bdae70abebb8d9fc171820104fef97a85fa4b06e74763975f20ef/docassemble_webapp-1.10.13.tar.gz", hash = "sha256:26141f2592e676f117b48296c028568e16ae2fd613d6be01a05ab1f3ea223d11", size = 35793484, upload-time = "2026-10-02T03:30:33.291Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/fa/edba926534ea1bf918670ba1e90fb02e253a817c1067428189f72b9c6774/docassemble_webapp-1.10.10-py3-none-any.whl", hash = "sha256:34eb654a6bc4a12decd5e2ed20aded874d924869edbce6be64ce9880969be7c3", size = 36650594, upload-time = "2026-09-13T00:01:09.086Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/e7/58331236b1d85e2352f56be45210a536eca451ccf1a0e07d237de9dcb134/docassemble_webapp-1.10.13-py3-none-any.whl", hash = "sha256:59e5f05c8b0b7e84d5f54ecc617ca7bd62303a3023303a6c59ca6afdc052a809", size = 36655336, upload-time = "2026-10-02T03:21:00.543Z" },
 ]
 
 [[package]]
