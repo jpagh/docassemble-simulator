@@ -391,22 +391,28 @@ verification remain deployment or staging responsibilities.
 
 ## Development
 
-Run the complete suite with:
+Use the default command for everyday development:
 
 ```sh
 mise run test
 ```
 
-For fast local feedback, run the tests without real runtimes or the external
-corpus:
+It selects only fast tests, excluding real-runtime and external corpus tests
+regardless of which runtimes or fixtures are installed locally. `mise run
+test:fast` remains supported with the same selection, and the commit hook
+continues to use that fast lane. Neither command is a complete release gate.
+
+Run slow validation explicitly:
 
 ```sh
-mise run test:fast
+mise run test:runtime # Real-docassemble contracts in the selected interpreter
+mise run test:corpus  # External example corpus (requires its fixtures/runtime)
+mise run test:all-da  # Provision and exercise both supported runtime families
 ```
 
-The slower tests are split into explicit lanes. `test:runtime` runs the
-real-docassemble contract tests, while `test:corpus` runs the isolated external
-example corpus. The default `test` task still runs every test.
+To run every test in the current environment, use `uv run pytest`; runtime and
+corpus checks skip when their prerequisites are absent. Use the provisioned
+cross-family gate and the corpus lane for complete slow validation.
 
 Real-docassemble fidelity is covered by a separate lane that runs the CLI in a
 target package's interpreter (which supplies `docassemble` and `python-docx`):

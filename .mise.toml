@@ -38,8 +38,8 @@
     ]
 
 [tasks.test]
-    description = "Run the complete test suite with pytest"
-    run         = "uv run pytest"
+    description = "Run fast development tests (excludes real runtimes and external corpus)"
+    run         = "uv run pytest -q -m 'not real_runtime and not corpus'"
 
 [tasks."test:fast"]
     description = "Run tests without real runtimes or the external corpus"
@@ -70,7 +70,8 @@
     description = "Lint, format, and fast-test before committing"
     # The real-runtime and corpus lanes need a provisioned docassemble
     # interpreter plus the external corpus checkout and cost minutes, so they
-    # stay out of the commit hook: run `mise run test` to gate a release.
+    # stay out of the commit hook: run `test:all-da` and `test:corpus`
+    # explicitly for slow validation; `test` is the everyday fast lane.
     run         = [
         { tasks = ["lint", "format", "test:fast"] },
     ]
