@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Two-family real-runtime compatibility gate (issue #11).
+#
+# `mise run test:runtime` depends on `sync:da19` and `sync:da110`, so the lanes
+# below are already provisioned by the time this script runs. The script
+# validates those lanes, targets them explicitly, and runs the `real_runtime`
+# contract selection (including screen-trace acceptance) with the external
+# corpus excluded. A missing, broken, or wrong-family lane exits before pytest;
+# an empty selection exits nonzero. tests/_runtime_gate.py additionally fails a
+# green run when a family contributed no passing coverage.
+#
+# usage: scripts/test-runtime [--modern PATH] [--legacy PATH] [pytest args...]
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+modern="$repo_root/.venv-da110/bin/python"
+legacy="$repo_root/.venv-da19/bin/python"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --modern)
+      modern=$2
+      shift 2
+      ;;
+    --legacy)
+      legacy=$2
+      shift 2
+      ;;
+    -h | --help)
+      echo "usage: scripts/test-runtime [--modern PATH] [--legacy PATH] [pytest args...]" >&2
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+probe_lane() { # label interpreter expected_family sync_task
+  local label=$1 interpreter=$2 expected=$3 sync_task=$4
+  if [[ ! -x "$interpreter" ]]; then
+    echo "error: the $label runtime lane interpreter is missing or not executable:" >&2
+    echo "  $interpreter" >&2
+    echo "provision it with: mise run $sync_task" >&2
+    exit 2
+  fi
+
+  local probe
+  probe=$(
+    "$interpreter" -c '
+import importlib.metadata as metadata
+import importlib.util as util
+import docassemble.base  # noqa: F401 - importing is the capability under test
+family = "modern" if util.find_spec("docassemble.base.thread_context") else "legacy"
+print(family, metadata.version("docassemble-base"), metadata.version("docassemble-webapp"))
+' 2>&1
+  ) || {
+    echo "error: the $label runtime lane interpreter cannot import the docassemble runtime:" >&2
+    echo "  $interpreter" >&2
+    echo "$probe" | sed 's/^/  /' >&2
+    echo "provision it with: mise run $sync_task" >&2
+    exit 2
+  }
+
+  local family base webapp
+  family=$(echo "$probe" | tail -n 1 | awk '{print $1}')
+  base=$(echo "$probe" | tail -n 1 | awk '{print $2}')
+  webapp=$(echo "$probe" | tail -n 1 | awk '{print $3}')
+  if [[ "$family" != "$expected" ]]; then
+    echo "error: the $label runtime lane expects the $expected docassemble family but its interpreter reports $family:" >&2
+    echo "  $interpreter" >&2
+    echo "provision it with: mise run $sync_task" >&2
+    exit 2
+  fi
+
+  echo "runtime gate: $label lane -> $family (docassemble-base $base, docassemble-webapp $webapp)"
+}
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is not on PATH; run the gate through mise (mise run test:runtime)" >&2
+  exit 2
+fi
+
+probe_lane "modern" "$modern" "modern" "sync:da110"
+probe_lane "legacy" "$legacy" "legacy" "sync:da19"
+
+export DASIMULATOR_REAL_PYTHON="$modern"
+export DASIMULATOR_REAL_PYTHON_19="$legacy"
+export DASIMULATOR_RUNTIME_GATE=1
+
+cd "$repo_root"
+echo "runtime gate: selecting 'real_runtime and not corpus'"
+set +e
+uv run pytest -q -m 'real_runtime and not corpus' "$@"
+status=$?
+set -e
+
+if [[ $status -eq 5 ]]; then
+  echo "error: the runtime gate selected no tests; check the real_runtime marker and any pytest arguments" >&2
+fi
+exit "$status"

@@ -405,10 +405,21 @@ continues to use that fast lane. Neither command is a complete release gate.
 Run slow validation explicitly:
 
 ```sh
-mise run test:runtime # Real-docassemble contracts in the selected interpreter
+mise run test:runtime # Two-family runtime compatibility gate (provisions both lanes)
 mise run test:corpus  # External example corpus (requires its fixtures/runtime)
-mise run test:all-da  # Provision and exercise both supported runtime families
+mise run test:all-da  # Aggregate lane: whole suite with both runtime families wired
 ```
+
+`mise run test:runtime` is the runtime compatibility gate. It provisions the
+isolated `.venv-da110` (docassemble 1.10.x) and `.venv-da19` (1.9.x)
+environments, points `DASIMULATOR_REAL_PYTHON` / `DASIMULATOR_REAL_PYTHON_19`
+at their interpreters, and runs the real-runtime contract tests, including the
+screen-trace acceptance scenario, with the external corpus excluded. A lane
+that is missing, cannot import the runtime, or belongs to the wrong family
+fails before pytest runs, and a family that contributes no passing coverage
+fails the session, so the gate can never pass by skipping its intended
+coverage. `mise run sync:da19` / `mise run sync:da110` (re)provision one family
+without running the gate.
 
 To run every test in the current environment, use `uv run pytest`; runtime and
 corpus checks skip when their prerequisites are absent. Use the provisioned
@@ -440,13 +451,16 @@ mise run test:all-da
 
 This syncs isolated `.venv-da19` (docassemble 1.9.x) and `.venv-da110`
 (1.10.x) environments, including the AssemblyLine compatibility fixture and
-target smoke path, and runs the suite once with both lanes wired up
+target smoke path, and runs the whole suite once with both lanes wired up
 (`DASIMULATOR_REAL_PYTHON*` pointing at those interpreters), so every
-cross-family contract test exercises the modern and legacy runtimes. Use
-`mise run sync:da19` / `mise run sync:da110` to (re)provision one family
+cross-family contract test exercises the modern and legacy runtimes. It is the
+aggregate lane: fast tests plus both families, plus the corpus tests when their
+fixtures are available. The compatibility gate proper is `mise run
+test:runtime`, which runs the same two lanes against the runtime contract only.
+Use `mise run sync:da19` / `mise run sync:da110` to (re)provision one family
 without running the suite.
 
-There is no CI runner for the 1.9.x lane yet: `mise run test:all-da` is the
+There is no CI runner for the 1.9.x lane yet: `mise run test:runtime` is the
 manual regression gate that must pass before changes to the runtime
 compatibility layer merge (issue #1, story 23).
 

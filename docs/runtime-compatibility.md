@@ -9,8 +9,9 @@ failure means.
 
 A dependency lower bound is not evidence that every later release works
 together. The matrix below is provisioned from the `da19` / `da110` dependency
-groups in `pyproject.toml` and exercised by the real-runtime lane
-(`tests/test_real_runtime.py`, `mise run test:all-da`).
+groups in `pyproject.toml` and exercised by the runtime gate
+(`mise run test:runtime`, contract files `tests/test_real_runtime.py` and
+`tests/test_trace_real_runtime.py`).
 
 | Runtime family | docassemble-base | docassemble-webapp | docassemble.AssemblyLine | docassemble.ALToolbox |
 | --- | --- | --- | --- | --- |
@@ -29,10 +30,30 @@ the lock keeps the legacy lane installable by selecting a compatible
 `markitdown` and constraining `onnxruntime`. Reproduce the lanes with:
 
 ```sh
-mise run sync:da19
-mise run sync:da110
-mise run test:all-da
+mise run test:runtime # provision both lanes and run the compatibility gate
+mise run test:all-da  # aggregate lane: whole suite with both families wired
 ```
+
+## Runtime gate
+
+`mise run test:runtime` is the compatibility gate. It provisions both lanes,
+exports `DASIMULATOR_REAL_PYTHON` and `DASIMULATOR_REAL_PYTHON_19`, and selects
+the `real_runtime` contract tests, including screen-trace acceptance, with the
+external corpus excluded. `scripts/test-runtime` performs that selection and
+preflights both lanes; it fails before pytest when a lane interpreter is
+missing, cannot import the runtime, or reports the wrong family, and prints the
+`mise run sync:*` command that provisions it. `tests/_runtime_gate.py` then
+fails a session in which a required family contributed no passing test, or in
+which a lane interpreter variable is absent, so a run cannot satisfy the gate
+by skipping the coverage it exists to exercise. Individually skipped
+capability tests (for example a lane without AssemblyLine) stay legitimate
+skips.
+
+`mise run test:all-da` remains the aggregate lane: it runs the whole suite
+(fast tests, both runtime families, and corpus tests when their fixtures are
+available) inside the modern lane interpreter. Prefer the gate for the
+compatibility contract and `mise run test:corpus` for the external corpus;
+neither is part of the other.
 
 ## Dependency pinning and security alerts
 
@@ -49,7 +70,7 @@ simulator.
   runs, which is the one thing that lane exists to prevent.
 - Refreshing a lane is a deliberate act, not a scheduled bump. The group
   specifiers float within `<1.11`, so `uv lock --upgrade` silently moves the
-  lane: re-run `mise run test:all-da`, then update the matrix row above.
+  lane: re-run `mise run test:runtime`, then update the matrix row above.
 
 Four of those advisories have no patched release at all, so a fully green
 security tab is not reachable while the matrix exists. The accepted-risk

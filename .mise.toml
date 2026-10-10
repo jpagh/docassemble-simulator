@@ -48,8 +48,9 @@
     run         = "uv run pytest -q -m 'not real_runtime and not corpus'"
 
 [tasks."test:runtime"]
-    description = "Run real-runtime contract tests without the external corpus"
-    run         = "uv run pytest -q -m 'real_runtime and not corpus'"
+    description = "Two-family runtime compatibility gate: provisions both lanes and fails if one is skipped"
+    depends     = ["sync:da19", "sync:da110"]
+    run         = "scripts/test-runtime"
 
 [tasks."test:corpus"]
     description = "Run tests for the external docassemble corpus"
@@ -64,7 +65,7 @@
     run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-da110 uv sync --group da110"
 
 [tasks."test:all-da"]
-    description = "Run tests against real docassemble 1.9.x and 1.10.x"
+    description = "Aggregate lane: whole suite with both runtime families wired (corpus tests need their fixtures)"
     depends     = ["sync:da19", "sync:da110"]
     run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-da110 DASIMULATOR_REAL_PYTHON=\"$PWD/.venv-da110/bin/python\" DASIMULATOR_REAL_PYTHON_19=\"$PWD/.venv-da19/bin/python\" uv run --group da110 pytest -q"
 

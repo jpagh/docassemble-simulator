@@ -12,6 +12,15 @@ from contextlib import contextmanager
 
 import pytest
 
+# The runtime gate hooks are imported, not redefined, so a probe project can
+# load the same plugin with ``-p _runtime_gate`` (see tests/test_runtime_gate.py).
+from _runtime_gate import (  # noqa: F401 - pytest hook implementations
+    pytest_collection_modifyitems,
+    pytest_configure,
+    pytest_runtest_logreport,
+    pytest_sessionfinish,
+)
+
 
 class _StubThisThread:
     current_info = None
