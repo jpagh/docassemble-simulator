@@ -19,7 +19,9 @@
 
 [tasks.release]
     description = "Bump the patch digit, push the commit and tag, and publish the GitHub release"
-    tools       = { gh = "latest", uv = "latest" }
+    # `gh` is intentionally not declared here: it is provided by Homebrew and
+    # only needs to be on PATH. scripts/release checks for it and aborts early.
+    tools       = { uv = "latest" }
     run         = "scripts/release"
 
 [tasks.lint]

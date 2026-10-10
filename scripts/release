@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Bump the patch version, push the commit and tag, and publish the GitHub
 # release with notes generated from the commits since the previous tag.
+#
+# Requires the GitHub CLI (`gh`) on PATH; it is deliberately not managed by
+# mise (Homebrew's formula ships the zsh completion that mise's package lacks).
 set -euo pipefail
 
 usage() {
@@ -27,6 +30,12 @@ cd "$repo_root"
 if $dry_run; then
   bump-my-version bump patch --dry-run --verbose
   exit 0
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "error: 'gh' (GitHub CLI) is required to publish the release;" >&2
+  echo "       install it (e.g. brew install gh) and ensure it is on PATH." >&2
+  exit 1
 fi
 
 bump-my-version bump patch
