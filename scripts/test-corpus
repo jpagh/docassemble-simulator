@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# External corpus canary gate (issue #12).
+#
+# `mise run test:corpus` depends on `sync:da110`, so the modern Runtime
+# compatibility lane is already provisioned by the time this script runs. The
+# script validates that lane and the external fixture checkout before pytest,
+# points the corpus-marked contract tests at the lane interpreter, reuses a
+# versioned NLTK data cache, and bounds corpus case concurrency. A missing,
+# broken, or wrong-family lane, an unusable fixture checkout, an invalid worker
+# count, or an empty selection exits before or without a green pytest run;
+# tests/_corpus_gate.py additionally fails a green run in which the requested
+# corpus suite never passed.
+#
+# This is the canary gate over the selected corpus contract, not a run of the
+# entire external corpus. Use `scripts/test-demo-corpus` directly for a full or
+# focused run (see README).
+#
+# usage: scripts/test-corpus [--python PATH] [--fixtures PATH] [--jobs N] [pytest args...]
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+python="$repo_root/.venv-da110/bin/python"
+fixtures="${DASIMULATOR_DEMO_FIXTURES:-$repo_root/../docassemble-yaml/lsp/tests/fixtures}"
+jobs="${DASIMULATOR_CORPUS_JOBS:-4}"
+cache="${DASIMULATOR_NLTK_CACHE_DIR:-$repo_root/.simulator/nltk-cache}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --python)
+      python=$2
+      shift 2
+      ;;
+    --fixtures)
+      fixtures=$2
+      shift 2
+      ;;
+    --jobs)
+      jobs=$2
+      shift 2
+      ;;
+    -h | --help)
+      echo "usage: scripts/test-corpus [--python PATH] [--fixtures PATH] [--jobs N] [pytest args...]" >&2
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: DASIMULATOR_CORPUS_JOBS must be a positive integer, got: $jobs" >&2
+  exit 2
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is not on PATH; run the gate through mise (mise run test:corpus)" >&2
+  exit 2
+fi
+
+probe_lane() { # label interpreter sync_task
+  local label=$1 interpreter=$2 sync_task=$3
+  if [[ ! -x "$interpreter" ]]; then
+    echo "error: the $label runtime lane interpreter is missing or not executable:" >&2
+    echo "  $interpreter" >&2
+    echo "provision it with: mise run $sync_task" >&2
+    exit 2
+  fi
+
+  local probe
+  probe=$(
+    "$interpreter" -c '
+import importlib.metadata as metadata
+import importlib.util as util
+import docassemble.base  # noqa: F401 - importing is the capability under test
+family = "modern" if util.find_spec("docassemble.base.thread_context") else "legacy"
+print(family, metadata.version("docassemble-base"), metadata.version("docassemble-webapp"))
+' 2>&1
+  ) || {
+    echo "error: the $label runtime lane interpreter cannot import the docassemble runtime:" >&2
+    echo "  $interpreter" >&2
+    echo "$probe" | sed 's/^/  /' >&2
+    echo "provision it with: mise run $sync_task" >&2
+    exit 2
+  }
+
+  local family base webapp
+  family=$(echo "$probe" | tail -n 1 | awk '{print $1}')
+  base=$(echo "$probe" | tail -n 1 | awk '{print $2}')
+  webapp=$(echo "$probe" | tail -n 1 | awk '{print $3}')
+  if [[ "$family" != "modern" ]]; then
+    echo "error: the $label runtime lane expects the modern docassemble family but its interpreter reports $family:" >&2
+    echo "  $interpreter" >&2
+    echo "provision it with: mise run $sync_task" >&2
+    exit 2
+  fi
+
+  echo "corpus gate: $label lane -> $family (docassemble-base $base, docassemble-webapp $webapp)"
+}
+
+verify_fixtures() { # path
+  local root=$1
+  if [[ ! -d "$root" ]]; then
+    echo "error: the external corpus fixture checkout is missing:" >&2
+    echo "  $root" >&2
+    echo "acquire docassemble-yaml (https://github.com/jpagh/docassemble-yaml) or set" >&2
+    echo "DASIMULATOR_DEMO_FIXTURES to its lsp/tests/fixtures directory" >&2
+    exit 2
+  fi
+  if [[ ! -d "$root/examples" ]] ||
+    ! find "$root/examples" -type f -name '*.yml' -print -quit | grep -q .; then
+    echo "error: the external corpus fixture checkout has no examples/*.yml fixtures:" >&2
+    echo "  $root" >&2
+    echo "set DASIMULATOR_DEMO_FIXTURES to a complete lsp/tests/fixtures checkout" >&2
+    exit 2
+  fi
+  if [[ ! -d "$root/demo_package" ]]; then
+    echo "error: the external corpus fixture checkout is missing its demo_package fixture:" >&2
+    echo "  $root" >&2
+    echo "set DASIMULATOR_DEMO_FIXTURES to a complete lsp/tests/fixtures checkout" >&2
+    exit 2
+  fi
+  echo "corpus gate: fixtures -> $root"
+}
+
+probe_lane "modern" "$python" "sync:da110"
+verify_fixtures "$fixtures"
+
+export DASIMULATOR_REAL_PYTHON="$python"
+export DASIMULATOR_DEMO_FIXTURES="$fixtures"
+export DASIMULATOR_NLTK_CACHE_DIR="$cache"
+export DASIMULATOR_CORPUS_JOBS="$jobs"
+export DASIMULATOR_CORPUS_GATE=1
+
+cd "$repo_root"
+echo "corpus gate: selecting 'corpus' (jobs=$jobs, nltk cache=$cache)"
+set +e
+uv run pytest -q -m corpus "$@"
+status=$?
+set -e
+
+if [[ $status -eq 5 ]]; then
+  echo "error: the corpus gate selected no tests; check the corpus marker and any pytest arguments" >&2
+fi
+exit "$status"

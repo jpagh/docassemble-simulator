@@ -12,14 +12,47 @@ from contextlib import contextmanager
 
 import pytest
 
-# The runtime gate hooks are imported, not redefined, so a probe project can
-# load the same plugin with ``-p _runtime_gate`` (see tests/test_runtime_gate.py).
+# The slow-lane gate implementations live in ``_runtime_gate`` / ``_corpus_gate``
+# so a probe project can load either directly with ``-p _runtime_gate`` /
+# ``-p _corpus_gate`` (see tests/test_runtime_gate.py and
+# tests/test_corpus_gate.py). This conftest chains both for the repository
+# suite.
+from _corpus_gate import (
+    pytest_configure as _corpus_pytest_configure,
+)
+from _corpus_gate import (
+    pytest_runtest_logreport as _corpus_pytest_runtest_logreport,
+)
+from _corpus_gate import (
+    pytest_sessionfinish as _corpus_pytest_sessionfinish,
+)
 from _runtime_gate import (  # noqa: F401 - pytest hook implementations
     pytest_collection_modifyitems,
-    pytest_configure,
-    pytest_runtest_logreport,
-    pytest_sessionfinish,
 )
+from _runtime_gate import (
+    pytest_configure as _runtime_pytest_configure,
+)
+from _runtime_gate import (
+    pytest_runtest_logreport as _runtime_pytest_runtest_logreport,
+)
+from _runtime_gate import (
+    pytest_sessionfinish as _runtime_pytest_sessionfinish,
+)
+
+
+def pytest_configure(config):
+    _runtime_pytest_configure(config)
+    _corpus_pytest_configure(config)
+
+
+def pytest_runtest_logreport(report):
+    _runtime_pytest_runtest_logreport(report)
+    _corpus_pytest_runtest_logreport(report)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _runtime_pytest_sessionfinish(session, exitstatus)
+    _corpus_pytest_sessionfinish(session, exitstatus)
 
 
 class _StubThisThread:

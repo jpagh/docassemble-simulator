@@ -53,8 +53,9 @@
     run         = "scripts/test-runtime"
 
 [tasks."test:corpus"]
-    description = "Run tests for the external docassemble corpus"
-    run         = 'DASIMULATOR_CORPUS_JOBS=4 DASIMULATOR_NLTK_CACHE_DIR="$PWD/.simulator/nltk-cache" uv run pytest -q -m corpus'
+    description = "External corpus canary gate: provisions the modern lane, validates fixtures, reuses NLTK data"
+    depends     = ["sync:da110"]
+    run         = "scripts/test-corpus"
 
 [tasks."sync:da19"]
     description = "Provision .venv-da19 with docassemble 1.9.x for the real-runtime lane"

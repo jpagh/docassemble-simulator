@@ -406,7 +406,7 @@ Run slow validation explicitly:
 
 ```sh
 mise run test:runtime # Two-family runtime compatibility gate (provisions both lanes)
-mise run test:corpus  # External example corpus (requires its fixtures/runtime)
+mise run test:corpus  # External corpus canary gate (provisions the modern lane, validates fixtures)
 mise run test:all-da  # Aggregate lane: whole suite with both runtime families wired
 ```
 
@@ -421,9 +421,31 @@ fails the session, so the gate can never pass by skipping its intended
 coverage. `mise run sync:da19` / `mise run sync:da110` (re)provision one family
 without running the gate.
 
+`mise run test:corpus` is the external corpus canary gate. It provisions the
+modern `.venv-da110` lane (`sync:da110`), validates that interpreter and the
+external [docassemble-yaml](https://github.com/jpagh/docassemble-yaml) fixture
+checkout before pytest, then runs the `corpus`-marked contract tests against
+that lane: the demo corpus runner canary and the demo package compile check.
+The checkout defaults to the sibling `../docassemble-yaml/lsp/tests/fixtures`;
+set `DASIMULATOR_DEMO_FIXTURES` to use another location. A missing lane, a
+fixture checkout that is absent or incomplete, an empty selection, or a suite
+in which every corpus test skipped fails the command with recovery
+instructions, so it cannot pass by skipping the canary it exists to run.
+Prepared NLTK data is reused from a stable, version-aware cache; set
+`DASIMULATOR_NLTK_CACHE_DIR` to choose its root (default
+`.simulator/nltk-cache`), and a new generation is published only when the
+lane's Python or runtime identity changes. The direct runner's
+`--refresh-nltk-cache` flag remains the explicit refresh path. Corpus case
+concurrency is bounded and configurable through `DASIMULATOR_CORPUS_JOBS`
+(default 4); the runner's own default is serial. This task is deliberately the
+canary over the selected contract, not a run of the whole external corpus: run
+`scripts/test-demo-corpus` directly (with `--match`, `--shard`, or no filter)
+to exercise every example.
+
 To run every test in the current environment, use `uv run pytest`; runtime and
-corpus checks skip when their prerequisites are absent. Use the provisioned
-cross-family gate and the corpus lane for complete slow validation.
+corpus checks skip when their prerequisites are absent. The gates themselves
+fail instead of skipping, so use the provisioned cross-family gate and the
+corpus gate for complete slow validation.
 
 Real-docassemble fidelity is covered by a separate lane that runs the CLI in a
 target package's interpreter (which supplies `docassemble` and `python-docx`):
@@ -481,6 +503,10 @@ scripts/test-demo-corpus \
   --python /path/to/package/.venv/bin/python \
   --compile --start --output .simulator/demo-corpus-results
 ```
+
+`mise run test:corpus` runs the canary subset of this runner behind the lane
+and fixture checks described above; invoke `scripts/test-demo-corpus` directly
+for a focused or full run.
 
 The runner stages `docassemble.base` and `docassemble.demo`, overlays all 966
 `examples/*.yml` fixtures, runs each phase in a subprocess with a timeout and a

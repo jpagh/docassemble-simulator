@@ -52,8 +52,10 @@ skips.
 `mise run test:all-da` remains the aggregate lane: it runs the whole suite
 (fast tests, both runtime families, and corpus tests when their fixtures are
 available) inside the modern lane interpreter. Prefer the gate for the
-compatibility contract and `mise run test:corpus` for the external corpus;
-neither is part of the other.
+compatibility contract and `mise run test:corpus` for the external corpus
+canary; neither is part of the other. The corpus gate provisions the modern
+lane itself, validates the external fixture checkout before pytest, and fails
+when the canary would otherwise pass by skipping (see README).
 
 ## Dependency pinning and security alerts
 
