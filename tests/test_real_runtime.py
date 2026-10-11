@@ -735,18 +735,18 @@ def test_catalog_duplicate_relationships_across_families(family_python, real_wor
         "fields:\n"
         "  - Value: unrelated_second\n"
         "---\n"
-        "id: mixed-id\n"
+        "id: mixed-base\n"
         "question: Deliberate base block\n"
         "fields:\n"
         "  - Value: mixed_first\n"
         "---\n"
-        "id: mixed-id\n"
-        "supersedes: mixed-id\n"
+        "id: mixed-replacement\n"
+        "supersedes: mixed-base\n"
         "question: Deliberate replacement block\n"
         "fields:\n"
         "  - Value: mixed_second\n"
         "---\n"
-        "id: mixed-id\n"
+        "id: mixed-replacement\n"
         "question: Accidental third block\n"
         "fields:\n"
         "  - Value: mixed_third\n"
@@ -783,13 +783,21 @@ def test_catalog_duplicate_relationships_across_families(family_python, real_wor
     assert {item["id"] for item in reports} == {
         "cross-file-id",
         "unrelated-id",
-        "mixed-id",
+        "mixed-replacement",
+        "relationship-replacement",
     }, label
     cross_file = next(item for item in reports if item["id"] == "cross-file-id")
     assert {
         block["source_file"].rsplit("/", 1)[-1] for block in cross_file["blocks"]
     } == {"id-check-source.yml", "id-check-target.yml"}, label
-    assert not any(item["id"] == "relationship-base" for item in reports), label
+    relationship = next(
+        item for item in reports if item["id"] == "relationship-replacement"
+    )
+    assert relationship["kind"] == "deliberate-override", label
+    assert [block["id"] for block in relationship["blocks"]] == [
+        "relationship-base",
+        "relationship-replacement",
+    ], label
     assert not any(item["id"] == "unique-id" for item in reports), label
 
     strict = _run(

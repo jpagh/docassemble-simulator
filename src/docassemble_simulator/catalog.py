@@ -298,66 +298,54 @@ def _provenance(question) -> dict[str, Any]:
 
 def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
+    entries = []
     for question in getattr(interview, "questions_list", None) or ():
         explicit_id = _explicit_id(question)
         if explicit_id is None:
             continue
         block = _provenance(question)
         block["relationship"] = _id_relationship(question)
-        grouped.setdefault(explicit_id, []).append(
+        entry = {
+            "id": explicit_id,
+            "block": block,
+            "targets": _relationship_targets(question),
+        }
+        entries.append(entry)
+        grouped.setdefault(explicit_id, []).append(entry)
+
+    reports = []
+    for explicit_id, blocks in grouped.items():
+        if len(blocks) < 2:
+            continue
+        reports.append(
             {
-                "question": question,
-                "block": block,
-                "targets": _relationship_targets(question),
+                "id": explicit_id,
+                "kind": "duplicate-id",
+                "interview": interview_identity,
+                "warning": True,
+                "blocks": [entry["block"] for entry in blocks],
             }
         )
 
-    reports = []
-    for explicit_id, entries in grouped.items():
-        if len(entries) < 2:
-            continue
-        deliberate_pairs = []
-        used_indexes: set[int] = set()
-        for source_index, entry in enumerate(entries):
-            if explicit_id not in entry["targets"] or source_index in used_indexes:
+    # A valid supersedes/override relationship is useful to report, but it
+    # never excuses a separate duplicate-id collision.  The upstream runtime
+    # resolves an id relationship by the target id, so use the last-loaded
+    # target when an authored target is itself duplicated.
+    targets_by_id = {}
+    for entry in entries:
+        targets_by_id.setdefault(entry["id"], []).append(entry)
+    for entry in entries:
+        for target_id in entry["targets"]:
+            if target_id == entry["id"] or target_id not in targets_by_id:
                 continue
-            target_indexes = [
-                index
-                for index in range(source_index - 1, -1, -1)
-                if index not in used_indexes
-            ] or [
-                index
-                for index in range(source_index + 1, len(entries))
-                if index not in used_indexes
-            ]
-            if not target_indexes:
-                continue
-            target_index = target_indexes[0]
-            used_indexes.update((source_index, target_index))
-            deliberate_pairs.append((target_index, source_index))
-
-        for target_index, source_index in deliberate_pairs:
+            target = targets_by_id[target_id][-1]
             reports.append(
                 {
-                    "id": explicit_id,
+                    "id": entry["id"],
                     "kind": "deliberate-override",
                     "interview": interview_identity,
                     "warning": True,
-                    "blocks": [
-                        entries[target_index]["block"],
-                        entries[source_index]["block"],
-                    ],
-                }
-            )
-
-        if len(used_indexes) != len(entries):
-            reports.append(
-                {
-                    "id": explicit_id,
-                    "kind": "duplicate-id",
-                    "interview": interview_identity,
-                    "warning": True,
-                    "blocks": [entry["block"] for entry in entries],
+                    "blocks": [target["block"], entry["block"]],
                 }
             )
     return reports

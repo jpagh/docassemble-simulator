@@ -146,16 +146,15 @@ def test_check_reports_duplicate_ids_and_separates_overrides(tmp_path, monkeypat
         tmp_path,
         line=15,
         variable="third",
-        explicit_id="deliberate",
+        explicit_id="deliberate-base",
     )
-    deliberate.override = True
     deliberate_later = _question(
         tmp_path,
         line=22,
         variable="fourth",
-        explicit_id="deliberate",
+        explicit_id="deliberate-replacement",
     )
-    deliberate_later.supersedes = "deliberate"
+    deliberate_later.supersedes = "deliberate-base"
     interview = SimpleNamespace(
         questions_list=[first, second, deliberate, deliberate_later]
     )
@@ -235,11 +234,16 @@ def test_mixed_duplicate_group_reports_valid_relationship_and_accidental_collisi
     package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     package.mkdir(parents=True)
     (package.parent.parent / "__init__.py").write_text("")
-    first = _question(tmp_path, line=1, variable="first", explicit_id="mixed")
-    second = _question(tmp_path, line=8, variable="second", explicit_id="mixed")
-    second.supersedes = "mixed"
+    first = _question(tmp_path, line=1, variable="first", explicit_id="mixed-base")
+    second = _question(
+        tmp_path, line=8, variable="second", explicit_id="mixed-replacement"
+    )
+    second.supersedes = "mixed-base"
     accidental = _question(
-        tmp_path, line=15, variable="accidental", explicit_id="mixed"
+        tmp_path,
+        line=15,
+        variable="accidental",
+        explicit_id="mixed-replacement",
     )
     interview = SimpleNamespace(questions_list=[first, second, accidental])
     catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
@@ -257,8 +261,11 @@ def test_mixed_duplicate_group_reports_valid_relationship_and_accidental_collisi
         for item in result["duplicate_ids"]
         if item["kind"] == "deliberate-override"
     )
-    assert len(deliberate["blocks"]) == 2
-    assert deliberate["blocks"][1]["relationship"] == "mixed"
+    assert [block["id"] for block in deliberate["blocks"]] == [
+        "mixed-base",
+        "mixed-replacement",
+    ]
+    assert deliberate["blocks"][1]["relationship"] == "mixed-base"
 
 
 def test_check_reports_complete_totals(tmp_path, monkeypatch):
