@@ -226,17 +226,22 @@ docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl --update
 
 `--record PATH` is accepted by `start`, `refresh`, `answer`, `seek`, and
 `exec`, and takes an optional `--phase NAME` used by phased comparison. Each
-invocation appends one record: sequence, operation, phase, submitted
-assignments, outcome, the screen outcome, and a canonical **screen identity**
-with the rule that produced it. The first line is metadata (interview
-definition, config fingerprint, docassemble/AssemblyLine/simulator versions,
-and the trace schema version); appending to a trace whose metadata disagrees
-with the current run is an input error. A failed answer is recorded against
-the unchanged active screen with the rejected assignments, so validation
-re-asks appear as repeated occurrences of one identity. A failure with no
-active screen is recorded as a failure instead: the entry keeps its error
-payload and carries an `error:` identity (`error:unresolved:<variable>` for an
-undefined reference), never a fabricated screen.
+record includes sequence, operation, explicit **intent**, phase, submitted
+assignments, outcome, screen outcome, and canonical **screen identity** with the
+rule that produced it. Intent distinguishes ordinary answers (`answer`),
+browser-shaped default submissions (`defaults`), expanded automatic submissions
+(`auto`), and seeks (including their target, fresh, and activation context).
+The first line is metadata (interview definition, config fingerprint,
+docassemble/AssemblyLine/simulator versions, and the trace schema version);
+appending to a trace whose metadata disagrees with the current run is an input
+error. An automatic seek records one `auto` entry for every attempted screen,
+including a rejected default submission, followed by the post-walk seek result.
+A failed answer is recorded against the unchanged active screen with the
+rejected assignments, so validation re-asks appear as repeated occurrences of
+one identity. A failure with no active screen is recorded as a failure instead:
+the entry keeps its error payload and carries an `error:` identity
+(`error:unresolved:<variable>` for an undefined reference), never a fabricated
+screen.
 
 Identity ignores generated `Question_<n>` names, resolved occurrence paths,
 random instance names, and rendered text. Non-generic explicit ids remain
@@ -263,10 +268,13 @@ cannot be excused). `--update` rewrites the expected golden from the actual
 trace and is the only write path. A mismatch exits `2` with the full report in
 the `trace-mismatch` error details.
 
-`trace replay GOLDEN` starts a fresh isolated session, applies the recorded
-assignments, and stops at the first identity, field-fact, flow, or rejected-
-assignment divergence. Use `--override STEP.FIELD=VALUE` to vary one answer
-without changing the golden. Replay validates the interview and configuration
+`trace replay GOLDEN` starts a fresh isolated session, applies each recorded
+intent (including browser defaults and automatic submissions), and stops at the
+first identity, field-fact, flow, or rejected-assignment divergence. Automatic
+steps compare the screen before submitting it and then apply the recorded
+transaction; a failed automatic submission is therefore not silently replaced
+by a seek. Use `--override STEP.FIELD=VALUE` to vary one answer without
+changing the golden. Replay validates the interview and configuration
 fingerprint metadata, never writes the golden, and exits non-zero on divergence.
 
 The identity rules and the evidence behind them are documented in

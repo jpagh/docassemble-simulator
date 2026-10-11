@@ -609,22 +609,67 @@ def _trace_metadata(args, root):
     )
 
 
+def _trace_operation_context(operation, command):
+    """Return replay data for one public execution operation."""
+    from docassemble_simulator.execution import Answer, Execute, Refresh, Seek, Start
+
+    if isinstance(operation, Answer):
+        return {
+            "intent": "defaults" if operation.defaults else "answer",
+            "target": None,
+            "fresh": False,
+            "activate": False,
+            "submitted": dict(operation.assignments),
+        }
+    if isinstance(operation, Seek):
+        return {
+            "intent": "seek",
+            "target": operation.variable,
+            "fresh": operation.fresh,
+            "activate": operation.activate,
+            "submitted": {},
+        }
+    if isinstance(operation, Start):
+        intent = "start"
+    elif isinstance(operation, Refresh):
+        intent = "refresh"
+    elif isinstance(operation, Execute):
+        intent = "exec"
+    else:
+        intent = command
+    return {
+        "intent": intent,
+        "target": None,
+        "fresh": False,
+        "activate": False,
+        "submitted": {},
+    }
+
+
 def _record_execution(args, root, execution, operation, payload):
-    """Append the operation's screen outcome to the requested trace sidecar."""
+    """Append operation intent and screen outcomes to a trace sidecar."""
     from docassemble_simulator.execution import Status
     from docassemble_simulator.trace import append_trace, is_screen_outcome
 
+    context = _trace_operation_context(operation, args.command)
     result = payload.get("result") if payload.get("ok") else None
     auto_trace = result.get("auto_trace") if isinstance(result, dict) else None
     if auto_trace:
         metadata = _trace_metadata(args, root)
-        for step in auto_trace:
+        for index, step in enumerate(auto_trace):
             append_trace(
                 args.record,
                 metadata,
                 operation=args.command,
-                ok=True,
+                intent="auto",
+                target=context["target"],
+                # A fresh auto-seek has no saved session to answer against.
+                # The replay adapter uses this marker to seed its private
+                # session once, without changing the user's session.
+                fresh=bool(context["fresh"] and index == 0),
+                ok=bool(step.get("ok", True)),
                 screen=step.get("screen"),
+                error=step.get("error"),
                 phase=getattr(args, "phase", None),
                 submitted=step.get("submitted") or {},
             )
@@ -646,15 +691,23 @@ def _record_execution(args, root, execution, operation, payload):
             screen = status.result
     if screen is None and payload.get("ok"):
         return
+    # Expanded automatic steps own the fresh marker; the final seek record is
+    # the post-walk outcome and must not re-run the walk during replay.
+    final_fresh = context["fresh"] and not auto_trace
     append_trace(
         args.record,
         _trace_metadata(args, root),
         operation=args.command,
+        intent=context["intent"],
+        target=context["target"],
+        fresh=final_fresh,
+        activate=context["activate"],
+        post_auto=bool(auto_trace),
         ok=bool(payload.get("ok")),
         screen=screen,
         error=payload.get("error"),
         phase=getattr(args, "phase", None),
-        submitted=dict(getattr(operation, "assignments", ()) or ()),
+        submitted=context["submitted"],
     )
 
 
@@ -735,22 +788,32 @@ def _trace_replay_overrides(raw_overrides, entries):
 def _trace_replay_operation(entry, submitted):
     from docassemble_simulator.execution import Answer, Refresh, Seek, Start
 
-    if entry.operation == "start":
+    intent = entry.intent or entry.operation
+    if intent == "start":
         return Start()
-    if entry.operation == "refresh":
+    if intent == "refresh":
         return Refresh()
-    if entry.operation == "answer":
+    if intent == "answer":
         return Answer(tuple(submitted.items()))
-    if entry.operation == "seek":
-        if submitted:
+    if intent == "defaults":
+        return Answer(tuple(submitted.items()), defaults=not submitted)
+    if intent == "seek":
+        # Pre-intent in-memory fixtures used a seek record's assignments as a
+        # follow-up answer. New records carry ``target`` and never use this
+        # ambiguity, but retaining it keeps the public test value shape useful.
+        if submitted and entry.target is None:
             return Answer(tuple(submitted.items()))
         screen = entry.screen or {}
-        variable = screen.get("sought") or screen.get("orig_sought")
+        variable = entry.target or screen.get("sought") or screen.get("orig_sought")
         if not variable and entry.error:
             variable = (entry.error.get("details") or {}).get("sought_variable")
         if not isinstance(variable, str) or not variable:
             raise InputFailure(f"trace step {entry.seq} has no seek variable")
-        return Seek(variable)
+        return Seek(variable, fresh=entry.fresh, activate=entry.activate)
+    if intent == "auto":
+        # Automatic records are expanded below so the replay can compare the
+        # pre-submission screen and then apply the browser-shaped transaction.
+        return Answer(tuple(submitted.items()), defaults=not submitted)
     raise InputFailure(
         f"trace step {entry.seq} uses unsupported operation {entry.operation!r}"
     )
@@ -776,11 +839,49 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
     from docassemble_simulator.trace import (
         TraceEntry,
         _assign_identity,
+        is_screen_outcome,
         screen_content,
     )
 
-    operation = _trace_replay_operation(entry, submitted)
-    actual_ok, actual_screen, actual_error = _trace_replay_actual(execution, operation)
+    intent = entry.intent or entry.operation
+    if intent == "auto":
+        # The recorded screen is the screen *before* its automatic submission.
+        # Inspect it first, then apply the operation. This is what prevents an
+        # automatic step from degrading into a seek that merely revisits the
+        # same identity.
+        from docassemble_simulator.execution import Seek, Status
+
+        status = execution.run(Status())
+        if not status.ok and entry.fresh:
+            if not entry.target:
+                raise InputFailure(f"trace step {entry.seq} has no seek variable")
+            status = execution.run(Seek(entry.target, fresh=True, activate=True))
+        actual_screen = (
+            status.result if status.ok and is_screen_outcome(status.result) else None
+        )
+        operation = _trace_replay_operation(entry, submitted)
+        outcome = execution.run(operation)
+        actual_ok = outcome.ok
+        actual_error = _clean(outcome.error) if not outcome.ok else None
+    elif intent == "seek" and entry.post_auto:
+        # The final record after an expanded auto-seek is an observation of the
+        # post-walk outcome. Re-running the target seek would ask a different
+        # question once the target is already resolved, so inspect the private
+        # replay session instead.
+        from docassemble_simulator.execution import Status
+
+        status = execution.run(Status())
+        actual_ok = status.ok
+        actual_error = _clean(status.error) if not status.ok else None
+        actual_screen = (
+            status.result if status.ok and is_screen_outcome(status.result) else None
+        )
+    else:
+        operation = _trace_replay_operation(entry, submitted)
+        actual_ok, actual_screen, actual_error = _trace_replay_actual(
+            execution, operation
+        )
+
     actual_identity = _assign_identity(
         actual_screen,
         actual_error,
@@ -817,11 +918,17 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
         identity=actual_identity,
         content=actual_content,
         error=actual_error,
+        intent=intent,
+        target=entry.target,
+        fresh=entry.fresh,
+        activate=entry.activate,
+        post_auto=entry.post_auto,
     )
     return {
         "_actual_entry": actual_entry,
         "step": entry.seq,
         "operation": entry.operation,
+        "intent": intent,
         "submitted": submitted,
         "match": match,
         "identity_match": identity_match,
@@ -833,12 +940,16 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
             "content": list(expected_content),
             "ok": entry.ok,
             "error": entry.error,
+            "intent": intent,
+            "submitted": entry.submitted,
         },
         "actual": {
             "identity": _trace_identity_dict(actual_identity),
             "content": list(actual_content),
             "ok": actual_ok,
             "error": actual_error,
+            "intent": intent,
+            "submitted": submitted,
         },
     }
 

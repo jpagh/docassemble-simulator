@@ -336,6 +336,94 @@ def test_trace_replay_is_clean_with_failed_step_and_override(
     assert golden.read_bytes() == original
 
 
+def test_trace_replay_applies_automatic_submission_before_next_seek(
+    tmp_path, monkeypatch, capsys
+):
+    intro = _screen(question_name="ID intro")
+    next_screen = _screen(question_name="ID next")
+    trace = _trace(
+        TraceEntry(
+            1,
+            "start",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+            intent="start",
+        ),
+        TraceEntry(
+            2,
+            "seek",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+            intent="auto",
+            target="next_value",
+        ),
+        TraceEntry(
+            3,
+            "seek",
+            None,
+            {},
+            True,
+            next_screen,
+            ScreenIdentity("id:next", "explicit-id"),
+            screen_content(next_screen),
+            intent="seek",
+            target="next_value",
+        ),
+    )
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, operation):
+            from docassemble_simulator.execution import Answer, Seek, Start, Status
+
+            operations.append(operation)
+            if isinstance(operation, Start):
+                return SimpleNamespace(ok=True, result=intro, error=None)
+            if isinstance(operation, Status):
+                return SimpleNamespace(ok=True, result=intro, error=None)
+            if isinstance(operation, Answer):
+                assert operation.defaults is True
+                return SimpleNamespace(ok=True, result=next_screen, error=None)
+            if isinstance(operation, Seek):
+                return SimpleNamespace(ok=True, result=next_screen, error=None)
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["clean"] is True
+    assert [type(operation).__name__ for operation in operations] == [
+        "Start",
+        "Status",
+        "Answer",
+        "Seek",
+    ]
+
+
 def test_trace_replay_stops_at_first_identity_divergence(tmp_path, monkeypatch, capsys):
     intro = _screen(question_name="ID intro")
     expected = _trace(

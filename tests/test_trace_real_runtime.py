@@ -171,6 +171,47 @@ BASE_INTERVIEW = (
     + REVIEW_BLOCK
 )
 
+REPLAY_INTERVIEW = """\
+---
+id: intro
+mandatory: True
+question: |
+  Intro
+fields:
+  - Name: user_name
+    default: Ada
+---
+id: optional one
+mandatory: True
+question: |
+  Optional one
+fields:
+  - Value: optional_one
+    default: one
+---
+id: optional two
+mandatory: True
+question: |
+  Optional two
+fields:
+  - Value: optional_two
+    default: two
+---
+id: required
+mandatory: True
+question: |
+  Required value
+fields:
+  - Value: target_value
+validation code: |
+  if target_value == "bad":
+    validation_error("bad is not available")
+---
+mandatory: True
+question: |
+  Done
+"""
+
 REORDERED_INTERVIEW = (
     INTERVIEW_HEADER.replace(
         """---
@@ -305,6 +346,82 @@ def _drive(interpreter, root: Path, record: Path) -> None:
 def _record_base(interpreter, root: Path, record: Path) -> None:
     _write_interview(root)
     _drive(interpreter, root, record)
+
+
+def test_trace_replay_round_trips_default_auto_failure_and_answer(
+    family_python,  # noqa: F811
+    tmp_path,
+):
+    interpreter = family_python.interpreter
+    root = _write_interview(tmp_path / "replay", REPLAY_INTERVIEW)
+    record = root / "scenario.trace.jsonl"
+
+    code, payload = _command(interpreter, root, "start", "--record", str(record))
+    assert code == 0, payload
+    code, payload = _command(
+        interpreter, root, "answer", "--defaults", "--record", str(record)
+    )
+    assert code == 0, payload
+    for variable in ("optional_one", "optional_two"):
+        code, payload = _command(
+            interpreter,
+            root,
+            "seek",
+            variable,
+            "--auto",
+            "--activate",
+            "--record",
+            str(record),
+        )
+        assert code == 0, payload
+    code, payload = _command(
+        interpreter,
+        root,
+        "seek",
+        "target_value",
+        "--auto",
+        "--activate",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+    code, payload = _command(
+        interpreter,
+        root,
+        "answer",
+        "target_value=bad",
+        "--record",
+        str(record),
+    )
+    assert code == 2, payload
+    code, payload = _command(
+        interpreter,
+        root,
+        "answer",
+        "target_value=good",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+
+    golden = load_trace(record)
+    assert any(entry.intent == "defaults" for entry in golden.entries)
+    assert sum(entry.intent == "auto" for entry in golden.entries) >= 3
+    assert any(entry.intent == "auto" and not entry.ok for entry in golden.entries)
+    before = {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
+    assert replay["result"]["counts"]["matched"] == len(golden.entries)
+    after = {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+    assert after == before
 
 
 def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811

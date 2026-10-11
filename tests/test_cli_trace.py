@@ -160,6 +160,22 @@ def test_cli_records_each_auto_submitted_screen_before_the_final_outcome(
     ]
     assert trace.entries[0].submitted == {"first": "one"}
     assert trace.entries[1].submitted == {"second": "two"}
+    assert [entry.intent for entry in trace.entries] == ["auto", "auto", "seek"]
+    assert trace.entries[-1].target == "target"
+
+
+def test_default_answer_records_browser_submission_intent(tmp_path, monkeypatch):
+    execution = _FakeExecution(_outcome(True, _screen()))
+    monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "defaults.trace.jsonl"
+    args = _parse("answer", "--defaults", "--record", str(record), "--json")
+
+    assert cli.cmd_execution(args, tmp_path) == 0
+
+    entry = load_trace(record).entries[0]
+    assert entry.intent == "defaults"
+    assert entry.submitted == {}
 
 
 def test_failed_answer_records_the_unchanged_active_screen(tmp_path, monkeypatch):

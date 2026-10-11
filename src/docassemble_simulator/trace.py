@@ -39,8 +39,8 @@ __all__ = [
 ]
 
 #: Version of the JSONL sidecar schema. A mismatch is an input error.
-# Version 2 records the explicit-id anchor rule for generic/list instances.
-TRACE_SCHEMA_VERSION = 2
+# Version 3 records the operation intent and seek context needed for replay.
+TRACE_SCHEMA_VERSION = 3
 
 EXPLICIT_ID_PREFIX = "ID "
 
@@ -265,9 +265,30 @@ class TraceMetadata:
         )
 
 
+def _default_trace_intent(operation: str, submitted: dict[str, Any]) -> str:
+    """Infer the pre-v3 intent for an in-memory entry.
+
+    The inference keeps callers that construct ``TraceEntry`` values directly
+    source-compatible while every serialized v3 record carries an explicit
+    intent.  Empty assignments are deliberately not interpreted as a default
+    submission here: only the command adapter knows whether ``--defaults`` was
+    requested.
+    """
+    if operation == "answer":
+        return "answer"
+    if operation == "seek":
+        return "seek"
+    return operation
+
+
 @dataclass(frozen=True)
 class TraceEntry:
-    """One recorded execution operation and the screen outcome it produced."""
+    """One recorded operation and the screen outcome it produced.
+
+    ``intent`` distinguishes an ordinary answer from a browser-shaped default
+    submission or an expanded automatic submission.  ``target`` and the
+    context flags preserve seek semantics without exposing a working namespace.
+    """
 
     seq: int
     operation: str
@@ -278,17 +299,33 @@ class TraceEntry:
     identity: ScreenIdentity | None
     content: tuple[dict[str, Any], ...] = ()
     error: dict[str, Any] | None = None
+    intent: str | None = None
+    target: str | None = None
+    fresh: bool = False
+    activate: bool = False
+    post_auto: bool = False
+
+    def __post_init__(self):
+        if self.intent is None:
+            object.__setattr__(
+                self, "intent", _default_trace_intent(self.operation, self.submitted)
+            )
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "seq": self.seq,
             "operation": self.operation,
+            "intent": self.intent,
             "phase": self.phase,
             "submitted": self.submitted,
             "outcome": "ok" if self.ok else "failed",
             "screen": self.screen,
             "identity": None,
             "content": list(self.content),
+            "target": self.target,
+            "fresh": self.fresh,
+            "activate": self.activate,
+            "post_auto": self.post_auto,
         }
         if self.identity is not None:
             payload["identity"] = {
@@ -321,9 +358,16 @@ class TraceEntry:
         content = data.get("content") or []
         if not isinstance(content, list):
             raise TraceError("trace entry content must be a list")
+        operation = str(data.get("operation") or "")
+        intent = data.get("intent")
+        if intent is not None and not isinstance(intent, str):
+            raise TraceError("trace entry intent must be a string")
+        target = data.get("target")
+        if target is not None and not isinstance(target, str):
+            raise TraceError("trace entry target must be a string")
         return cls(
             seq=int(data.get("seq") or 0),
-            operation=str(data.get("operation") or ""),
+            operation=operation,
             phase=data.get("phase"),
             submitted=submitted,
             ok=data.get("outcome") != "failed",
@@ -331,6 +375,11 @@ class TraceEntry:
             identity=identity,
             content=tuple(content),
             error=data.get("error"),
+            intent=intent or _default_trace_intent(operation, submitted),
+            target=target,
+            fresh=bool(data.get("fresh", False)),
+            activate=bool(data.get("activate", False)),
+            post_auto=bool(data.get("post_auto", False)),
         )
 
 
@@ -488,6 +537,11 @@ def append_trace(
     error: dict[str, Any] | None = None,
     phase: str | None = None,
     submitted: dict[str, Any] | None = None,
+    intent: str | None = None,
+    target: str | None = None,
+    fresh: bool = False,
+    activate: bool = False,
+    post_auto: bool = False,
 ) -> TraceEntry:
     """Append one operation entry, assigning sequence and occurrence values."""
     trace_path = Path(path)
@@ -511,6 +565,11 @@ def append_trace(
         identity=identity,
         content=screen_content(screen) if screen is not None else (),
         error=error,
+        intent=intent,
+        target=target,
+        fresh=fresh,
+        activate=activate,
+        post_auto=post_auto,
     )
     with trace_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry.as_dict(), sort_keys=True) + "\n")

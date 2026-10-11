@@ -751,7 +751,17 @@ class InterviewExecution:
         if operation.activate:
             return self._mutate(work)
         try:
-            return ExecutionOutcome(True, work())
+            result = work()
+            if isinstance(result, dict) and result.get("kind") == "error":
+                return ExecutionOutcome(
+                    False,
+                    error=ExecutionError(
+                        result.get("failure_kind", ErrorKind.EXECUTION),
+                        result.get("message", "interview assembly failed"),
+                        result,
+                    ),
+                )
+            return ExecutionOutcome(True, result)
         except ExecutionFailure as error:
             return ExecutionOutcome(
                 False, error=ExecutionError(error.kind, str(error), error.details)
@@ -1309,6 +1319,44 @@ def _variable_is_resolved(namespace, variable):
     return True
 
 
+def _auto_trace_error(stop):
+    """Turn an automatic-submission stop into a replayable failure payload."""
+    if not stop:
+        return None
+    reason = stop.get("reason")
+    if reason == "required fields missing":
+        return {
+            "kind": "validation",
+            "message": "screen rejected; all answers were discarded",
+            "details": {
+                "errors": list(stop.get("errors") or []),
+                "missing_required": list(stop.get("missing_required") or []),
+                "auto_stop": reason,
+            },
+        }
+    if reason == "validation failed":
+        return {
+            "kind": "validation",
+            "message": "screen rejected; all answers were discarded",
+            "details": {
+                "errors": list(stop.get("errors") or []),
+                "warnings": list(stop.get("warnings") or []),
+                "auto_stop": reason,
+            },
+        }
+    error = stop.get("error")
+    if isinstance(error, dict):
+        # ``_assemble`` exposes a bare ``kind: error`` result, while the
+        # public execution envelope promotes ``failure_kind`` to the typed
+        # error kind. Record the latter so replay compares like with like.
+        return {
+            "kind": error.get("failure_kind") or error.get("kind", "execution"),
+            "message": error.get("message", "automatic submission failed"),
+            "details": error,
+        }
+    return None
+
+
 def _seek_auto(interview, namespace, status, variable, trace):
     result = _seek(interview, namespace, status, variable, trace)
     submitted = []
@@ -1328,9 +1376,20 @@ def _seek_auto(interview, namespace, status, variable, trace):
             break
         screen = result
         result, stop = _auto_submit_screen(interview, namespace, status, screen)
+        # Automatic records describe the screen that was submitted, rather
+        # than only the screen returned after the submission.  A rejected
+        # attempt is retained as a failed step so replay cannot silently turn
+        # it into a plain seek.
+        auto_trace.append(
+            {
+                "screen": screen,
+                "submitted": {},
+                "ok": stop is None,
+                "error": _auto_trace_error(stop),
+            }
+        )
         if stop is None or stop.get("submitted"):
             submitted.append(_auto_screen_summary(screen))
-            auto_trace.append({"screen": screen, "submitted": {}})
         if stop is not None:
             if result is None:
                 result = stop["screen"]
