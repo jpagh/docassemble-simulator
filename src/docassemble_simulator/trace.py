@@ -40,7 +40,8 @@ __all__ = [
 
 #: Version of the JSONL sidecar schema. A mismatch is an input error.
 # Version 3 records the operation intent and seek context needed for replay.
-TRACE_SCHEMA_VERSION = 3
+# Version 4 preserves distinct resolved anchors for explicit generic ids.
+TRACE_SCHEMA_VERSION = 4
 
 EXPLICIT_ID_PREFIX = "ID "
 
@@ -138,7 +139,7 @@ def _explicit_id_anchor(screen: dict[str, Any]) -> tuple[str, str] | None:
         return None
     if not sought or not orig_sought or sought == orig_sought:
         return None
-    sought_root, sought_tail = _split_root(sought)
+    sought_root, _ = _split_root(sought)
     orig_root, _ = _split_root(orig_sought)
     if (
         sought_root == GENERIC_PLACEHOLDER_ROOT
@@ -146,7 +147,7 @@ def _explicit_id_anchor(screen: dict[str, Any]) -> tuple[str, str] | None:
         and orig_root != GENERIC_PLACEHOLDER_ROOT
         and not _is_generated_instance_name(orig_root)
     ):
-        return f"{orig_root}{sought_tail}", "generic-object"
+        return orig_sought, "generic-object"
     stable = _stable_path(sought)
     if stable is not None and stable == _stable_path(orig_sought):
         return stable, "list-target"

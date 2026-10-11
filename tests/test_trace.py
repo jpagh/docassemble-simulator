@@ -40,6 +40,21 @@ def test_explicit_id_wins_over_target_pair():
     )
 
 
+def test_explicit_id_keeps_generic_instances_distinct():
+    first = {
+        "kind": "question",
+        "question_name": "ID contact name",
+        "sought": "x.name",
+        "orig_sought": "contacts[0].name",
+        "fields": [{"variable": "x.name"}],
+    }
+    second = {**first, "orig_sought": "contacts[1].name"}
+
+    assert screen_identity(first).key == "id:contact name@contacts[0].name"
+    assert screen_identity(second).key == "id:contact name@contacts[1].name"
+    assert screen_identity(first).key != screen_identity(second).key
+
+
 def test_explicit_id_keeps_non_generic_identity():
     screen = _screen(
         question_name="ID intro",
@@ -949,6 +964,10 @@ def test_load_exceptions_rejects_duplicates_and_fault_masking(tmp_path):
     )
     with pytest.raises(TraceError, match="fault"):
         load_exceptions(path)
+
+
+def test_trace_schema_versions_the_explicit_generic_anchor_rule():
+    assert _metadata().as_dict()["trace"] == 4
 
 
 def test_load_trace_rejects_an_unsupported_schema(tmp_path):
