@@ -599,6 +599,13 @@ def test_render_parser_models_orthogonal_request_concerns():
     assert args.output == "artifact.docx"
 
 
+def test_worker_help_documents_its_isolated_default_session():
+    help_result = _run_cli("run", "--help")
+
+    assert help_result.returncode == 0
+    assert "temporary isolated session" in help_result.stdout
+
+
 def test_screen_trace_workflow_is_discoverable_from_help():
     top = _run_cli("--help")
     start = _run_cli("start", "--help")

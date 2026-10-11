@@ -2098,3 +2098,39 @@ def test_real_worker_timeout_keeps_the_previous_saved_session(family_python, tmp
         counter = runner.evaluate("counter")
         assert counter.ok, counter
         assert counter.result["value"] == "1"
+
+
+def test_worker_timeout_is_typed_for_background_action(family_python, tmp_path):
+    package = tmp_path / "docassemble" / "background_timeout"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (questions / "main.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  task = background_action('pause')\n"
+        "  task.get()\n"
+        "---\n"
+        "event: pause\n"
+        "code: |\n"
+        "  import time\n"
+        "  time.sleep(1)\n"
+        "  background_response('done')\n",
+        encoding="utf-8",
+    )
+
+    from docassemble_simulator.runner import SimulatorRunner
+
+    with SimulatorRunner(
+        tmp_path,
+        interview="docassemble.background_timeout:data/questions/main.yml",
+        python=family_python.interpreter,
+        offline=True,
+        seek_diagnostics="off",
+        timeout=30,
+    ) as runner:
+        timed_out = runner.request("start", timeout=0.05)
+        assert not timed_out.ok
+        assert timed_out.error["kind"] == "timeout"
+        assert timed_out.error["details"]["operation"] == "start"
