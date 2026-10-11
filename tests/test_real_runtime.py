@@ -819,6 +819,57 @@ def test_seek_contract_across_families(family_python, real_workspace):
     assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
 
 
+def test_terminal_choices_failure_names_the_real_referencing_block(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    failure_path = (
+        root
+        / "docassemble"
+        / "regression"
+        / "data"
+        / "questions"
+        / "choices-failure.yml"
+    )
+    failure_path.write_text(
+        "---\n"
+        "id: choices-failure\n"
+        "mandatory: True\n"
+        "question: Choose a value\n"
+        "fields:\n"
+        "  - Choice: choice\n"
+        "    code: missing_choices\n"
+    )
+
+    failed = _run(
+        interpreter,
+        root,
+        "start",
+        "--interview",
+        "choices-failure.yml",
+        "--seek-diagnostics",
+        "capture",
+        "--full-seek-diagnostics",
+        expected_code=2,
+    )
+
+    assert failed["error"]["kind"] == "unresolved-variable", label
+    details = failed["error"]["details"]
+    assert details["sought_variable"] == "missing_choices", label
+    assert details["culprit"]["provenance"]["id"] == "choices-failure", label
+    assert "missing_choices" in details["culprit"]["expression"], label
+    culprit_diagnostics = [
+        item
+        for item in failed.get("diagnostics", [])
+        if item.get("details", {}).get("culprit")
+    ]
+    assert culprit_diagnostics, label
+    assert culprit_diagnostics[-1]["details"]["culprit"] == details["culprit"], label
+
+
 def test_auto_seek_submits_browser_defaults_and_completes_across_families(
     family_python, real_workspace
 ):

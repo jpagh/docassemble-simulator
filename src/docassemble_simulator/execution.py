@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import datetime
 import difflib
 import hashlib
@@ -2349,52 +2350,177 @@ def _atomic_pickle(path, payload, *, lock_destination):
     )
 
 
-def _culprit_expression(question) -> str | None:
-    source = getattr(question, "source_code", None)
-    if isinstance(source, str):
-        lines = source.splitlines()
-        for index, line in enumerate(lines):
-            match = re.match(r"^(\s*)(choices|code|if|show if)\s*:\s*(.*)$", line)
-            if not match:
-                continue
-            key = match.group(2)
-            value = match.group(3).strip()
-            if value in {"|", ">", "|-", ">-", "|+", ">+"}:
-                base_indent = len(match.group(1))
-                block = []
-                for following in lines[index + 1 :]:
-                    if following.strip() and len(following) <= base_indent:
-                        break
-                    block.append(following.strip())
-                value = " ".join(item for item in block if item)
-            if value:
-                return f"{key}: {value}"
-        if source.strip():
-            return source.strip()[:500]
+def _seek_question_for_variable(seeking: list[Any] | None, variable: str):
+    """Find the block responsible for the terminal seek in runtime history.
+
+    ``InterviewStatus.question`` is the last successfully populated screen.  A
+    terminal seek often occurs while evaluating a choice or code expression,
+    before docassemble can populate a new screen, so that attribute can point
+    at an unrelated, stale question.  The runtime's ordered seeking history is
+    the useful evidence: use the last question considered for the terminal
+    variable, bounded by the preceding variable seek for nested resolution.
+    """
+    stages = [stage for stage in seeking or () if isinstance(stage, dict)]
+    variable = str(variable)
+    variable_indexes = [
+        index
+        for index, stage in enumerate(stages)
+        if stage.get("variable") is not None and str(stage["variable"]) == variable
+    ]
+    if not variable_indexes:
+        return None
+    terminal_index = variable_indexes[-1]
+    previous_variable = max(
+        (
+            index
+            for index, stage in enumerate(stages[:terminal_index])
+            if stage.get("variable") is not None
+        ),
+        default=-1,
+    )
+    question_stages = [
+        stage
+        for stage in stages[terminal_index + 1 :]
+        if stage.get("question") is not None
+    ]
+    if question_stages:
+        return question_stages[-1]["question"]
+    question_stages = [
+        stage
+        for stage in stages[previous_variable + 1 : terminal_index]
+        if stage.get("question") is not None
+    ]
+    return question_stages[-1]["question"] if question_stages else None
+
+
+def _variable_root(variable: str) -> str | None:
+    match = re.match(r"[A-Za-z_]\w*", str(variable))
+    return match.group(0) if match else None
+
+
+def _expression_mentions(expression: str, variable: str) -> bool:
+    root = _variable_root(variable)
+    if root is None:
+        return False
+    try:
+        tree = ast.parse(expression, mode="exec")
+    except (SyntaxError, ValueError):
+        return bool(re.search(rf"\b{re.escape(root)}\b", expression))
+    return any(
+        isinstance(node, ast.Name) and node.id == root for node in ast.walk(tree)
+    )
+
+
+def _matching_expression(expression: str, variable: str) -> str | None:
+    expression = expression.strip()
+    if not expression or not _expression_mentions(expression, variable):
+        return None
+    try:
+        tree = ast.parse(expression, mode="exec")
+    except (SyntaxError, ValueError):
+        return expression
+    root = _variable_root(variable)
+    statements = getattr(tree, "body", ())
+    for statement in statements:
+        if root is not None and any(
+            isinstance(node, ast.Name) and node.id == root
+            for node in ast.walk(statement)
+        ):
+            segment = ast.get_source_segment(expression, statement)
+            return (segment or expression).strip()
+    return expression
+
+
+def _question_expressions(question) -> list[str]:
+    expressions: list[str] = []
     for field in getattr(question, "fields", None) or ():
         selections = getattr(field, "selections", None)
         if isinstance(selections, dict):
-            expression = selections.get("sourcecode")
-            if isinstance(expression, str) and expression.strip():
-                return expression.strip()
+            sourcecode = selections.get("sourcecode")
+            if isinstance(sourcecode, str):
+                expressions.append(sourcecode)
+        for name in ("showif_code", "sourcecode"):
+            sourcecode = getattr(field, name, None)
+            if isinstance(sourcecode, str):
+                expressions.append(sourcecode)
+
+    for name in ("sourcecode", "code"):
+        sourcecode = getattr(question, name, None)
+        if isinstance(sourcecode, str):
+            expressions.append(sourcecode)
+
+    source = getattr(question, "source_code", None)
+    if isinstance(source, str):
+        try:
+            import yaml
+
+            documents = list(yaml.safe_load_all(source))
+        except Exception:  # noqa: BLE001 - provenance must survive malformed source
+            documents = []
+        keys = {
+            "choices",
+            "code",
+            "if",
+            "show if",
+            "required",
+            "default",
+            "validation code",
+            "need",
+        }
+
+        def collect(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key in keys and isinstance(item, str):
+                        expressions.append(item)
+                    else:
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        for document in documents:
+            collect(document)
+        if not expressions:
+            expressions.append(source)
+    return expressions
+
+
+def _culprit_expression(question, sought_variable: str) -> str | None:
+    expressions = _question_expressions(question)
+    for expression in expressions:
+        matching = _matching_expression(expression, sought_variable)
+        if matching is not None:
+            return matching[:500]
     return None
 
 
 def _unresolved_culprit(error: BaseException) -> dict[str, Any] | None:
-    try:
-        from docassemble.base.functions import this_thread
+    sought_variable = _unresolved_variable(error) or "<unknown>"
+    status = getattr(error, "interview_status", None)
+    used_error_history = status is not None
+    if status is None:
+        try:
+            from docassemble.base.functions import this_thread
 
-        status = getattr(this_thread, "interview_status", None)
+            status = getattr(this_thread, "interview_status", None)
+        except (ImportError, AttributeError):
+            status = None
+
+    question = _seek_question_for_variable(
+        getattr(status, "seeking", None), sought_variable
+    )
+    if question is None and not used_error_history:
+        # Keep compatibility with lightweight runtimes that do not annotate
+        # their exception, while preferring native seeking history whenever it
+        # is present.  The active screen is only evidence of last resort.
         question = getattr(status, "question", None)
-    except (ImportError, AttributeError):
-        question = None
     if question is None:
         return None
     provenance = _provenance(question)
-    sought_variable = _unresolved_variable(error) or "<unknown>"
     culprit = {
         "provenance": provenance,
-        "expression": _culprit_expression(question),
+        "expression": _culprit_expression(question, sought_variable),
         "sought_variable": sought_variable,
     }
     record_culprit(sought_variable, culprit)
