@@ -37,6 +37,19 @@ def test_runner_discovers_project_and_copies_source_for_isolation(tmp_path):
     ).is_file()
 
 
+def _scope(*, pid=1, interview="docassemble.example:data/questions/main.yml"):
+    return {
+        "root": "/project",
+        "project_root": "/project",
+        "interview": interview,
+        "config_fingerprint": "",
+        "session_root": "/sessions",
+        "session": "/sessions/main.pkl",
+        "session_id": "main",
+        "pid": pid,
+    }
+
+
 def _worker_executable(tmp_path, body):
     executable = tmp_path / "controlled-worker"
     executable.write_text(
@@ -115,6 +128,42 @@ def test_runner_reports_a_crashed_worker_and_closes_it(tmp_path):
     with pytest.raises(RunnerError, match="closed"):
         runner.status()
     runner.close()
+
+
+def test_runner_rejects_a_response_with_an_incomplete_scope(tmp_path):
+    executable = _worker_executable(
+        tmp_path,
+        'print(json.dumps({"id": "1", "ok": True, "result": {}, "scope": {}}))\n',
+    )
+    runner = SimulatorRunner(_project(tmp_path), python=executable, timeout=1)
+
+    response = runner.execute("secret = 1")
+
+    assert response.error["kind"] == "fault"
+    assert "scope" in response.error["details"]["error"]
+    with pytest.raises(RunnerError, match="closed"):
+        runner.status()
+
+
+def test_runner_rejects_a_changed_scope_after_the_first_response(tmp_path):
+    first = json.dumps({"id": "1", "ok": True, "result": {}, "scope": _scope()})
+    second = json.dumps({"id": "2", "ok": True, "result": {}, "scope": _scope(pid=2)})
+    executable = _worker_executable(
+        tmp_path,
+        f"print({first!r})\n"
+        "sys.stdout.flush()\n"
+        "json.loads(sys.stdin.readline())\n"
+        f"print({second!r})\n",
+    )
+    runner = SimulatorRunner(_project(tmp_path), python=executable, timeout=1)
+
+    assert runner.execute("secret = 1").ok
+    response = runner.status()
+
+    assert response.error["kind"] == "fault"
+    assert "scope changed" in response.error["details"]["error"]
+    with pytest.raises(RunnerError, match="closed"):
+        runner.status()
 
 
 def test_runner_rejects_unsolicited_data_after_a_response(tmp_path):
