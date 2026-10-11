@@ -602,6 +602,71 @@ def _assert_helper_output(path):
         assert expected in xml
 
 
+def test_persistent_worker_and_runner_contract_across_families(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    session_root = root / f"worker-session-{case.probe.value}"
+    requests = [
+        {"id": "start", "operation": "start"},
+        {
+            "id": "print",
+            "operation": "exec",
+            "code": "print('authored worker output')",
+            "assemble": False,
+        },
+        {"id": "status", "operation": "status"},
+        {"id": "shutdown", "operation": "shutdown"},
+    ]
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-m",
+            "docassemble_simulator",
+            "--root",
+            str(root),
+            "--offline",
+            "--interview",
+            "main.yml",
+            "run",
+            "--session-root",
+            str(session_root),
+            "--timeout",
+            "30",
+        ],
+        input="".join(json.dumps(request) + "\\n" for request in requests),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=180,
+    )
+    assert completed.returncode == 0, (
+        label + "\\n" + completed.stdout + completed.stderr
+    )
+    frames = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert [frame["id"] for frame in frames] == [request["id"] for request in requests]
+    assert all(frame["ok"] for frame in frames), label
+    assert "authored worker output" in completed.stderr, label
+
+    from docassemble_simulator import SimulatorRunner
+
+    with SimulatorRunner(
+        root,
+        interview="main.yml",
+        python=interpreter,
+        isolate=False,
+        offline=True,
+        timeout=30,
+    ) as runner:
+        started = runner.start()
+        assert started.ok, (label, started)
+        assert runner.status().ok, label
+
+
 def test_minimal_start_answer_contract_across_families(family_python, real_workspace):
     case = family_python
     label, interpreter = case.label, case.interpreter

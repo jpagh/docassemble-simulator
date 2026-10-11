@@ -171,13 +171,14 @@ printf '%s\\n' \\
       --timeout 30 --timings
 ```
 
-`run` and `worker` accept JSON-lines on stdin or `--journey FILE`. Each response
-contains the request `id`, `ok`, the normal simulator `result` or `error`, and
-the active project/interview/session scope. `reset` discards the worker's saved
-session; `shutdown` exits cleanly. `--session-root PATH` makes the session
-resumable by another worker. Without it, the command uses a temporary isolated
-session. Timings are optional and remain in the protocol response; logs stay
-on stderr.
+`run` and `worker` accept JSON-lines on stdin or `--journey FILE` (a JSON array
+is also accepted). Each response contains the request `id`, `ok`, the normal
+simulator `result` or `error`, and the active project/interview/session scope.
+`reset` discards the worker's saved session; `shutdown` exits cleanly.
+`--session-root PATH` makes the session resumable by another worker. Without it,
+the command uses a temporary isolated session. Interview/bootstrap output is
+redirected to stderr so stdout remains protocol-only. Timings are optional and
+remain in the protocol response.
 
 The Python client uses the same protocol and lifecycle:
 
@@ -192,11 +193,16 @@ with SimulatorRunner("./my-project", interview="data/questions/main.yml") as jou
 
 The runner discovers the project root when `root` is omitted, accepts a config
 path or mapping, and defaults to a copied source workspace plus a temporary
-session root. Use `source_policy="symlink"` or `isolate=False` only when shared
-source behavior is intentional. `journey.seed("...", assemble=False)` is the
-explicit state-seeding escape hatch for unsupported browser-only dynamic
-fields; such screens report `dynamic_fields: true` and `field_source: code`
-instead of fabricated fields. The one-shot commands remain available.
+session root. Its deadline covers writing the request and reading one complete
+newline-delimited response, including partial or stalled frames. A timeout,
+crash, malformed frame, or unexpected response id closes the runner; it does not
+retry because the operation's commit status may be uncertain. Timeout responses
+are typed as `timeout` and include only operation context. Use
+`source_policy="symlink"` or `isolate=False` only when shared source behavior is
+intentional. `journey.seed("...", assemble=False)` is the explicit state-seeding
+escape hatch for unsupported browser-only dynamic fields; such screens report
+`dynamic_fields: true` and `field_source: code` instead of fabricated fields.
+The one-shot commands remain available.
 
 ## Screen traces
 

@@ -10,17 +10,65 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from docassemble_simulator.config import deep_merge
 from docassemble_simulator.detect import find_package_root
 
 
 class RunnerError(RuntimeError):
     """The worker could not be started or its protocol became unusable."""
+
+
+class _ResponseReader:
+    """Read frames without a buffered readline that can outlive the deadline."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.buffer = bytearray()
+        self.selector = selectors.DefaultSelector()
+        os.set_blocking(stream.fileno(), False)
+        self.selector.register(stream, selectors.EVENT_READ)
+
+    def read(self, deadline: float) -> bytes:
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self.selector.select(remaining):
+                raise TimeoutError
+            try:
+                chunk = os.read(self.stream.fileno(), 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                raise RunnerError("worker exited before returning a complete response")
+            self.buffer.extend(chunk)
+        line, _, remainder = self.buffer.partition(b"\n")
+        if remainder:
+            raise RunnerError("worker returned unsolicited response data")
+        self.buffer.clear()
+        return bytes(line)
+
+    def close(self):
+        self.selector.close()
+
+
+def _write_request(stream, data: bytes, deadline: float) -> None:
+    """Include pipe backpressure in the same operation deadline."""
+    os.set_blocking(stream.fileno(), False)
+    with selectors.DefaultSelector() as selector:
+        selector.register(stream, selectors.EVENT_WRITE)
+        pending = memoryview(data)
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise TimeoutError
+            written = os.write(stream.fileno(), pending)
+            pending = pending[written:]
 
 
 class RunnerResponse(dict):
@@ -108,8 +156,8 @@ class SimulatorRunner:
         self._workspace: Path | None = None
         self._session_root: Path | None = None
         self._config_path: Path | None = None
-        self._process: subprocess.Popen[str] | None = None
-        self._selector: selectors.BaseSelector | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._reader: _ResponseReader | None = None
         self._next_id = 0
         self._last_response: dict[str, Any] | None = None
         self._closed = False
@@ -218,7 +266,7 @@ class SimulatorRunner:
                     )
             elif isinstance(self.config, dict):
                 values = copy.deepcopy(self.config)
-            _deep_merge(values, self.config_overrides)
+            deep_merge(values, self.config_overrides)
             assert self._temporary is not None or self._workspace is not None
             directory = (
                 Path(self._temporary.name)
@@ -269,10 +317,10 @@ class SimulatorRunner:
         return command
 
     def open(self) -> SimulatorRunner:
-        if self._process is not None:
-            return self
         if self._closed:
             raise RunnerError("runner is already closed")
+        if self._process is not None:
+            return self
         self._prepare_workspace()
         try:
             self._process = subprocess.Popen(
@@ -280,83 +328,124 @@ class SimulatorRunner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=None,
-                text=True,
-                bufsize=1,
+                bufsize=0,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
         except OSError as error:
             self._cleanup_workspace()
             raise RunnerError(f"could not start simulator worker: {error}") from error
         assert self._process.stdout is not None
-        self._selector = selectors.DefaultSelector()
-        self._selector.register(self._process.stdout, selectors.EVENT_READ)
+        self._reader = _ResponseReader(self._process.stdout)
         return self
 
-    def _transport_failure(self, request_id: str, message: str, details=None):
+    def _transport_failure(
+        self, request_id: str, message: str, details=None, *, kind="fault"
+    ):
         return RunnerResponse(
             {
                 "id": request_id,
                 "ok": False,
                 "error": {
-                    "kind": "fault",
+                    "kind": kind,
                     "message": message,
                     "details": details or {},
                 },
             }
         )
 
+    def _invalidate_transport(self) -> None:
+        """Close a protocol that can no longer be correlated safely."""
+        self.terminate()
+        self._closed = True
+        self._cleanup_workspace()
+
+    @staticmethod
+    def _validate_response(decoded: Any, request_id: str) -> RunnerResponse:
+        if not isinstance(decoded, dict):
+            raise TypeError("worker returned a non-object response")
+        if decoded.get("id") != request_id:
+            raise ValueError(
+                f"worker response id {decoded.get('id')!r} does not match {request_id!r}"
+            )
+        if type(decoded.get("ok")) is not bool:
+            raise ValueError("worker response field 'ok' must be a boolean")
+        if not isinstance(decoded.get("scope"), dict):
+            raise TypeError("worker response field 'scope' must be an object")
+        if decoded["ok"]:
+            if "result" not in decoded or "error" in decoded:
+                raise ValueError("successful worker response has an invalid shape")
+        elif "error" not in decoded or "result" in decoded:
+            raise ValueError("failed worker response has an invalid shape")
+        if not decoded["ok"]:
+            error = decoded["error"]
+            if (
+                not isinstance(error, dict)
+                or not isinstance(error.get("kind"), str)
+                or not isinstance(error.get("message"), str)
+                or not isinstance(error.get("details"), dict)
+            ):
+                raise ValueError("worker error response has an invalid shape")
+        return RunnerResponse(decoded)
+
     def request(self, operation: str, **arguments: Any) -> RunnerResponse:
         """Send one operation and wait at most ``timeout`` seconds for a response."""
         self.open()
         assert self._process is not None
         assert self._process.stdin is not None
-        assert self._selector is not None
+        assert self._reader is not None
         self._next_id += 1
         request_id = str(self._next_id)
         request = {"id": request_id, "operation": operation, **arguments}
+        deadline = time.monotonic() + self.timeout
         try:
-            self._process.stdin.write(json.dumps(request, default=str) + "\n")
-            self._process.stdin.flush()
-            ready = self._selector.select(self.timeout)
-            if not ready:
-                self.terminate()
-                response = self._transport_failure(
-                    request_id,
-                    "worker operation timed out",
-                    {"operation": operation, "timeout": self.timeout},
-                )
-                self._last_response = response
-                return response
-            line = self._process.stdout.readline() if self._process.stdout else ""
-            if not line:
+            _write_request(
+                self._process.stdin,
+                (json.dumps(request, default=str) + "\n").encode("utf-8"),
+                deadline,
+            )
+            frame = self._reader.read(deadline)
+            if not frame:
                 code = self._process.poll()
                 response = self._transport_failure(
                     request_id,
                     "worker exited before returning a response",
                     {"returncode": code, "operation": operation},
                 )
-                self._last_response = response
-                return response
-            try:
-                decoded = json.loads(line)
-            except json.JSONDecodeError as error:
-                response = self._transport_failure(
-                    request_id,
-                    "worker returned malformed JSON",
-                    {"error": str(error), "operation": operation},
-                )
+                self._invalidate_transport()
             else:
-                if isinstance(decoded, dict):
-                    response = RunnerResponse(decoded)
-                else:
+                try:
+                    decoded = json.loads(frame.decode("utf-8"))
+                    response = self._validate_response(decoded, request_id)
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                ) as error:
                     response = self._transport_failure(
-                        request_id, "worker returned a non-object response"
+                        request_id,
+                        "worker returned an unusable response",
+                        {"error": str(error), "operation": operation},
                     )
+                    self._invalidate_transport()
             self._last_response = response
             return response
-        except (BrokenPipeError, OSError) as error:
+        except TimeoutError:
+            self._invalidate_transport()
             response = self._transport_failure(
-                request_id, f"worker transport failed: {error}"
+                request_id,
+                "worker operation timed out before a complete response",
+                {"operation": operation, "timeout": self.timeout},
+                kind="timeout",
+            )
+            self._last_response = response
+            return response
+        except (BrokenPipeError, OSError, RunnerError) as error:
+            self._invalidate_transport()
+            response = self._transport_failure(
+                request_id,
+                f"worker transport failed: {error}",
+                {"operation": operation},
             )
             self._last_response = response
             return response
@@ -435,18 +524,25 @@ class SimulatorRunner:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
-        if self._selector is not None:
-            self._selector.close()
-            self._selector = None
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.stdout is not None:
+            process.stdout.close()
         self._process = None
 
     def close(self):
         if self._closed:
+            if self._process is not None:
+                self.terminate()
             self._cleanup_workspace()
             return self._last_response
         response = None
-        if self._process is not None and self._process.poll() is None:
-            response = self.request("shutdown")
+        if self._process is not None:
+            if self._process.poll() is None:
+                response = self.request("shutdown")
             if self._process is not None:
                 self.terminate()
         self._closed = True
@@ -456,9 +552,9 @@ class SimulatorRunner:
     shutdown = close
 
     def _cleanup_workspace(self) -> None:
-        if self._selector is not None:
-            self._selector.close()
-            self._selector = None
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
         self._process = None
         if self._temporary is not None:
             self._temporary.cleanup()
@@ -473,14 +569,6 @@ class SimulatorRunner:
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> None:
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value
 
 
 Runner = SimulatorRunner

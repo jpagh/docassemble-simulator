@@ -427,6 +427,21 @@ class StateStore:
         )["namespace"]
 
 
+@dataclass(frozen=True)
+class ExecutionScope:
+    """Immutable identity and durable-state locations; never runtime objects."""
+
+    root: Path
+    interview: str
+    config_fingerprint: str
+    session_root: Path
+    session: Path
+
+    @property
+    def session_id(self) -> str:
+        return self.session.stem
+
+
 class InterviewExecution:
     """Run complete operations; mutable runtime state never crosses this interface."""
 
@@ -453,6 +468,17 @@ class InterviewExecution:
             config_fingerprint,
             config_context,
             session_directory=session_directory,
+        )
+
+    @property
+    def scope(self) -> ExecutionScope:
+        """Describe this execution's project/interview/configuration boundary."""
+        return ExecutionScope(
+            self.root,
+            self._identity,
+            self._store.config_fingerprint,
+            self._store.directory,
+            self._store.path,
         )
 
     @_activate_runtime

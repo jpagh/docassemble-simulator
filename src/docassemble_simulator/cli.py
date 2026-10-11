@@ -9,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 from collections import Counter
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -518,59 +519,71 @@ def cmd_worker(args, root):
 
     from docassemble_simulator.worker import Worker, serve
 
-    resolved = getattr(args, "_resolved_configuration", None)
-    temporary_session = None
-    session_root = args.session_root
-    if session_root is None:
-        # A worker is a journey boundary. Keep its default state out of the
-        # project's ordinary saved-session directory; callers that need to
-        # resume across worker processes provide --session-root explicitly.
-        worker_directory = root / ".simulator"
-        worker_directory.mkdir(parents=True, exist_ok=True)
-        temporary_session = tempfile.TemporaryDirectory(
-            prefix="worker-session-", dir=worker_directory
-        )
-        session_root = temporary_session.name
-    handle = None
-    try:
-        worker = Worker(
-            root,
-            args.interview,
-            config_fingerprint=resolved.fingerprint if resolved is not None else "",
-            config_context=(
-                resolved.session_context() if resolved is not None else None
-            ),
-            session_root=Path(session_root).expanduser().resolve(),
-            timeout=args.timeout,
-            timings=args.timings,
-            project_root=(
-                Path(args.project_root).expanduser().resolve()
-                if args.project_root
-                else None
-            ),
-        )
-        stream = sys.stdin
-        if args.journey:
-            handle = Path(args.journey).expanduser().open("r", encoding="utf-8")
-            stream = handle
-        # A journey file may be either JSONL (the protocol's native format) or
-        # one JSON array of requests. JSONL remains the streaming path for
-        # stdin and large agent journeys.
-        if args.journey:
-            contents = stream.read()
-            stripped = contents.lstrip()
-            if stripped.startswith("["):
-                stream = io.StringIO(
-                    "".join(json.dumps(item) + "\\n" for item in json.loads(contents))
-                )
-            else:
-                stream = io.StringIO(contents)
-        return serve(worker, stream, sys.stdout)
-    finally:
-        if handle is not None:
-            handle.close()
-        if temporary_session is not None:
-            temporary_session.cleanup()
+    # Capture the protocol destination before redirecting stdout.  Bootstrap,
+    # interview imports, and authored code may print, but those bytes must not
+    # become indistinguishable from JSON frames.
+    protocol_output = getattr(args, "_worker_protocol_stdout", sys.stdout)
+    with redirect_stdout(sys.stderr):
+        resolved = getattr(args, "_resolved_configuration", None)
+        temporary_session = None
+        session_root = args.session_root
+        if session_root is None:
+            # A worker is a journey boundary. Keep its default state out of the
+            # project's ordinary saved-session directory; callers that need to
+            # resume across worker processes provide --session-root explicitly.
+            worker_directory = root / ".simulator"
+            worker_directory.mkdir(parents=True, exist_ok=True)
+            temporary_session = tempfile.TemporaryDirectory(
+                prefix="worker-session-", dir=worker_directory
+            )
+            session_root = temporary_session.name
+        handle = None
+        try:
+            worker = Worker(
+                root,
+                args.interview,
+                config_fingerprint=(
+                    resolved.fingerprint if resolved is not None else ""
+                ),
+                config_context=(
+                    resolved.session_context() if resolved is not None else None
+                ),
+                session_root=Path(session_root).expanduser().resolve(),
+                timeout=args.timeout,
+                timings=args.timings,
+                project_root=(
+                    Path(args.project_root).expanduser().resolve()
+                    if args.project_root
+                    else None
+                ),
+            )
+            stream = sys.stdin
+            if args.journey:
+                handle = Path(args.journey).expanduser().open("r", encoding="utf-8")
+                stream = handle
+            # A journey file may be either JSONL (the protocol's native format) or
+            # one JSON array of requests. JSONL remains the streaming path for
+            # stdin and large agent journeys.
+            if args.journey:
+                contents = stream.read()
+                stripped = contents.lstrip()
+                if stripped.startswith("["):
+                    requests = json.loads(contents)
+                    if not isinstance(requests, list):
+                        raise ValueError(
+                            "journey JSON must contain an array of requests"
+                        )
+                    stream = io.StringIO(
+                        "".join(json.dumps(item) + "\n" for item in requests)
+                    )
+                else:
+                    stream = io.StringIO(contents)
+            return serve(worker, stream, protocol_output)
+        finally:
+            if handle is not None:
+                handle.close()
+            if temporary_session is not None:
+                temporary_session.cleanup()
 
 
 def _trace_metadata(args, root):
@@ -1597,6 +1610,11 @@ def main(argv=None):
             getattr(args, "background_actions", None) or settings["background_actions"]
         )
         install_missing = settings["missing_runtime"] == "install"
+        worker_command = args.command in {"worker", "run", "journey"}
+        if worker_command:
+            # Keep the real stdout handle for protocol frames while redirecting
+            # bootstrap and interview-authored prints to stderr below.
+            args._worker_protocol_stdout = sys.stdout
         with SimulatorRuntime().activate(
             root,
             config_path=resolved.effective_path,
@@ -1610,23 +1628,25 @@ def main(argv=None):
                 "config",
                 "trace",
             } or (args.command == "trace" and args.trace_command == "replay")
-            if needs_interview_bootstrap:
-                if not config and not getattr(args, "offline", False):
-                    # Preserve the small composition seam used by embedders that
-                    # provide the legacy one-argument preflight callable.
-                    ensure_importable(root)
-                else:
-                    ensure_importable(
-                        root,
-                        install_missing=install_missing,
-                        offline=getattr(args, "offline", False) or settings["offline"],
+            with redirect_stdout(sys.stderr) if worker_command else nullcontext():
+                if needs_interview_bootstrap:
+                    if not config and not getattr(args, "offline", False):
+                        # Preserve the small composition seam used by embedders that
+                        # provide the legacy one-argument preflight callable.
+                        ensure_importable(root)
+                    else:
+                        ensure_importable(
+                            root,
+                            install_missing=install_missing,
+                            offline=getattr(args, "offline", False)
+                            or settings["offline"],
+                        )
+                    bootstrap(
+                        stub_define_defined=args.stub_defined,
+                        background_action_mode=mode,
+                        extra_config=config,
                     )
-                bootstrap(
-                    stub_define_defined=args.stub_defined,
-                    background_action_mode=mode,
-                    extra_config=config,
-                )
-            return args.func(args, root)
+                return args.func(args, root)
     except (InputFailure, SystemExit, ValueError) as error:
         message = str(error)
         message = message.removeprefix("error: ")
