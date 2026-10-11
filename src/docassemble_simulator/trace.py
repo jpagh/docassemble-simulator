@@ -39,7 +39,8 @@ __all__ = [
 ]
 
 #: Version of the JSONL sidecar schema. A mismatch is an input error.
-TRACE_SCHEMA_VERSION = 1
+# Version 2 records the explicit-id anchor rule for generic/list instances.
+TRACE_SCHEMA_VERSION = 2
 
 EXPLICIT_ID_PREFIX = "ID "
 
@@ -130,6 +131,28 @@ def screen_content(screen: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(sorted(fields, key=lambda item: item["variable"]))
 
 
+def _explicit_id_anchor(screen: dict[str, Any]) -> tuple[str, str] | None:
+    sought = screen.get("sought")
+    orig_sought = screen.get("orig_sought")
+    if not isinstance(sought, str) or not isinstance(orig_sought, str):
+        return None
+    if not sought or not orig_sought or sought == orig_sought:
+        return None
+    sought_root, sought_tail = _split_root(sought)
+    orig_root, _ = _split_root(orig_sought)
+    if (
+        sought_root == GENERIC_PLACEHOLDER_ROOT
+        and orig_root
+        and orig_root != GENERIC_PLACEHOLDER_ROOT
+        and not _is_generated_instance_name(orig_root)
+    ):
+        return f"{orig_root}{sought_tail}", "generic-object"
+    stable = _stable_path(sought)
+    if stable is not None and stable == _stable_path(orig_sought):
+        return stable, "list-target"
+    return None
+
+
 def screen_identity(screen: dict[str, Any]) -> ScreenIdentity:
     """Derive the canonical identity of a screen outcome.
 
@@ -141,9 +164,12 @@ def screen_identity(screen: dict[str, Any]) -> ScreenIdentity:
         return error_identity(screen)
     question_name = screen.get("question_name")
     if isinstance(question_name, str) and question_name.startswith(EXPLICIT_ID_PREFIX):
-        return ScreenIdentity(
-            f"id:{question_name[len(EXPLICIT_ID_PREFIX) :]}", "explicit-id"
-        )
+        explicit_id = question_name[len(EXPLICIT_ID_PREFIX) :]
+        anchor = _explicit_id_anchor(screen)
+        if anchor is None:
+            return ScreenIdentity(f"id:{explicit_id}", "explicit-id")
+        value, rule = anchor
+        return ScreenIdentity(f"id:{explicit_id}@{value}", f"explicit-id-{rule}")
     sought = screen.get("sought")
     orig_sought = screen.get("orig_sought")
     if (

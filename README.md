@@ -151,6 +151,11 @@ pickle payloads. Unsupported or stale state fails with an instruction to run
 `start` again. Mutations hold a per-interview advisory lock and commit with
 atomic replacement.
 
+`check` also reports duplicate explicit question ids with every block's
+provenance. They are warnings by default; `check --strict` makes accidental
+duplicates fail, while deliberate override/supersede relationships are reported
+separately.
+
 ## Screen traces
 
 Execution commands can record the screens a run passes through and compare a
@@ -181,8 +186,10 @@ payload and carries an `error:` identity (`error:unresolved:<variable>` for an
 undefined reference), never a fabricated screen.
 
 Identity ignores generated `Question_<n>` names, resolved occurrence paths,
-random instance names, and rendered text. It falls back from explicit block
-ids through targeted variables, generic-object anchors, and indexed list
+random instance names, and rendered text. Non-generic explicit ids remain
+`id:<id>`; generic-object and indexed-list instances are anchored as
+`id:<id>@<anchor>` so distinct instances do not collapse. It falls back from
+explicit block ids through targeted variables, generic-object anchors, and indexed list
 targets to a field-variable tuple or a kind/category. The rule used is stored
 with every key.
 

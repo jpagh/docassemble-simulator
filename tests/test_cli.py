@@ -177,7 +177,37 @@ def test_check_human_output_ends_with_totals(monkeypatch, tmp_path, capsys):
     args = cli.build_parser().parse_args(["check"])
 
     assert cli.cmd_catalog(args, tmp_path) == 2
-    assert capsys.readouterr().out.rstrip().endswith("checked: 2  ok: 1  failures: 1")
+    assert (
+        capsys.readouterr()
+        .out.rstrip()
+        .endswith("checked: 2  ok: 1  failures: 1  duplicate ids: 0")
+    )
+
+
+def test_check_strict_fails_on_duplicate_ids(monkeypatch, tmp_path, capsys):
+    class FakeCatalog:
+        def __init__(self, root, selector):
+            pass
+
+        def check(self):
+            return SimpleNamespace(
+                interview=None,
+                result={
+                    "checked": 1,
+                    "failures": 0,
+                    "totals": {"checked": 1, "ok": 1, "failed": 0, "duplicate_ids": 1},
+                    "duplicate_ids": [{"kind": "duplicate-id", "id": "shared"}],
+                    "results": [],
+                },
+            )
+
+    monkeypatch.setattr("docassemble_simulator.catalog.InterviewCatalog", FakeCatalog)
+    args = cli.build_parser().parse_args(["check", "--strict", "--json"])
+
+    assert cli.cmd_catalog(args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["kind"] == "duplicate-id"
+    assert payload["error"]["details"]["duplicate_ids"][0]["id"] == "shared"
 
 
 def test_diagnostic_summary_is_bounded_and_counts_kinds():

@@ -376,6 +376,11 @@ def cmd_catalog(args, root):
     )
     ok = not (
         (args.command == "check" and result["failures"])
+        or (
+            args.command == "check"
+            and args.strict
+            and result.get("totals", {}).get("duplicate_ids", 0)
+        )
         or (args.command == "why" and args.strict and result["conflict"])
     )
     payload = (
@@ -387,12 +392,20 @@ def cmd_catalog(args, root):
                 "kind": (
                     "resolution-conflict"
                     if args.command == "why"
-                    else ErrorKind.COMPILE
+                    else (
+                        "duplicate-id"
+                        if result.get("totals", {}).get("duplicate_ids", 0)
+                        else ErrorKind.COMPILE
+                    )
                 ),
                 "message": (
                     "variable resolution conflict found"
                     if args.command == "why"
-                    else "one or more interviews failed to compile"
+                    else (
+                        "duplicate explicit question ids found"
+                        if result.get("totals", {}).get("duplicate_ids", 0)
+                        else "one or more interviews failed to compile"
+                    )
                 ),
                 "details": result,
             },
@@ -404,10 +417,12 @@ def cmd_catalog(args, root):
             "checked": result.get("checked", 0),
             "ok": result.get("checked", 0) - result.get("failures", 0),
             "failed": result.get("failures", 0),
+            "duplicate_ids": 0,
         }
         print(
             f"checked: {totals['checked']}  "
-            f"ok: {totals['ok']}  failures: {totals['failed']}"
+            f"ok: {totals['ok']}  failures: {totals['failed']}  "
+            f"duplicate ids: {totals.get('duplicate_ids', 0)}"
         )
     return 0 if ok else 2
 
@@ -1086,7 +1101,13 @@ def build_parser():
         help="inspect effective simulator configuration (secrets redacted)",
         description="Show discovered config, simulator settings, redacted pass-through values, and the config_fingerprint that scopes sessions.",
     ).set_defaults(func=cmd_config)
-    add("check", help="compile interview definitions").set_defaults(func=cmd_catalog)
+    check = add("check", help="compile interview definitions")
+    check.add_argument(
+        "--strict",
+        action="store_true",
+        help="treat accidental duplicate explicit ids as a failure",
+    )
+    check.set_defaults(func=cmd_catalog)
     for name in ("questions", "index"):
         item = add(name, help=f"inspect interview {name}")
         item.add_argument("--var")

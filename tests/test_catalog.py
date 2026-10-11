@@ -126,6 +126,53 @@ def test_why_uses_last_loaded_order_and_reports_guard_conflicts(tmp_path, monkey
     assert report["candidates"][0]["live"] is True
 
 
+def test_check_reports_duplicate_ids_and_separates_overrides(tmp_path, monkeypatch):
+    package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    package.mkdir(parents=True)
+    (package.parent.parent / "__init__.py").write_text("")
+    first = _question(
+        tmp_path,
+        line=1,
+        variable="first",
+        explicit_id="shared",
+    )
+    second = _question(
+        tmp_path,
+        line=8,
+        variable="second",
+        explicit_id="shared",
+    )
+    deliberate = _question(
+        tmp_path,
+        line=15,
+        variable="third",
+        explicit_id="deliberate",
+    )
+    deliberate.override = True
+    deliberate_later = _question(
+        tmp_path,
+        line=22,
+        variable="fourth",
+        explicit_id="deliberate",
+    )
+    deliberate_later.supersedes = "deliberate"
+    interview = SimpleNamespace(
+        questions_list=[first, second, deliberate, deliberate_later]
+    )
+    catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    monkeypatch.setattr(catalog, "_compile", lambda identity: interview)
+
+    result = catalog.check().result
+
+    assert result["totals"]["duplicate_ids"] == 1
+    assert {item["kind"] for item in result["duplicate_ids"]} == {
+        "duplicate-id",
+        "deliberate-override",
+    }
+    assert len(result["duplicate_ids"][0]["blocks"]) == 2
+    assert result["totals"]["checked"] == 1
+
+
 def test_check_reports_complete_totals(tmp_path, monkeypatch):
     package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     package.mkdir(parents=True)
@@ -139,7 +186,12 @@ def test_check_reports_complete_totals(tmp_path, monkeypatch):
 
     result = catalog.check().result
 
-    assert result["totals"] == {"checked": 1, "ok": 1, "failed": 0}
+    assert result["totals"] == {
+        "checked": 1,
+        "ok": 1,
+        "failed": 0,
+        "duplicate_ids": 0,
+    }
 
 
 def test_provenance_reads_authored_guard_when_runtime_drops_block_text(tmp_path):

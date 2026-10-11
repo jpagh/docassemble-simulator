@@ -50,8 +50,11 @@ Generated `Question_<n>` names are positional and never identity.
 First match wins; the rule name is stored with the key (`rule` provenance).
 
 1. `explicit-id` — `question_name` starts `ID ` → `id:<id>`. Covers field,
-   review, `settrue`, continue, and terminal screens. The id wins even when
-   the screen also carries a `sought` pair (`ID client identity`).
+   review, `settrue`, continue, and terminal screens. Non-generic ids remain
+   insertion-stable. When the screen is a generic-object or indexed-list
+   instantiation, the id is anchored as `id:<id>@<anchor>` with rule
+   `explicit-id-generic-object` or `explicit-id-list-target`, so instances do
+   not collapse.
 2. `targeted-variable` — `sought == orig_sought` → `var:<path>` with numeric
    indices normalized (`clients[0].name` → `clients[i].name`).
 3. `generic-object` — roots differ and the `sought` root is the placeholder

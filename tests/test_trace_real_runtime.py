@@ -38,7 +38,7 @@ PHASES = {
     "fields:favorite_color": "intake",
     "fields:chosen_color": "intake",
     "id:any clients": "people",
-    "id:client names": "people",
+    "id:client names@clients[i].complete": "people",
     "id:another client": "people",
     "generic:contacts.name": "people",
     "id:gather checkpoint": "close",
@@ -57,7 +57,7 @@ ANSWERS = {
         {"chosen_color": "blue"},
     ],
     "id:any clients": [{"clients.there_are_any": "true"}],
-    "id:client names": [
+    "id:client names@clients[i].complete": [
         {"clients[i].name": "Alice", "clients[i].complete": "true"},
         {"clients[i].name": "Bob", "clients[i].complete": "true"},
     ],
@@ -322,7 +322,7 @@ def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
     assert expected.metadata.interview == INTERVIEW
     assert identities[0] == "id:intro"
     assert "fields:favorite_color" in identities
-    assert identities.count("id:client names") == 2
+    assert identities.count("id:client names@clients[i].complete") == 2
     assert identities.count("generic:contacts.name") == 2
     assert "id:review" in identities
     assert "screen:question/deadend" in identities

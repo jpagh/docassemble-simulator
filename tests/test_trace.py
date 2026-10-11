@@ -36,7 +36,31 @@ def test_explicit_id_wins_over_target_pair():
     }
 
     assert screen_identity(screen) == ScreenIdentity(
-        "id:client identity", "explicit-id"
+        "id:client identity@clients[i].name.first", "explicit-id-list-target"
+    )
+
+
+def test_explicit_id_keeps_non_generic_identity():
+    screen = _screen(
+        question_name="ID intro",
+        sought="user_name",
+        orig_sought="user_name",
+    )
+
+    assert screen_identity(screen) == ScreenIdentity("id:intro", "explicit-id")
+
+
+def test_explicit_id_anchors_list_target_identity():
+    screen = {
+        "kind": "question",
+        "question_name": "ID client status",
+        "sought": "clients[i].complete",
+        "orig_sought": "clients[0].complete",
+        "fields": [{"variable": "clients[i].complete"}],
+    }
+
+    assert screen_identity(screen) == ScreenIdentity(
+        "id:client status@clients[i].complete", "explicit-id-list-target"
     )
 
 
@@ -310,6 +334,51 @@ def test_trace_replay_is_clean_with_failed_step_and_override(
     assert payload["result"]["counts"]["matched"] == 4
     assert dict(operations[1].assignments)["user_name"] == "Bob"
     assert golden.read_bytes() == original
+
+
+def test_trace_replay_stops_at_first_identity_divergence(tmp_path, monkeypatch, capsys):
+    intro = _screen(question_name="ID intro")
+    expected = _trace(
+        TraceEntry(
+            1,
+            "start",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+        )
+    )
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, expected)
+    actual = _screen(question_name="ID changed")
+
+    class FakeExecution:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, operation):
+            return SimpleNamespace(ok=True, result=actual, error=None)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: expected.metadata)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    divergence = payload["error"]["details"]["first_divergence"]
+    assert divergence["step"] == 1
+    assert divergence["identity_match"] is False
+    assert payload["error"]["details"]["counts"]["replayed"] == 1
 
 
 def test_trace_replay_rejects_metadata_mismatch_without_running(
@@ -809,7 +878,7 @@ def test_load_trace_rejects_an_unsupported_schema(tmp_path):
 def test_load_trace_rejects_a_malformed_entry(tmp_path):
     path = tmp_path / "run.trace.jsonl"
     path.write_text(
-        '{"trace": 1, "interview": "docassemble.probe:main.yml",'
+        '{"trace": 2, "interview": "docassemble.probe:main.yml",'
         ' "config_fingerprint": "f1"}\nnot json\n',
         encoding="utf-8",
     )

@@ -204,6 +204,36 @@ def _guards_are_provably_disjoint(left: list[str], right: list[str]) -> bool:
     )
 
 
+def _explicit_id(question) -> str | None:
+    explicit_id = getattr(question, "id", None)
+    debug = getattr(question, "data_for_debug", None)
+    if explicit_id is None and isinstance(debug, dict):
+        explicit_id = debug.get("id")
+    if explicit_id is None:
+        return None
+    value = str(explicit_id).strip()
+    return value or None
+
+
+def _id_relationship(question) -> str | None:
+    debug = getattr(question, "data_for_debug", None)
+    authored = debug if isinstance(debug, dict) else {}
+    try:
+        import yaml
+
+        parsed = yaml.safe_load(getattr(question, "source_code", ""))
+        source_authored = parsed if isinstance(parsed, dict) else {}
+    except Exception:  # noqa: BLE001 - provenance must not break checking
+        source_authored = {}
+    for name in ("override", "overrides", "supersede", "supersedes"):
+        value = getattr(question, name, None)
+        if value is None:
+            value = authored.get(name, source_authored.get(name))
+        if value:
+            return str(value) if not isinstance(value, bool) else name
+    return None
+
+
 def _provenance(question) -> dict[str, Any]:
     source_file, line = _source_details(question)
     debug = getattr(question, "data_for_debug", None)
@@ -224,9 +254,7 @@ def _provenance(question) -> dict[str, Any]:
             guards = _guards_from_source(_source_block(source_text, line))
 
     guard = "none" if not guards else (guards[0] if len(guards) == 1 else guards)
-    explicit_id = getattr(question, "id", None)
-    if explicit_id is None and isinstance(debug, dict):
-        explicit_id = debug.get("id")
+    explicit_id = _explicit_id(question)
     result = {
         "source_file": source_file,
         "line": line,
@@ -239,8 +267,35 @@ def _provenance(question) -> dict[str, Any]:
         "condition": guard,
     }
     if explicit_id is not None:
-        result["id"] = str(explicit_id)
+        result["id"] = explicit_id
     return result
+
+
+def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for question in getattr(interview, "questions_list", None) or ():
+        explicit_id = _explicit_id(question)
+        if explicit_id is None:
+            continue
+        block = _provenance(question)
+        block["relationship"] = _id_relationship(question)
+        grouped.setdefault(explicit_id, []).append(block)
+
+    reports = []
+    for explicit_id, blocks in grouped.items():
+        if len(blocks) < 2:
+            continue
+        deliberate = any(block["relationship"] for block in blocks)
+        reports.append(
+            {
+                "id": explicit_id,
+                "kind": "deliberate-override" if deliberate else "duplicate-id",
+                "interview": interview_identity,
+                "warning": True,
+                "blocks": blocks,
+            }
+        )
+    return reports
 
 
 class InterviewCatalog:
@@ -282,6 +337,7 @@ class InterviewCatalog:
         for identity in identities:
             try:
                 interview = self._compile(identity)
+                duplicate_ids = _duplicate_id_report(interview, identity)
                 rows.append(
                     {
                         "interview": identity,
@@ -291,6 +347,7 @@ class InterviewCatalog:
                             getattr(q, "question_type", "") in {"question", "fields"}
                             for q in interview.questions_list
                         ),
+                        "duplicate_ids": duplicate_ids,
                     }
                 )
             except AssemblyLineCompatibilityError:
@@ -308,15 +365,26 @@ class InterviewCatalog:
                     }
                 )
         failures = sum(not row["ok"] for row in rows)
+        duplicate_ids = [
+            duplicate for row in rows for duplicate in row.get("duplicate_ids", [])
+        ]
         return CatalogOutcome(
             None,
             {
                 "checked": len(rows),
                 "failures": failures,
+                "duplicate_ids": duplicate_ids,
                 "totals": {
                     "checked": len(rows),
                     "ok": len(rows) - failures,
                     "failed": failures,
+                    "duplicate_ids": len(
+                        [
+                            item
+                            for item in duplicate_ids
+                            if item["kind"] == "duplicate-id"
+                        ]
+                    ),
                 },
                 "results": rows,
             },
