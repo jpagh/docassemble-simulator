@@ -85,6 +85,13 @@ _REQUIRED_SCOPE_FIELDS = frozenset(
 )
 
 
+def _validate_request_id(value: Any) -> str | int:
+    """Accept the JSON scalar IDs supported by the Python runner contract."""
+    if type(value) not in (str, int):
+        raise ValueError("request id must be a string or integer")
+    return value
+
+
 class RunnerResponse(dict):
     """Dictionary response with the familiar typed-outcome conveniences."""
 
@@ -374,12 +381,13 @@ class SimulatorRunner:
         self._closed = True
         self._cleanup_workspace()
 
-    def _validate_response(self, decoded: Any, request_id: str) -> RunnerResponse:
+    def _validate_response(self, decoded: Any, request_id: str | int) -> RunnerResponse:
         if not isinstance(decoded, dict):
             raise TypeError("worker returned a non-object response")
-        if decoded.get("id") != request_id:
+        response_id = decoded.get("id")
+        if type(response_id) is not type(request_id) or response_id != request_id:
             raise ValueError(
-                f"worker response id {decoded.get('id')!r} does not match {request_id!r}"
+                f"worker response id {response_id!r} does not match {request_id!r}"
             )
         if type(decoded.get("ok")) is not bool:
             raise ValueError("worker response field 'ok' must be a boolean")
@@ -419,13 +427,23 @@ class SimulatorRunner:
         return response
 
     def request(self, operation: str, **arguments: Any) -> RunnerResponse:
-        """Send one operation and wait at most ``timeout`` seconds for a response."""
+        """Send one operation and wait at most ``timeout`` seconds for a response.
+
+        An omitted identifier is a monotonically increasing decimal string.  A
+        caller-supplied string or integer is sent unchanged and must be echoed
+        with the same JSON type by the worker.
+        """
+        if "id" in arguments:
+            request_id = _validate_request_id(arguments["id"])
+        else:
+            request_id = None
         self.open()
         assert self._process is not None
         assert self._process.stdin is not None
         assert self._reader is not None
         self._next_id += 1
-        request_id = str(self._next_id)
+        if request_id is None:
+            request_id = str(self._next_id)
         request = {"id": request_id, "operation": operation, **arguments}
         deadline = time.monotonic() + self.timeout
         try:

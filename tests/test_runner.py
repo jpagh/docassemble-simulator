@@ -60,6 +60,23 @@ def _worker_executable(tmp_path, body):
     return executable
 
 
+def _echo_worker_executable(tmp_path, response_id="request"):
+    executable = tmp_path / "echo-worker"
+    identifier = "request.get('id')" if response_id == "request" else repr(response_id)
+    executable.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        "scope = " + repr(_scope()) + "\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    response = {'id': "
+        + identifier
+        + ", 'ok': True, 'result': {}, 'scope': scope}\n"
+        "    print(json.dumps(response), flush=True)\n"
+    )
+    executable.chmod(0o755)
+    return executable
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -94,6 +111,49 @@ def test_runner_closes_unusable_transport_after_unexpected_response(tmp_path):
     with pytest.raises(RunnerError, match="closed"):
         runner.status()
     runner.close()
+
+
+def test_runner_correlates_supplied_and_generated_journey_ids(tmp_path):
+    executable = _echo_worker_executable(tmp_path)
+    runner = SimulatorRunner(_project(tmp_path), python=executable, timeout=1)
+
+    responses = runner.journey(
+        [
+            {"operation": "start"},
+            {"id": "provided", "operation": "status"},
+            {"id": 7, "operation": "status"},
+            {"operation": "status"},
+        ]
+    )
+
+    assert [response["id"] for response in responses] == ["1", "provided", 7, "4"]
+    assert all(response.ok for response in responses)
+    subsequent = runner.status()
+    assert subsequent.ok
+    assert subsequent["id"] == "5"
+    runner.close()
+
+
+def test_runner_rejects_invalid_supplied_request_ids(tmp_path):
+    runner = SimulatorRunner(_project(tmp_path))
+
+    for identifier in (None, True, 1.5, [], {}):
+        with pytest.raises(ValueError, match="request id"):
+            runner.request("start", id=identifier)
+
+    runner.close()
+
+
+def test_runner_invalidates_transport_for_mismatched_supplied_id(tmp_path):
+    executable = _echo_worker_executable(tmp_path, response_id="wrong")
+    runner = SimulatorRunner(_project(tmp_path), python=executable, timeout=1)
+
+    response = runner.request("start", id="provided")
+
+    assert response.error["kind"] == "fault"
+    assert "does not match 'provided'" in response.error["details"]["error"]
+    with pytest.raises(RunnerError, match="closed"):
+        runner.status()
 
 
 @pytest.mark.parametrize(

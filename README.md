@@ -206,12 +206,21 @@ with SimulatorRunner("./my-project", interview="data/questions/main.yml") as jou
     current = journey.status()
 ```
 
+Each Python-runner request gets a generated decimal-string identifier (`"1"`,
+`"2"`, …) unless its journey/request mapping supplies an identifier. Supplied
+identifiers may be strings or integers and are sent unchanged; the response
+must echo the same value and JSON type. Other values, including `null`,
+booleans, fractional numbers, arrays, and objects, are invalid and raise
+`ValueError` before the request is written. Every valid request advances the
+generated sequence, including supplied-ID requests. A mismatched or malformed
+response invalidates the worker; the runner never retries because the
+operation's commit status may be uncertain.
+
 The runner discovers the project root when `root` is omitted, accepts a config
 path or mapping, and defaults to a copied source workspace plus a temporary
 session root. Its deadline covers writing the request and reading one complete
 newline-delimited response, including partial or stalled frames. A timeout,
-crash, malformed frame, or unexpected response id closes the runner; it does not
-retry because the operation's commit status may be uncertain. Timeout responses
+crash, malformed frame, or unexpected response id closes the runner. Timeout responses
 are typed as `timeout` and include only operation context. Use
 `source_policy="symlink"` or `isolate=False` only when shared source behavior is
 intentional. `journey.seed("...", assemble=False)` is the explicit state-seeding

@@ -68,6 +68,16 @@ def test_worker_accepts_structured_assignments_and_reset(tmp_path):
     assert execution.reset_count == 1
 
 
+def test_worker_echoes_caller_supplied_identifier_types(tmp_path):
+    worker = Worker(tmp_path, execution=FakeExecution(tmp_path))
+
+    text_response = worker.handle({"id": "caller", "operation": "start"})
+    integer_response = worker.handle({"id": 7, "operation": "status"})
+
+    assert text_response["id"] == "caller"
+    assert integer_response["id"] == 7
+
+
 def test_serve_continues_after_malformed_and_operation_requests(tmp_path):
     worker = Worker(tmp_path, execution=FakeExecution(tmp_path))
     incoming = io.StringIO(
