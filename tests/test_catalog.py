@@ -1,9 +1,11 @@
 """Catalog provenance stays useful without exposing runtime code objects."""
 
+import json
 from types import SimpleNamespace
 
+from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
-from docassemble_simulator.catalog import InterviewCatalog, _provenance
+from docassemble_simulator.catalog import InterviewCatalog
 
 
 def _question(
@@ -290,21 +292,99 @@ def test_check_reports_complete_totals(tmp_path, monkeypatch):
     }
 
 
-def test_provenance_reads_authored_guard_when_runtime_drops_block_text(tmp_path):
-    question = _question(
-        tmp_path,
-        line=1,
-        variable="value",
-        guard="user.ready",
-        source_code=False,
-    )
-    question.data_for_debug = {}
-    question.from_source.filepath = str(tmp_path / "fallback.yml")
-    (tmp_path / "fallback.yml").write_text(
-        "---\nquestion: Example\nif: user.ready\nfields:\n  - Value: value\n"
+def test_public_catalog_reports_authored_provenance_without_runtime_block_text(
+    tmp_path, monkeypatch, capsys
+):
+    package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    package.mkdir(parents=True)
+    (package.parent.parent / "__init__.py").write_text("")
+    fallback = tmp_path / "fallback.yml"
+    fallback.write_text(
+        "---\n"
+        "id: first\n"
+        "question: Example\n"
+        "if: user.kind == 'a'\n"
+        "fields:\n"
+        "  - Example: shared\n"
+        "---\n"
+        "question: Example\n"
+        "if:\n"
+        "  - user.kind == 'b'\n"
+        "  - user.kind == 'c'\n"
+        "fields:\n"
+        "  - Example: shared\n"
+        "---\n"
+        "question: Example\n"
+        "fields:\n"
+        "  - Example: plain\n",
+        encoding="utf-8",
     )
 
-    provenance = _provenance(question)
+    def fallback_question(line, variable, *, explicit_id=None):
+        question = _question(
+            tmp_path,
+            line=line,
+            variable=variable,
+            explicit_id=explicit_id,
+            source_code=False,
+        )
+        # A controlled runtime substitute has discarded compiled block text and
+        # debug metadata; the public catalog must recover authored provenance.
+        question.data_for_debug = {}
+        question.from_source.filepath = str(fallback)
+        return question
 
-    assert provenance["guards"] == ["user.ready"]
-    assert provenance["location"].endswith(":1")
+    first = fallback_question(1, "shared", explicit_id="first")
+    second = fallback_question(8, "shared")
+    unguarded = fallback_question(15, "plain")
+    interview = SimpleNamespace(
+        questions_list=[first, second, unguarded],
+        questions={
+            "shared": {"*": [first, second]},
+            "plain": {"*": [unguarded]},
+        },
+    )
+    catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    monkeypatch.setattr(catalog, "_compile_for_inspection", lambda: interview)
+    before = set(tmp_path.rglob("*"))
+
+    questions = catalog.questions().result["blocks"]
+    indexed = catalog.index("shared").result["index"]["shared"]
+
+    assert questions[0]["source_file"] == ("docassemble.pkg:data/questions/main.yml")
+    assert questions[0]["location"].endswith(":1")
+    assert questions[0]["id"] == "first"
+    assert questions[0]["block_type"] == "fields"
+    assert questions[0]["guards"] == ["user.kind == 'a'"]
+    assert questions[1]["guards"] == ["user.kind == 'b'", "user.kind == 'c'"]
+    assert questions[1]["guard"] == ["user.kind == 'b'", "user.kind == 'c'"]
+    assert questions[2]["guard"] == "none"
+    assert [entry["guards"] for entry in indexed] == [
+        questions[0]["guards"],
+        questions[1]["guards"],
+    ]
+    assert [entry["location"] for entry in indexed] == [
+        questions[0]["location"],
+        questions[1]["location"],
+    ]
+    assert "<code object" not in repr({"questions": questions, "index": indexed})
+    assert set(tmp_path.rglob("*")) == before
+    assert not (tmp_path / ".simulator" / "sessions").exists()
+
+    # The CLI adapters expose the same public catalog result in JSON and human
+    # form; neither output substitutes a compiled code-object representation.
+    monkeypatch.setattr(
+        "docassemble_simulator.catalog.InterviewCatalog",
+        lambda root, selector: catalog,
+    )
+    json_args = cli.build_parser().parse_args(["questions", "--json"])
+    assert cli.cmd_catalog(json_args, tmp_path) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["blocks"] == questions
+
+    human_args = cli.build_parser().parse_args(["questions"])
+    assert cli.cmd_catalog(human_args, tmp_path) == 0
+    human = capsys.readouterr().out
+    for value in ("user.kind == 'a'", "user.kind == 'b'", "guard: none"):
+        assert value in human
+    assert "<code object" not in human
