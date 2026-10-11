@@ -418,6 +418,16 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         out["fields"] = describe_fields(
             question, user_dict, result.get("selectcompute") or {}
         )
+    # A ``fields: code`` block can compile as an answerable screen while its
+    # browser fields are constructed by authored code at runtime. Do not
+    # invent those controls: label the honest boundary so a project runner can
+    # choose the explicit state-seeding escape hatch instead.
+    if qtype == "fields" and not out["fields"]:
+        out["dynamic_fields"] = True
+        out["field_source"] = "code"
+    else:
+        out["dynamic_fields"] = False
+        out["field_source"] = "compiled"
     return out
 
 

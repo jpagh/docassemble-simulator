@@ -174,6 +174,7 @@ EXIT_CODES = {
     ErrorKind.FAULT: 3,
     ErrorKind.RUNTIME_COMPATIBILITY: 2,
     ErrorKind.TRACE_MISMATCH: 2,
+    ErrorKind.TIMEOUT: 2,
 }
 
 
@@ -242,6 +243,7 @@ def _config_report(root, config, args=None):
             "for a DOCX document"
         ),
         "background_actions": "foreground by default; no Celery worker",
+        "persistent_runner": "JSON-lines worker and Python SimulatorRunner",
         "session_persistence": ("disabled by default; no server database substituted"),
     }
     report["command_line_overrides"] = command_line
@@ -301,6 +303,7 @@ def cmd_info(args, root):
         "pdf_message": PDF_UNAVAILABLE_MESSAGE,
         "external_pdf_converter": False,
         "background_worker": False,
+        "persistent_runner": "supported through the JSON-lines `run` worker",
         "session_persistence": "disabled (no server database substituted)",
     }
     data["runtime_compatibility"] = compatibility_report()
@@ -433,6 +436,7 @@ def cmd_execution(args, root):
         Evaluate,
         Execute,
         Refresh,
+        SeedState,
         Seek,
         Start,
         Status,
@@ -463,6 +467,9 @@ def cmd_execution(args, root):
         operation = Evaluate(args.expression)
     elif args.command == "vars":
         operation = Variables(args.filter)
+    elif args.command == "seed":
+        code = Path(args.file).read_text(encoding="utf-8") if args.file else args.code
+        operation = SeedState(code, args.assemble)
     else:
         code = Path(args.file).read_text(encoding="utf-8") if args.file else args.code
         operation = Execute(code, not args.no_assemble)
@@ -503,6 +510,67 @@ def cmd_execution(args, root):
     if not outcome.ok:
         return _exit_for_error(outcome.error.kind)
     return 0
+
+
+def cmd_worker(args, root):
+    """Run the persistent JSON-lines worker used by agents and test suites."""
+    import io
+
+    from docassemble_simulator.worker import Worker, serve
+
+    resolved = getattr(args, "_resolved_configuration", None)
+    temporary_session = None
+    session_root = args.session_root
+    if session_root is None:
+        # A worker is a journey boundary. Keep its default state out of the
+        # project's ordinary saved-session directory; callers that need to
+        # resume across worker processes provide --session-root explicitly.
+        worker_directory = root / ".simulator"
+        worker_directory.mkdir(parents=True, exist_ok=True)
+        temporary_session = tempfile.TemporaryDirectory(
+            prefix="worker-session-", dir=worker_directory
+        )
+        session_root = temporary_session.name
+    handle = None
+    try:
+        worker = Worker(
+            root,
+            args.interview,
+            config_fingerprint=resolved.fingerprint if resolved is not None else "",
+            config_context=(
+                resolved.session_context() if resolved is not None else None
+            ),
+            session_root=Path(session_root).expanduser().resolve(),
+            timeout=args.timeout,
+            timings=args.timings,
+            project_root=(
+                Path(args.project_root).expanduser().resolve()
+                if args.project_root
+                else None
+            ),
+        )
+        stream = sys.stdin
+        if args.journey:
+            handle = Path(args.journey).expanduser().open("r", encoding="utf-8")
+            stream = handle
+        # A journey file may be either JSONL (the protocol's native format) or
+        # one JSON array of requests. JSONL remains the streaming path for
+        # stdin and large agent journeys.
+        if args.journey:
+            contents = stream.read()
+            stripped = contents.lstrip()
+            if stripped.startswith("["):
+                stream = io.StringIO(
+                    "".join(json.dumps(item) + "\\n" for item in json.loads(contents))
+                )
+            else:
+                stream = io.StringIO(contents)
+        return serve(worker, stream, sys.stdout)
+    finally:
+        if handle is not None:
+            handle.close()
+        if temporary_session is not None:
+            temporary_session.cleanup()
 
 
 def _trace_metadata(args, root):
@@ -1254,6 +1322,56 @@ def build_parser():
     execute.add_argument("--file")
     execute.add_argument("--no-assemble", action="store_true")
     execute.set_defaults(func=cmd_execution)
+    seed = add(
+        "seed",
+        help="explicitly execute code to seed a local test namespace",
+        description=(
+            "Run local Python in the saved interview namespace as an explicit "
+            "test escape hatch. This is not a browser submission."
+        ),
+    )
+    seed.add_argument("code", nargs="?", default="")
+    seed.add_argument("--file")
+    seed.add_argument(
+        "--assemble",
+        action="store_true",
+        help="assemble immediately after seeding instead of requiring refresh",
+    )
+    seed.set_defaults(func=cmd_execution)
+    worker_help = "serve a persistent JSON-lines worker for one project and interview"
+    for worker_name in ("worker", "run", "journey"):
+        worker = add(
+            worker_name,
+            help=worker_help,
+            description=(
+                "Read one JSON request per line and return one structured response "
+                "per operation. The process keeps runtime bootstrap and the "
+                "session scope alive until EOF or shutdown."
+            ),
+        )
+        worker.add_argument(
+            "--journey", help="read requests from a JSONL or JSON-array file"
+        )
+        worker.add_argument(
+            "--session-root",
+            help="directory for this worker's saved session (defaults to the project session directory)",
+        )
+        worker.add_argument(
+            "--project-root",
+            help="original project root to report separately from an isolated workspace",
+        )
+        worker.add_argument(
+            "--timeout",
+            type=float,
+            default=30.0,
+            help="per-operation timeout in seconds (default: 30)",
+        )
+        worker.add_argument(
+            "--timings",
+            action="store_true",
+            help="include operation and worker-startup timings in responses",
+        )
+        worker.set_defaults(func=cmd_worker)
     variables = add("vars", help="inspect saved variables without saving")
     variables.add_argument("--filter")
     variables.set_defaults(func=cmd_execution)
@@ -1421,6 +1539,21 @@ def _validate_trace_arguments(args):
         )
 
 
+def _emit_worker_startup_error(args, error, kind):
+    """Keep worker startup failures on the JSON protocol stream."""
+    if getattr(args, "command", None) not in {"worker", "run", "journey"}:
+        return False
+    payload = {
+        "id": None,
+        "ok": False,
+        "error": _clean(
+            error if isinstance(error, Failure) else Failure(kind, str(error), {})
+        ),
+    }
+    print(json.dumps(payload, default=str))
+    return True
+
+
 def main(argv=None):
     _reexec_with_dyld_path()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -1497,10 +1630,13 @@ def main(argv=None):
     except (InputFailure, SystemExit, ValueError) as error:
         message = str(error)
         message = message.removeprefix("error: ")
+        failure = Failure(ErrorKind.INPUT, message, {})
+        if _emit_worker_startup_error(args, failure, ErrorKind.INPUT):
+            return 1
         _emit(
             _envelope(
                 args.command,
-                error=Failure(ErrorKind.INPUT, message, {}),
+                error=failure,
             ),
             args.json,
         )
@@ -1518,14 +1654,13 @@ def main(argv=None):
         SyntaxError,
     ) as error:
         logger.exception("unhandled CLI fault")
+        failure = Failure(ErrorKind.FAULT, f"{type(error).__name__}: {error}", {})
+        if _emit_worker_startup_error(args, failure, ErrorKind.FAULT):
+            return 3
         _emit(
             _envelope(
                 args.command,
-                error={
-                    "kind": ErrorKind.FAULT,
-                    "message": f"{type(error).__name__}: {error}",
-                    "details": {},
-                },
+                error=failure,
             ),
             args.json,
         )

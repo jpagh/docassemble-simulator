@@ -196,6 +196,31 @@ class TestDescribeChoices:
         assert thread.current_info == {}
         assert thread.current_variable == []
 
+    def test_opaque_code_fields_are_marked_without_fabricating_controls(self):
+        question = SimpleNamespace(
+            question_type="fields",
+            name="dynamic",
+            fields=[],
+            validation_code=None,
+        )
+
+        result = describe_question_result(
+            {
+                "question": question,
+                "question_text": "Dynamic",
+                "subquestion_text": None,
+                "continue_label": None,
+                "sought": "M.address",
+                "orig_sought": "M.address",
+            },
+            {},
+        )
+
+        assert result["fields"] == []
+        assert result["dynamic_fields"] is True
+        assert result["field_source"] == "code"
+        assert result["sought"] == "M.address"
+
     def test_object_field_uses_live_selection_keys(self, da_stubs):
         field = _field(
             number=3,

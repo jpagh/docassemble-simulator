@@ -122,6 +122,14 @@ class Execute:
 
 
 @dataclass(frozen=True)
+class SeedState:
+    """Explicit local test escape hatch for seeding an interview namespace."""
+
+    code: str
+    assemble: bool = False
+
+
+@dataclass(frozen=True)
 class SavedSessionSource:
     pass
 
@@ -153,7 +161,17 @@ class _RenderPreparation:
     protected: tuple[ProtectedPath, ...] = ()
 
 
-Operation = Start | Status | Refresh | Answer | Seek | Evaluate | Variables | Execute
+Operation = (
+    Start
+    | Status
+    | Refresh
+    | Answer
+    | Seek
+    | Evaluate
+    | Variables
+    | Execute
+    | SeedState
+)
 
 
 class ExecutionFailure(Exception):
@@ -370,6 +388,10 @@ class StateStore:
             )
         return payload
 
+    def reset(self) -> None:
+        """Remove this store's payload; the advisory lock itself is harmless."""
+        self.path.unlink(missing_ok=True)
+
     def save(
         self,
         namespace: dict[str, Any],
@@ -416,9 +438,14 @@ class InterviewExecution:
         config_fingerprint: str = "",
         config_context: dict[str, Any] | None = None,
         session_directory: Path | None = None,
+        cache_interview: bool = False,
     ):
         self.root = Path(root).resolve()
-        self._catalog = InterviewCatalog(self.root, selector)
+        self._catalog = InterviewCatalog(
+            self.root,
+            selector,
+            cache_compiled=cache_interview,
+        )
         self._identity = self._catalog.identity
         self._store = StateStore(
             self.root,
@@ -453,6 +480,8 @@ class InterviewExecution:
                     outcome = self._variables(operation)
                 elif isinstance(operation, Execute):
                     outcome = self._mutate(lambda: self._execute(operation))
+                elif isinstance(operation, SeedState):
+                    outcome = self._mutate(lambda: self._seed_state(operation))
                 else:
                     raise TypeError(f"unknown operation: {type(operation).__name__}")
             except ExecutionFailure as error:
@@ -544,6 +573,11 @@ class InterviewExecution:
                     del interview.debug
                 else:
                     interview.debug = previous_debug
+
+    def reset(self) -> None:
+        """Discard this worker's saved session without changing its scope."""
+        with self._store.lock():
+            self._store.reset()
 
     def _start(self):
         namespace = _fresh_namespace()
@@ -763,7 +797,12 @@ class InterviewExecution:
                     values[name] = f"<{type(error).__name__}: {str(error)[:80]}>"
         return ExecutionOutcome(True, values)
 
-    def _execute(self, operation: Execute):
+    def _seed_state(self, operation: SeedState):
+        return self._execute(
+            Execute(operation.code, operation.assemble), state_seed=True
+        )
+
+    def _execute(self, operation: Execute, *, state_seed: bool = False):
         payload = self._store.load()
         namespace = payload["namespace"]
         with self._prepared_operation(namespace) as (interview, status):
@@ -790,6 +829,12 @@ class InterviewExecution:
                 if operation.assemble
                 else {"kind": "executed"}
             )
+            if state_seed:
+                outcome = dict(outcome)
+                outcome["state_seeded"] = True
+                outcome["operation"] = "state-seed"
+                if not operation.assemble:
+                    outcome["kind"] = "state-seeded"
         self._store.save(
             namespace,
             outcome,
@@ -2240,6 +2285,7 @@ __all__ = [
     "Refresh",
     "RenderSource",
     "SavedSessionSource",
+    "SeedState",
     "Seek",
     "SnapshotSource",
     "Start",

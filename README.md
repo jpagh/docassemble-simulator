@@ -156,6 +156,48 @@ provenance. They are warnings by default; `check --strict` makes accidental
 duplicates fail, while deliberate override/supersede relationships are reported
 separately.
 
+## Persistent journeys and the standard runner
+
+A multi-step journey should use one persistent worker instead of launching one
+process per operation:
+
+```sh
+printf '%s\\n' \\
+  '{"id":"1","operation":"start"}' \\
+  '{"id":"2","operation":"answer","assignments":{"user_name":"Alice"}}' \\
+  '{"id":"3","operation":"status"}' \\
+  '{"id":"4","operation":"shutdown"}' \\
+  | sim --root ./my-project --interview docassemble.my_project:data/questions/main.yml run \\
+      --timeout 30 --timings
+```
+
+`run` and `worker` accept JSON-lines on stdin or `--journey FILE`. Each response
+contains the request `id`, `ok`, the normal simulator `result` or `error`, and
+the active project/interview/session scope. `reset` discards the worker's saved
+session; `shutdown` exits cleanly. `--session-root PATH` makes the session
+resumable by another worker. Without it, the command uses a temporary isolated
+session. Timings are optional and remain in the protocol response; logs stay
+on stderr.
+
+The Python client uses the same protocol and lifecycle:
+
+```python
+from docassemble_simulator import SimulatorRunner
+
+with SimulatorRunner("./my-project", interview="data/questions/main.yml") as journey:
+    started = journey.start()
+    answered = journey.answer({"user_name": "Alice"})
+    current = journey.status()
+```
+
+The runner discovers the project root when `root` is omitted, accepts a config
+path or mapping, and defaults to a copied source workspace plus a temporary
+session root. Use `source_policy="symlink"` or `isolate=False` only when shared
+source behavior is intentional. `journey.seed("...", assemble=False)` is the
+explicit state-seeding escape hatch for unsupported browser-only dynamic
+fields; such screens report `dynamic_fields: true` and `field_source: code`
+instead of fabricated fields. The one-shot commands remain available.
+
 ## Screen traces
 
 Execution commands can record the screens a run passes through and compare a
@@ -244,8 +286,8 @@ may add a top-level `attachments` manifest:
 Exit codes are `0` for success (including interview completion and resolved
 lazy seeks), `1` for usage, workspace, configuration, or missing-state
 failures, `2` for validation, unresolved-variable, execution, seek, compile,
-runtime-compatibility, or render failures, and `3` for unexpected simulator
-faults. Argument-parsing
+runtime-compatibility, render, or worker-timeout failures, and `3` for
+unexpected simulator faults. Argument-parsing
 failures follow the same envelope when `--json` is present and exit `1`; normal
 `--help` output remains a successful exit.
 

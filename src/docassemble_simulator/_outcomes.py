@@ -25,6 +25,7 @@ class ErrorKind(StrEnum):
     CONFIGURATION = "configuration"
     UNRESOLVED_VARIABLE = "unresolved-variable"
     TRACE_MISMATCH = "trace-mismatch"
+    TIMEOUT = "timeout"
 
 
 @dataclass(frozen=True)

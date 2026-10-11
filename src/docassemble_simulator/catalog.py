@@ -301,9 +301,20 @@ def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, A
 class InterviewCatalog:
     """Compile and inspect interview definitions without creating session state."""
 
-    def __init__(self, root: str | Path, selector: str | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        selector: str | None = None,
+        *,
+        cache_compiled: bool = False,
+    ):
         self.root = Path(root).resolve()
         self.selector = selector
+        # Only persistent workers opt in. One-shot and test callers retain the
+        # historical fresh-compile behavior, while a worker's catalog cache is
+        # still scoped to one root/selector/process.
+        self._cache_compiled = cache_compiled
+        self._compiled: dict[str, Any] = {}
 
     @property
     def identity(self) -> str:
@@ -323,13 +334,19 @@ class InterviewCatalog:
         from docassemble_simulator._runtime import runtime_context
 
         selected = identity or self.identity
+        cached = self._compiled.get(selected) if self._cache_compiled else None
+        if cached is not None:
+            return cached
         saved_argv = list(sys.argv)
         sys.argv[:] = ["docassemble-simulator", selected]
         try:
             with runtime_context():
-                return get_interview(selected)
+                interview = get_interview(selected)
         finally:
             sys.argv[:] = saved_argv
+        if self._cache_compiled:
+            self._compiled[selected] = interview
+        return interview
 
     def check(self) -> CatalogOutcome:
         identities = [self.identity] if self.selector else list_interviews(self.root)

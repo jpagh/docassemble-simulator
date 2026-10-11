@@ -1,0 +1,430 @@
+"""Persistent JSON-lines worker for multi-operation simulator journeys.
+
+The worker is intentionally small: it owns one :class:`InterviewExecution`,
+keeps the target interpreter alive, and translates protocol messages into the
+same typed operations used by the one-shot CLI.  It does not expose Python
+objects over the wire and never writes diagnostics to stdout.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import sys
+import threading
+import time
+from dataclasses import fields, is_dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, TextIO
+
+from docassemble_simulator._outcomes import ErrorKind
+from docassemble_simulator.execution import (
+    Answer,
+    Evaluate,
+    Execute,
+    Refresh,
+    SeedState,
+    Seek,
+    Start,
+    Status,
+    Variables,
+)
+
+
+class WorkerProtocolError(ValueError):
+    """A malformed worker request."""
+
+
+class OperationTimeout(Exception):
+    """An operation exceeded the worker's configured deadline."""
+
+
+def _jsonable(value: Any):
+    """Convert public simulator values to JSON without importing the CLI."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _jsonable(getattr(value, field.name)) for field in fields(value)
+        }
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _text_value(value: Any) -> str:
+    """Encode structured assignment values using the CLI's input grammar."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"), default=str)
+
+
+def _assignment_pairs(raw: Any) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, dict):
+        return tuple(
+            (str(variable).strip(), _text_value(value))
+            for variable, value in raw.items()
+        )
+    if not isinstance(raw, (list, tuple)):
+        raise WorkerProtocolError("answer assignments must be an object or array")
+    pairs: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, str):
+            if "=" not in item:
+                raise WorkerProtocolError(
+                    f"expected VAR=VALUE assignment, got {item!r}"
+                )
+            variable, value = item.split("=", 1)
+        elif isinstance(item, dict):
+            variable = item.get("variable", item.get("name"))
+            if variable is None or "value" not in item:
+                raise WorkerProtocolError(
+                    "assignment objects require variable/name and value"
+                )
+            value = item["value"]
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            variable, value = item
+        else:
+            raise WorkerProtocolError(
+                "each assignment must be VAR=VALUE, [VAR, VALUE], or an object"
+            )
+        variable = str(variable).strip()
+        if not variable:
+            raise WorkerProtocolError("assignment variable cannot be empty")
+        pairs.append((variable, _text_value(value)))
+    return tuple(pairs)
+
+
+def operation_from_request(request: dict[str, Any]):
+    """Decode one protocol request into an execution operation."""
+    name = request.get("operation", request.get("op", request.get("command")))
+    if not isinstance(name, str) or not name.strip():
+        raise WorkerProtocolError("request requires an operation")
+    name = name.strip().lower().replace("_", "-")
+    if name == "start":
+        return Start()
+    if name == "status":
+        return Status()
+    if name == "refresh":
+        return Refresh()
+    if name == "answer":
+        return Answer(
+            _assignment_pairs(request.get("assignments", request.get("answers"))),
+            bool(request.get("code", False)),
+            not bool(request.get("no-validate", request.get("no_validate", False))),
+            bool(request.get("strict", False)),
+            bool(request.get("partial", False)),
+            bool(request.get("defaults", False)),
+        )
+    if name == "seek":
+        variable = request.get("variable", request.get("sought"))
+        if not isinstance(variable, str) or not variable.strip():
+            raise WorkerProtocolError("seek requires a variable")
+        return Seek(
+            variable,
+            bool(request.get("fresh", False)),
+            bool(request.get("activate", False)),
+            bool(request.get("trace", False)),
+            bool(request.get("auto", False)),
+        )
+    if name in {"eval", "evaluate"}:
+        expression = request.get("expression")
+        if not isinstance(expression, str) or not expression.strip():
+            raise WorkerProtocolError("eval requires an expression")
+        return Evaluate(expression)
+    if name in {"vars", "variables"}:
+        contains = request.get("contains", request.get("filter"))
+        if contains is not None and not isinstance(contains, str):
+            raise WorkerProtocolError("vars filter must be a string")
+        return Variables(contains)
+    if name in {"exec", "execute"}:
+        code = request.get("code")
+        if not isinstance(code, str):
+            raise WorkerProtocolError("exec requires code")
+        assemble = request.get(
+            "assemble",
+            not bool(request.get("no-assemble", request.get("no_assemble", False))),
+        )
+        return Execute(code, bool(assemble))
+    if name in {"seed", "state-seed", "seed-state"}:
+        code = request.get("code")
+        if not isinstance(code, str):
+            raise WorkerProtocolError("state-seed requires code")
+        return SeedState(code, bool(request.get("assemble", False)))
+    raise WorkerProtocolError(f"unknown operation: {name}")
+
+
+def _failure(
+    kind: ErrorKind | str, message: str, details: dict[str, Any] | None = None
+):
+    return {"kind": str(ErrorKind(kind)), "message": message, "details": details or {}}
+
+
+class Worker:
+    """One serialized, project/interview-scoped execution worker."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        selector: str | None = None,
+        *,
+        config_fingerprint: str = "",
+        config_context: dict[str, Any] | None = None,
+        session_root: str | Path | None = None,
+        timeout: float = 30.0,
+        timings: bool = False,
+        project_root: str | Path | None = None,
+        execution=None,
+    ):
+        if timeout is not None and timeout <= 0:
+            raise ValueError("worker timeout must be greater than zero")
+        self.root = Path(root).expanduser().resolve()
+        self.project_root = (
+            Path(project_root).expanduser().resolve()
+            if project_root is not None
+            else self.root
+        )
+        self.timeout = timeout
+        self.timings = timings
+        self.execution = execution
+        if self.execution is None:
+            from docassemble_simulator.execution import InterviewExecution
+
+            self.execution = InterviewExecution(
+                self.root,
+                selector,
+                config_fingerprint=config_fingerprint,
+                config_context=config_context,
+                session_directory=(
+                    Path(session_root).expanduser().resolve()
+                    if session_root is not None
+                    else None
+                ),
+                cache_interview=True,
+            )
+        self.closed = False
+        self._started = time.perf_counter()
+        self._lock = threading.Lock()
+
+    @property
+    def identity(self) -> str:
+        return str(getattr(self.execution, "_identity", "unknown"))
+
+    @property
+    def scope(self) -> dict[str, Any]:
+        store = getattr(self.execution, "_store", None)
+        session_path = getattr(store, "path", None)
+        session_root = getattr(store, "directory", None)
+        session_id = None
+        if session_path is not None:
+            session_id = Path(session_path).stem
+        return {
+            "root": str(self.root),
+            "project_root": str(self.project_root),
+            "interview": self.identity,
+            "session_root": str(session_root) if session_root is not None else None,
+            "session": str(session_path) if session_path is not None else None,
+            "session_id": session_id,
+            "pid": os.getpid(),
+        }
+
+    def _run_deadline(self, callback, timeout: float | None):
+        if timeout is None or threading.current_thread() is not threading.main_thread():
+            return callback()
+        previous_handler = signal.getsignal(signal.SIGALRM)
+
+        def alarm(_signum, _frame):
+            raise OperationTimeout
+
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, alarm)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            return callback()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            if previous_timer[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+    def _timing(self, started: float, enabled: bool) -> dict[str, float] | None:
+        if not enabled:
+            return None
+        return {
+            "operation_ms": round((time.perf_counter() - started) * 1000, 3),
+            "worker_startup_ms": round((started - self._started) * 1000, 3),
+        }
+
+    def _response(
+        self,
+        request_id: Any,
+        *,
+        result: Any = None,
+        error: Any = None,
+        diagnostics: Any = (),
+        attachments: Any = (),
+        timing: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {
+            "id": request_id,
+            "ok": error is None,
+            "scope": _jsonable(self.scope),
+        }
+        if error is None:
+            response["result"] = _jsonable(result)
+        else:
+            response["error"] = _jsonable(error)
+        if diagnostics:
+            response["diagnostics"] = _jsonable(diagnostics)
+        if attachments:
+            response["attachments"] = _jsonable(attachments)
+        if timing is not None:
+            response["timing"] = timing
+        return response
+
+    def handle(self, request: Any) -> dict[str, Any]:
+        """Handle one request. Every call returns a JSON-serializable envelope."""
+        request_id = request.get("id") if isinstance(request, dict) else None
+        started = time.perf_counter()
+        timing_enabled = self.timings
+        try:
+            if not isinstance(request, dict):
+                raise WorkerProtocolError("request must be a JSON object")
+            timing_enabled = bool(request.get("timings", self.timings))
+            name = request.get("operation", request.get("op", request.get("command")))
+            normalized = (
+                name.strip().lower().replace("_", "-") if isinstance(name, str) else ""
+            )
+            if normalized in {"shutdown", "close", "stop"}:
+                self.closed = True
+                return self._response(
+                    request_id,
+                    result={"kind": "shutdown", "scope": self.scope},
+                    timing=self._timing(started, timing_enabled),
+                )
+            if normalized == "ping":
+                return self._response(
+                    request_id,
+                    result={"kind": "ready", "scope": self.scope},
+                    timing=self._timing(started, timing_enabled),
+                )
+            if normalized == "reset":
+                with self._lock:
+                    self.execution.reset()
+                return self._response(
+                    request_id,
+                    result={"kind": "reset", "scope": self.scope},
+                    timing=self._timing(started, timing_enabled),
+                )
+            operation = operation_from_request(request)
+            timeout = request.get("timeout", self.timeout)
+            if timeout is not None:
+                try:
+                    timeout = float(timeout)
+                except (TypeError, ValueError) as error:
+                    raise WorkerProtocolError(
+                        "timeout must be a positive number"
+                    ) from error
+                if timeout <= 0:
+                    raise WorkerProtocolError("timeout must be a positive number")
+            with self._lock:
+                outcome = self._run_deadline(
+                    lambda: self.execution.run(operation), timeout
+                )
+            if outcome.ok:
+                return self._response(
+                    request_id,
+                    result=outcome.result,
+                    diagnostics=outcome.diagnostics,
+                    attachments=outcome.attachments,
+                    timing=self._timing(started, timing_enabled),
+                )
+            return self._response(
+                request_id,
+                error=outcome.error,
+                diagnostics=outcome.diagnostics,
+                attachments=outcome.attachments,
+                timing=self._timing(started, timing_enabled),
+            )
+        except OperationTimeout:
+            return self._response(
+                request_id,
+                error=_failure(
+                    ErrorKind.TIMEOUT,
+                    "worker operation timed out",
+                    {
+                        "operation": (
+                            request.get(
+                                "operation", request.get("op", request.get("command"))
+                            )
+                            if isinstance(request, dict)
+                            else None
+                        ),
+                        "timeout": (
+                            request.get("timeout", self.timeout)
+                            if isinstance(request, dict)
+                            else self.timeout
+                        ),
+                    },
+                ),
+                timing=self._timing(started, timing_enabled),
+            )
+        except WorkerProtocolError as error:
+            return self._response(
+                request_id,
+                error=_failure(ErrorKind.INPUT, str(error)),
+                timing=self._timing(started, timing_enabled),
+            )
+        except Exception as error:  # noqa: BLE001 - protocol must not kill the stream
+            return self._response(
+                request_id,
+                error=_failure(ErrorKind.FAULT, f"{type(error).__name__}: {error}"),
+                timing=self._timing(started, timing_enabled),
+            )
+
+
+def serve(
+    worker: Worker,
+    input_stream: TextIO = sys.stdin,
+    output_stream: TextIO = sys.stdout,
+) -> int:
+    """Serve newline-delimited requests until EOF or graceful shutdown."""
+    failed = False
+    for line in input_stream:
+        if not line.strip():
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as error:
+            failed = True
+            response = worker._response(
+                None,
+                error=_failure(ErrorKind.INPUT, f"malformed JSON request: {error.msg}"),
+            )
+        else:
+            response = worker.handle(request)
+            failed = failed or not response.get("ok", False)
+        output_stream.write(
+            json.dumps(response, separators=(",", ":"), default=str) + "\n"
+        )
+        output_stream.flush()
+        if worker.closed:
+            break
+    return 2 if failed else 0
+
+
+__all__ = [
+    "OperationTimeout",
+    "Worker",
+    "WorkerProtocolError",
+    "operation_from_request",
+    "serve",
+]

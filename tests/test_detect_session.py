@@ -16,6 +16,7 @@ from docassemble_simulator.execution import (
     Execute,
     InterviewExecution,
     Refresh,
+    SeedState,
     Seek,
     Start,
     Status,
@@ -899,6 +900,23 @@ def test_refresh_variables_exec_and_seek_follow_their_commit_policies(
     activated = execution.run(Seek("target", activate=True))
     assert activated.ok
     assert execution.run(Status()).result["sought_variable"] == "target"
+
+
+def test_state_seed_is_explicit_and_persists_without_assembly(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs)
+    assert execution.run(Start()).ok
+
+    seeded = execution.run(SeedState("counter = 7"))
+
+    assert seeded.ok
+    assert seeded.result == {
+        "kind": "state-seeded",
+        "state_seeded": True,
+        "operation": "state-seed",
+    }
+    assert execution.run(Status()).result == seeded.result
 
 
 def test_failed_atomic_replacement_preserves_the_previous_session(
