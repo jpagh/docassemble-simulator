@@ -700,6 +700,120 @@ def test_persistent_worker_and_runner_contract_across_families(
         assert runner.status().ok, label
 
 
+def test_catalog_duplicate_relationships_across_families(family_python, real_workspace):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "id-check-source.yml").write_text(
+        "---\n"
+        "id: cross-file-id\n"
+        "question: Source block\n"
+        "fields:\n"
+        "  - Value: source_value\n"
+        "---\n"
+        "id: relationship-base\n"
+        "question: Base block\n"
+        "fields:\n"
+        "  - Value: relationship_base\n"
+        "---\n"
+        "id: relationship-replacement\n"
+        "supersedes: relationship-base\n"
+        "question: Replacement block\n"
+        "fields:\n"
+        "  - Value: relationship_replacement\n"
+        "---\n"
+        "id: unrelated-id\n"
+        "question: First unrelated block\n"
+        "fields:\n"
+        "  - Value: unrelated_first\n"
+        "---\n"
+        "id: unrelated-id\n"
+        "supersedes: missing-target\n"
+        "question: Second unrelated block\n"
+        "fields:\n"
+        "  - Value: unrelated_second\n"
+        "---\n"
+        "id: mixed-base\n"
+        "question: Deliberate base block\n"
+        "fields:\n"
+        "  - Value: mixed_first\n"
+        "---\n"
+        "id: mixed-replacement\n"
+        "supersedes: mixed-base\n"
+        "question: Deliberate replacement block\n"
+        "fields:\n"
+        "  - Value: mixed_second\n"
+        "---\n"
+        "id: mixed-replacement\n"
+        "question: Accidental third block\n"
+        "fields:\n"
+        "  - Value: mixed_third\n"
+        "---\n"
+        "id: unique-id\n"
+        "question: Unique block\n"
+        "fields:\n"
+        "  - Value: unique_value\n"
+    )
+    target = questions / "id-check-target.yml"
+    target.write_text(
+        "---\n"
+        "include:\n"
+        "  - id-check-source.yml\n"
+        "---\n"
+        "id: cross-file-id\n"
+        "question: Included duplicate block\n"
+        "fields:\n"
+        "  - Value: target_value\n"
+    )
+
+    checked = _run(
+        interpreter,
+        root,
+        "check",
+        "--interview",
+        "id-check-target.yml",
+        stderr_contains="warning: reference in a supersedes",
+    )
+    assert checked["ok"], label
+    result = checked["result"]
+    reports = result["duplicate_ids"]
+    assert result["totals"]["duplicate_ids"] == 3, label
+    assert {item["id"] for item in reports} == {
+        "cross-file-id",
+        "unrelated-id",
+        "mixed-replacement",
+        "relationship-replacement",
+    }, label
+    cross_file = next(item for item in reports if item["id"] == "cross-file-id")
+    assert {
+        block["source_file"].rsplit("/", 1)[-1] for block in cross_file["blocks"]
+    } == {"id-check-source.yml", "id-check-target.yml"}, label
+    relationship = next(
+        item for item in reports if item["id"] == "relationship-replacement"
+    )
+    assert relationship["kind"] == "deliberate-override", label
+    assert [block["id"] for block in relationship["blocks"]] == [
+        "relationship-base",
+        "relationship-replacement",
+    ], label
+    assert not any(item["id"] == "unique-id" for item in reports), label
+
+    strict = _run(
+        interpreter,
+        root,
+        "check",
+        "--strict",
+        "--interview",
+        "id-check-target.yml",
+        expected_code=2,
+        stderr_contains="warning: reference in a supersedes",
+    )
+    assert strict["error"]["kind"] == "duplicate-id", label
+    assert strict["error"]["details"]["totals"]["duplicate_ids"] == 3, label
+
+
 def test_minimal_start_answer_contract_across_families(family_python, real_workspace):
     case = family_python
     label, interpreter = case.label, case.interpreter

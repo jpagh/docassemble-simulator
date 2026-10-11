@@ -215,7 +215,7 @@ def _explicit_id(question) -> str | None:
     return value or None
 
 
-def _id_relationship(question) -> str | None:
+def _authored_id_relationship(question) -> tuple[str, Any] | None:
     debug = getattr(question, "data_for_debug", None)
     authored = debug if isinstance(debug, dict) else {}
     try:
@@ -230,8 +230,33 @@ def _id_relationship(question) -> str | None:
         if value is None:
             value = authored.get(name, source_authored.get(name))
         if value:
-            return str(value) if not isinstance(value, bool) else name
+            return name, value
     return None
+
+
+def _id_relationship(question) -> str | None:
+    relationship = _authored_id_relationship(question)
+    if relationship is None:
+        return None
+    name, value = relationship
+    if isinstance(value, bool):
+        return name
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+def _relationship_targets(question) -> list[str]:
+    relationship = _authored_id_relationship(question)
+    if relationship is None:
+        return []
+    _name, value = relationship
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    target = str(value).strip()
+    return [target] if target else []
 
 
 def _provenance(question) -> dict[str, Any]:
@@ -273,28 +298,56 @@ def _provenance(question) -> dict[str, Any]:
 
 def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
+    entries = []
     for question in getattr(interview, "questions_list", None) or ():
         explicit_id = _explicit_id(question)
         if explicit_id is None:
             continue
         block = _provenance(question)
         block["relationship"] = _id_relationship(question)
-        grouped.setdefault(explicit_id, []).append(block)
+        entry = {
+            "id": explicit_id,
+            "block": block,
+            "targets": _relationship_targets(question),
+        }
+        entries.append(entry)
+        grouped.setdefault(explicit_id, []).append(entry)
 
     reports = []
     for explicit_id, blocks in grouped.items():
         if len(blocks) < 2:
             continue
-        deliberate = any(block["relationship"] for block in blocks)
         reports.append(
             {
                 "id": explicit_id,
-                "kind": "deliberate-override" if deliberate else "duplicate-id",
+                "kind": "duplicate-id",
                 "interview": interview_identity,
                 "warning": True,
-                "blocks": blocks,
+                "blocks": [entry["block"] for entry in blocks],
             }
         )
+
+    # A valid supersedes/override relationship is useful to report, but it
+    # never excuses a separate duplicate-id collision.  The upstream runtime
+    # resolves an id relationship by the target id, so use the last-loaded
+    # target when an authored target is itself duplicated.
+    targets_by_id = {}
+    for entry in entries:
+        targets_by_id.setdefault(entry["id"], []).append(entry)
+    for entry in entries:
+        for target_id in entry["targets"]:
+            if target_id == entry["id"] or target_id not in targets_by_id:
+                continue
+            target = targets_by_id[target_id][-1]
+            reports.append(
+                {
+                    "id": entry["id"],
+                    "kind": "deliberate-override",
+                    "interview": interview_identity,
+                    "warning": True,
+                    "blocks": [target["block"], entry["block"]],
+                }
+            )
     return reports
 
 
