@@ -203,6 +203,12 @@ cannot be excused). `--update` rewrites the expected golden from the actual
 trace and is the only write path. A mismatch exits `2` with the full report in
 the `trace-mismatch` error details.
 
+`trace replay GOLDEN` starts a fresh isolated session, applies the recorded
+assignments, and stops at the first identity, field-fact, flow, or rejected-
+assignment divergence. Use `--override STEP.FIELD=VALUE` to vary one answer
+without changing the golden. Replay validates the interview and configuration
+fingerprint metadata, never writes the golden, and exits non-zero on divergence.
+
 The identity rules and the evidence behind them are documented in
 [docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).
 

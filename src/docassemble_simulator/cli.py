@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+import tempfile
 import textwrap
 from collections import Counter
 from dataclasses import fields, is_dataclass
@@ -603,6 +604,256 @@ def _human_trace_report(report, matched):
     return "\n".join(lines)
 
 
+def _trace_identity_dict(identity):
+    if identity is None:
+        return None
+    return {
+        "key": identity.key,
+        "rule": identity.rule,
+        "occurrence": identity.occurrence,
+    }
+
+
+def _trace_replay_overrides(raw_overrides, entries):
+    by_step = {entry.seq: entry for entry in entries}
+    overrides = {}
+    for raw in raw_overrides or ():
+        if "=" not in raw:
+            raise InputFailure(f"expected --override STEP.FIELD=VALUE, got {raw!r}")
+        target, value = raw.split("=", 1)
+        step_text, separator, field = target.partition(".")
+        if not separator or not field:
+            raise InputFailure(f"expected --override STEP.FIELD=VALUE, got {raw!r}")
+        try:
+            step = int(step_text)
+        except ValueError as error:
+            raise InputFailure(
+                f"override step must be an integer: {step_text!r}"
+            ) from error
+        if step not in by_step:
+            raise InputFailure(f"override refers to unknown trace step {step}")
+        overrides.setdefault(step, {})[field] = value
+    return overrides
+
+
+def _trace_replay_operation(entry, submitted):
+    from docassemble_simulator.execution import Answer, Refresh, Seek, Start
+
+    if entry.operation == "start":
+        return Start()
+    if entry.operation == "refresh":
+        return Refresh()
+    if entry.operation == "answer":
+        return Answer(tuple(submitted.items()))
+    if entry.operation == "seek":
+        if submitted:
+            return Answer(tuple(submitted.items()))
+        screen = entry.screen or {}
+        variable = screen.get("sought") or screen.get("orig_sought")
+        if not variable and entry.error:
+            variable = (entry.error.get("details") or {}).get("sought_variable")
+        if not isinstance(variable, str) or not variable:
+            raise InputFailure(f"trace step {entry.seq} has no seek variable")
+        return Seek(variable)
+    raise InputFailure(
+        f"trace step {entry.seq} uses unsupported operation {entry.operation!r}"
+    )
+
+
+def _trace_replay_actual(execution, operation):
+    from docassemble_simulator.execution import Status
+    from docassemble_simulator.trace import is_screen_outcome
+
+    outcome = execution.run(operation)
+    actual_error = _clean(outcome.error) if not outcome.ok else None
+    screen = (
+        outcome.result if outcome.ok and is_screen_outcome(outcome.result) else None
+    )
+    if screen is None and not outcome.ok:
+        status = execution.run(Status())
+        if status.ok and is_screen_outcome(status.result):
+            screen = status.result
+    return outcome.ok, screen, actual_error
+
+
+def _trace_replay_step(entry, submitted, execution, actual_entries=()):
+    from docassemble_simulator.trace import (
+        TraceEntry,
+        _assign_identity,
+        screen_content,
+    )
+
+    operation = _trace_replay_operation(entry, submitted)
+    actual_ok, actual_screen, actual_error = _trace_replay_actual(execution, operation)
+    actual_identity = _assign_identity(
+        actual_screen,
+        actual_error,
+        tuple(actual_entries),
+        entry.phase,
+    )
+    expected_content = entry.content or (
+        screen_content(entry.screen) if entry.screen is not None else ()
+    )
+    actual_content = screen_content(actual_screen) if actual_screen is not None else ()
+    identity_match = (
+        entry.identity is not None
+        and actual_identity is not None
+        and entry.identity.key == actual_identity.key
+        and entry.identity.rule == actual_identity.rule
+    )
+    flow_match = entry.ok == actual_ok
+    expected_error_kind = (entry.error or {}).get("kind")
+    actual_error_kind = (actual_error or {}).get("kind")
+    error_match = entry.ok or expected_error_kind == actual_error_kind
+    match = (
+        identity_match
+        and expected_content == actual_content
+        and flow_match
+        and error_match
+    )
+    actual_entry = TraceEntry(
+        seq=entry.seq,
+        operation=entry.operation,
+        phase=entry.phase,
+        submitted=submitted,
+        ok=actual_ok,
+        screen=actual_screen,
+        identity=actual_identity,
+        content=actual_content,
+        error=actual_error,
+    )
+    return {
+        "_actual_entry": actual_entry,
+        "step": entry.seq,
+        "operation": entry.operation,
+        "submitted": submitted,
+        "match": match,
+        "identity_match": identity_match,
+        "field_facts_match": expected_content == actual_content,
+        "flow_match": flow_match,
+        "error_match": error_match,
+        "expected": {
+            "identity": _trace_identity_dict(entry.identity),
+            "content": list(expected_content),
+            "ok": entry.ok,
+            "error": entry.error,
+        },
+        "actual": {
+            "identity": _trace_identity_dict(actual_identity),
+            "content": list(actual_content),
+            "ok": actual_ok,
+            "error": actual_error,
+        },
+    }
+
+
+def cmd_trace_replay(args, root):
+    from docassemble_simulator.execution import InterviewExecution
+    from docassemble_simulator.trace import TraceError, load_trace
+
+    try:
+        golden = load_trace(args.golden)
+        if args.interview and args.interview != golden.metadata.interview:
+            raise TraceError(
+                "trace interview mismatch: "
+                f"{args.interview!r} does not match {golden.metadata.interview!r}"
+            )
+        args.interview = golden.metadata.interview
+        current = _trace_metadata(args, root)
+        for label, expected, actual in (
+            ("interview definition", golden.metadata.interview, current.interview),
+            (
+                "config fingerprint",
+                golden.metadata.config_fingerprint,
+                current.config_fingerprint,
+            ),
+        ):
+            if expected != actual:
+                raise TraceError(
+                    f"trace {label} mismatch: {expected!r} does not match {actual!r}"
+                )
+        overrides = _trace_replay_overrides(args.overrides, golden.entries)
+    except TraceError as error:
+        _emit(
+            _envelope("trace", error=Failure(ErrorKind.INPUT, str(error), {})),
+            args.json,
+        )
+        return _exit_for_error(ErrorKind.INPUT)
+
+    scope_parent = root / ".simulator"
+    scope_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="trace-replay-", dir=scope_parent) as scope:
+        execution = InterviewExecution(
+            root,
+            args.interview,
+            config_fingerprint=(
+                args._resolved_configuration.fingerprint
+                if args._resolved_configuration is not None
+                else ""
+            ),
+            config_context=(
+                args._resolved_configuration.session_context()
+                if args._resolved_configuration is not None
+                else None
+            ),
+            session_directory=Path(scope) / "sessions",
+        )
+        steps = []
+        actual_entries = []
+        first_divergence = None
+        for entry in golden.entries:
+            submitted = dict(entry.submitted)
+            submitted.update(overrides.get(entry.seq, {}))
+            step = _trace_replay_step(entry, submitted, execution, actual_entries)
+            actual_entries.append(step.pop("_actual_entry"))
+            steps.append(step)
+            if not step["match"]:
+                first_divergence = step
+                break
+
+    report = {
+        "golden": str(Path(args.golden).expanduser()),
+        "metadata": golden.metadata.as_dict(),
+        "clean": first_divergence is None and len(steps) == len(golden.entries),
+        "steps": steps,
+        "first_divergence": first_divergence,
+        "counts": {
+            "expected": len(golden.entries),
+            "replayed": len(steps),
+            "matched": sum(step["match"] for step in steps),
+        },
+    }
+    if report["clean"]:
+        if args.json:
+            _emit(_envelope("trace", report), True)
+        else:
+            print(
+                f"trace replay: match ({report['counts']['matched']}/"
+                f"{report['counts']['expected']} steps)"
+            )
+        return 0
+    if args.json:
+        _emit(
+            _envelope(
+                "trace",
+                error=Failure(
+                    ErrorKind.TRACE_MISMATCH,
+                    "screen trace replay diverged",
+                    report,
+                ),
+            ),
+            True,
+        )
+    else:
+        step = first_divergence or {}
+        print(
+            f"trace replay: DIVERGENCE at step {step.get('step', '?')} "
+            f"({step.get('operation', 'unknown')})"
+        )
+        print(_human(step))
+    return _exit_for_error(ErrorKind.TRACE_MISMATCH)
+
+
 def cmd_trace(args, root):
     from docassemble_simulator.trace import (
         TraceError,
@@ -996,6 +1247,26 @@ def build_parser():
         epilog=recording_epilog,
     )
     trace_sub = trace.add_subparsers(dest="trace_command", required=True)
+    trace_replay = trace_sub.add_parser(
+        "replay",
+        parents=[common],
+        command_name="trace",
+        help="replay a golden screen trace from fresh state",
+        description=(
+            "Replay a golden screen trace in an isolated session. The first "
+            "identity, field-fact, flow, or error mismatch stops the run."
+        ),
+    )
+    trace_replay.add_argument("golden", help="golden trace to replay without modifying")
+    trace_replay.add_argument(
+        "--override",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="STEP.FIELD=VALUE",
+        help="override one recorded assignment; may be repeated",
+    )
+    trace_replay.set_defaults(func=cmd_trace_replay)
     trace_compare = trace_sub.add_parser(
         "compare",
         parents=[common],
@@ -1179,7 +1450,13 @@ def main(argv=None):
             background_action_mode=mode,
             seek_diagnostics=settings["seek_diagnostics"],
         ):
-            if args.command not in {"info", "status", "config", "trace"}:
+            needs_interview_bootstrap = args.command not in {
+                "info",
+                "status",
+                "config",
+                "trace",
+            } or (args.command == "trace" and args.trace_command == "replay")
+            if needs_interview_bootstrap:
                 if not config and not getattr(args, "offline", False):
                     # Preserve the small composition seam used by embedders that
                     # provide the legacy one-argument preflight callable.

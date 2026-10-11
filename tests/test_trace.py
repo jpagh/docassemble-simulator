@@ -1,7 +1,12 @@
 """Speed tests for screen identity, trace records, and trace comparison."""
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
+from docassemble_simulator import cli
+from docassemble_simulator._outcomes import ErrorKind, Failure
 from docassemble_simulator.trace import (
     ComparePolicy,
     ScreenIdentity,
@@ -205,6 +210,128 @@ def _screen(**overrides):
     }
     screen.update(overrides)
     return screen
+
+
+def test_trace_replay_is_clean_with_failed_step_and_override(
+    tmp_path, monkeypatch, capsys
+):
+    intro = _screen(question_name="ID intro")
+    next_screen = _screen(question_name="ID next", variable="next_value", label="Next")
+    done = _screen(question_name="ID done", variable="done", label="Done")
+    trace = _trace(
+        TraceEntry(
+            1,
+            "start",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+        ),
+        TraceEntry(
+            2,
+            "answer",
+            None,
+            {"user_name": "Alice"},
+            True,
+            next_screen,
+            ScreenIdentity("id:next", "explicit-id"),
+            screen_content(next_screen),
+        ),
+        TraceEntry(
+            3,
+            "answer",
+            None,
+            {"user_name": "bad"},
+            False,
+            next_screen,
+            ScreenIdentity("id:next", "explicit-id"),
+            screen_content(next_screen),
+            {"kind": "input", "message": "rejected", "details": {}},
+        ),
+        TraceEntry(
+            4,
+            "seek",
+            None,
+            {"done": "yes"},
+            True,
+            done,
+            ScreenIdentity("id:done", "explicit-id"),
+            screen_content(done),
+        ),
+    )
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    original = golden.read_bytes()
+    expected_metadata = trace.metadata
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, operation):
+            from docassemble_simulator.execution import Answer, Status
+
+            operations.append(operation)
+            if operation.__class__.__name__ == "Start":
+                return SimpleNamespace(ok=True, result=intro, error=None)
+            if isinstance(operation, Answer):
+                values = dict(operation.assignments)
+                if values.get("user_name") == "bad":
+                    return SimpleNamespace(
+                        ok=False,
+                        result=None,
+                        error=Failure(ErrorKind.INPUT, "rejected", {}),
+                    )
+                if "done" in values:
+                    return SimpleNamespace(ok=True, result=done, error=None)
+                return SimpleNamespace(ok=True, result=next_screen, error=None)
+            if isinstance(operation, Status):
+                return SimpleNamespace(ok=True, result=next_screen, error=None)
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: expected_metadata)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=["2.user_name=Bob"],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["clean"] is True
+    assert payload["result"]["counts"]["matched"] == 4
+    assert dict(operations[1].assignments)["user_name"] == "Bob"
+    assert golden.read_bytes() == original
+
+
+def test_trace_replay_rejects_metadata_mismatch_without_running(
+    tmp_path, monkeypatch, capsys
+):
+    trace = _trace(_entry(1, "id:intro"))
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    mismatched = _metadata(config_fingerprint="different")
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: mismatched)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["kind"] == "input"
+    assert "config fingerprint" in payload["error"]["message"]
 
 
 def test_trace_jsonl_round_trips_metadata_and_entries(tmp_path):

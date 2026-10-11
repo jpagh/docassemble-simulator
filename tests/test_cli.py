@@ -507,6 +507,7 @@ def test_screen_trace_workflow_is_discoverable_from_help():
     top = _run_cli("--help")
     start = _run_cli("start", "--help")
     compare = _run_cli("trace", "compare", "--help")
+    replay = _run_cli("trace", "replay", "--help")
 
     assert top.returncode == 0
     assert "trace" in top.stdout
@@ -519,6 +520,8 @@ def test_screen_trace_workflow_is_discoverable_from_help():
     assert "phased" in compare.stdout
     assert "--update" in compare.stdout
     assert "golden trace" in compare.stdout
+    assert replay.returncode == 0
+    assert "--override" in replay.stdout
 
 
 def test_phase_without_record_is_an_input_error():

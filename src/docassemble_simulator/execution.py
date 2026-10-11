@@ -288,6 +288,7 @@ class StateStore:
         identity: str,
         config_fingerprint: str = "",
         config_context: dict[str, Any] | None = None,
+        session_directory: Path | None = None,
     ):
         self.root = root
         self.identity = identity
@@ -304,7 +305,7 @@ class StateStore:
         self.slug = (
             re.sub(r"[^A-Za-z0-9_.-]+", "-", identity).strip("-")[-80:] or "interview"
         )
-        self.directory = root / ".simulator" / "sessions"
+        self.directory = session_directory or root / ".simulator" / "sessions"
         self.path = self.directory / f"{self.slug}-{digest}.pkl"
         self.lock_path = self.path.with_suffix(".lock")
 
@@ -414,6 +415,7 @@ class InterviewExecution:
         *,
         config_fingerprint: str = "",
         config_context: dict[str, Any] | None = None,
+        session_directory: Path | None = None,
     ):
         self.root = Path(root).resolve()
         self._catalog = InterviewCatalog(self.root, selector)
@@ -423,6 +425,7 @@ class InterviewExecution:
             self._identity,
             config_fingerprint,
             config_context,
+            session_directory=session_directory,
         )
 
     @_activate_runtime
