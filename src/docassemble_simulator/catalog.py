@@ -106,6 +106,110 @@ class CatalogOutcome:
     result: Any
 
 
+def _normalize_guards(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _guards_from_source(source_code: str | None) -> list[str]:
+    """Recover authored ``if:`` values when the compiler dropped them."""
+    if not source_code:
+        return []
+    try:
+        import yaml
+
+        document = yaml.safe_load(source_code)
+    except Exception:  # noqa: BLE001 - malformed authored source has a text fallback
+        document = None
+    if isinstance(document, dict) and "if" in document:
+        return _normalize_guards(document["if"])
+
+    match = re.search(r"(?m)^\s*if\s*:\s*(.*)$", source_code)
+    if match and match.group(1).strip():
+        return [match.group(1).strip()]
+    if match:
+        values = []
+        for line in source_code.splitlines()[
+            source_code[: match.start()].count("\n") + 1 :
+        ]:
+            item = re.match(r"^\s*-\s+(.+?)\s*$", line)
+            if not item:
+                break
+            values.append(item.group(1))
+        return values
+    return []
+
+
+def _source_block(source_text: str, line_number: int | None) -> str:
+    if not source_text or not line_number:
+        return source_text
+    lines = source_text.splitlines()
+    start = max(0, min(len(lines), line_number - 1))
+    if start < len(lines) and lines[start].strip() != "---":
+        marker = start
+        while marker > 0 and lines[marker].strip() != "---":
+            marker -= 1
+        if lines[marker].strip() == "---":
+            start = marker
+    end = start + 1
+    while end < len(lines) and lines[end].strip() != "---":
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def _source_details(question) -> tuple[str, int | None]:
+    source = getattr(question, "from_source", None)
+    source_file = getattr(source, "path", None) or getattr(source, "filepath", None)
+    line_number = getattr(question, "line_number", None)
+    try:
+        line = int(line_number) if line_number is not None else None
+    except (TypeError, ValueError):
+        line = None
+    return str(source_file or "unknown"), line
+
+
+def _provenance(question) -> dict[str, Any]:
+    source_file, line = _source_details(question)
+    debug = getattr(question, "data_for_debug", None)
+    authored_guards = (
+        debug.get("if") if isinstance(debug, dict) and "if" in debug else None
+    )
+    guards = _normalize_guards(authored_guards)
+    if not guards:
+        guards = _guards_from_source(getattr(question, "source_code", None))
+    if not guards:
+        source = getattr(question, "from_source", None)
+        filepath = getattr(source, "filepath", None)
+        if filepath:
+            try:
+                source_text = Path(filepath).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                source_text = None
+            guards = _guards_from_source(_source_block(source_text, line))
+
+    guard = "none" if not guards else (guards[0] if len(guards) == 1 else guards)
+    explicit_id = getattr(question, "id", None)
+    if explicit_id is None and isinstance(debug, dict):
+        explicit_id = debug.get("id")
+    result = {
+        "source_file": source_file,
+        "line": line,
+        "location": f"{source_file}:{line or '?'}",
+        "block_type": getattr(question, "question_type", "?"),
+        "guards": guards,
+        "guard": guard,
+        # Keep the existing condition key, but make it authored text rather
+        # than the repr of compiled code objects.
+        "condition": guard,
+    }
+    if explicit_id is not None:
+        result["id"] = str(explicit_id)
+    return result
+
+
 class InterviewCatalog:
     """Compile and inspect interview definitions without creating session state."""
 
@@ -194,16 +298,15 @@ class InterviewCatalog:
                 and contains.lower() not in " ".join(variables + [name or ""]).lower()
             ):
                 continue
-            condition = getattr(question, "condition", "") or ""
+            provenance = _provenance(question)
             rows.append(
                 {
                     "index": index,
-                    "block_type": getattr(question, "question_type", "?"),
                     "mandatory": bool(getattr(question, "is_mandatory", False)),
                     "name": name,
                     "first_variable": variables[0] if variables else "",
                     "variables": variables or None,
-                    "condition": condition[:120] or None,
+                    **provenance,
                 }
             )
         return CatalogOutcome(self.identity, {"blocks": rows})
@@ -221,6 +324,7 @@ class InterviewCatalog:
                         {
                             "language": language,
                             "question_name": getattr(question, "name", None),
+                            **_provenance(question),
                         }
                     )
             mapping[variable] = screens or None
