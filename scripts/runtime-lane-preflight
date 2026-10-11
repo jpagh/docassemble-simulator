@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Shared validation for a provisioned docassemble runtime lane.
+#
+# Source this file from a gate script, then call:
+#   runtime_lane_preflight LABEL INTERPRETER EXPECTED_FAMILY SYNC_TASK PREFIX
+#
+# The caller owns shell options and the command-specific checks that follow the
+# lane preflight. This function deliberately shares only interpreter
+# executability, runtime importability, family validation, and version output.
+
+runtime_lane_preflight() { # label interpreter expected_family sync_task output_prefix
+  local label=$1 interpreter=$2 expected=$3 sync_task=$4 output_prefix=$5
+  if [[ ! -x "$interpreter" ]]; then
+    echo "error: the $label runtime lane interpreter is missing or not executable:" >&2
+    echo "  $interpreter" >&2
+    echo "provision it with: mise run $sync_task" >&2
+    return 2
+  fi
+
+  local probe
+  probe=$(
+    "$interpreter" -c '
+import importlib.metadata as metadata
+import importlib.util as util
+import docassemble.base  # noqa: F401 - importing is the capability under test
+family = "modern" if util.find_spec("docassemble.base.thread_context") else "legacy"
+print(family, metadata.version("docassemble-base"), metadata.version("docassemble-webapp"))
+' 2>&1
+  ) || {
+    echo "error: the $label runtime lane interpreter cannot import the docassemble runtime:" >&2
+    echo "  $interpreter" >&2
+    echo "$probe" | sed 's/^/  /' >&2
+    echo "provision it with: mise run $sync_task" >&2
+    return 2
+  }
+
+  local family base webapp
+  family=$(echo "$probe" | tail -n 1 | awk '{print $1}')
+  base=$(echo "$probe" | tail -n 1 | awk '{print $2}')
+  webapp=$(echo "$probe" | tail -n 1 | awk '{print $3}')
+  if [[ "$family" != "$expected" ]]; then
+    echo "error: the $label runtime lane expects the $expected docassemble family but its interpreter reports $family:" >&2
+    echo "  $interpreter" >&2
+    echo "provision it with: mise run $sync_task" >&2
+    return 2
+  fi
+
+  echo "$output_prefix: $label lane -> $family (docassemble-base $base, docassemble-webapp $webapp)"
+}
