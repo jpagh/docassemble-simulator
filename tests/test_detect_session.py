@@ -734,7 +734,10 @@ def test_unresolved_variable_names_terminal_culprit_and_expression(
     class CulpritInterview(FakeInterview):
         def assemble(self, namespace, interview_status):
             interview_status.question = question
-            interview_status.seeking = [{"variable": "missing_choices"}]
+            interview_status.seeking = [
+                {"question": question, "reason": "asking"},
+                {"variable": "missing_choices"},
+            ]
             raise DAErrorMissingVariable("missing_choices")
 
     execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
@@ -747,7 +750,7 @@ def test_unresolved_variable_names_terminal_culprit_and_expression(
     assert culprit["provenance"]["id"] == "choices-question"
     assert culprit["sought_variable"] == "missing_choices"
     assert "choices" in culprit["expression"]
-    assert outcome.diagnostics[0].details["culprit"] == culprit
+    assert any(entry.details.get("culprit") == culprit for entry in outcome.diagnostics)
 
 
 def test_terminal_seek_uses_the_block_that_referenced_the_missing_variable(
@@ -811,6 +814,172 @@ def test_terminal_seek_uses_the_block_that_referenced_the_missing_variable(
     assert culprit["sought_variable"] == "missing_choices"
     assert "missing_choices" in culprit["expression"]
     assert outcome.diagnostics[-1].details["culprit"] == culprit
+
+
+def test_terminal_expression_matches_the_full_nested_collection_path(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+    question = SimpleNamespace(
+        name="Question_collection",
+        id="collection-source",
+        question_type="code",
+        line_number=2,
+        from_source=SimpleNamespace(
+            path="docassemble.pkg:data/questions/main.yml",
+            filepath=str(tmp_path / "collection-source.yml"),
+        ),
+        source_code=(
+            "---\ncode: |\n"
+            "  first = M.children[1].name\n"
+            "  second = M.children[0].name\n"
+        ),
+        data_for_debug={},
+        fields=[],
+    )
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [
+                {"question": question, "reason": "running"},
+                {"variable": "M.children[0].name"},
+            ]
+            raise DAErrorMissingVariable("M.children[0].name")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.details["culprit"]["provenance"]["id"] == "collection-source"
+    assert (
+        outcome.error.details["culprit"]["expression"] == "second = M.children[0].name"
+    )
+
+
+def test_terminal_expression_returns_no_precision_for_dynamic_collection_index(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+    question = SimpleNamespace(
+        name="Question_dynamic_collection",
+        id="dynamic-collection",
+        question_type="code",
+        line_number=2,
+        from_source=SimpleNamespace(
+            path="docassemble.pkg:data/questions/main.yml",
+            filepath=str(tmp_path / "dynamic-collection.yml"),
+        ),
+        source_code="---\ncode: |\n  result = M.children[index].name\n",
+        data_for_debug={},
+        fields=[],
+    )
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [
+                {"question": question, "reason": "running"},
+                {"variable": "M.children[0].name"},
+            ]
+            raise DAErrorMissingVariable("M.children[0].name")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.details["culprit"]["provenance"]["id"] == "dynamic-collection"
+    assert outcome.error.details["culprit"]["expression"] is None
+
+
+def test_terminal_generic_expression_matches_the_resolved_object_suffix(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+    question = SimpleNamespace(
+        name="Question_generic",
+        id="generic-source",
+        question_type="code",
+        is_generic=True,
+        generic_object="DAObject",
+        line_number=2,
+        from_source=SimpleNamespace(
+            path="docassemble.pkg:data/questions/main.yml",
+            filepath=str(tmp_path / "generic-source.yml"),
+        ),
+        source_code="---\ngeneric object: DAObject\ncode: |\n  result = x.cos.date\n",
+        data_for_debug={},
+        fields=[],
+    )
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [
+                {"question": question, "reason": "running"},
+                {"variable": "rav.cos.date"},
+            ]
+            raise DAErrorMissingVariable("rav.cos.date")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.details["culprit"]["expression"] == "result = x.cos.date"
+
+
+def test_terminal_seek_without_matching_history_omits_stale_screen_culprit(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+    stale = SimpleNamespace(
+        name="Question_stale",
+        id="stale-screen",
+        question_type="fields",
+        source_code="---\nquestion: Stale\n",
+        data_for_debug={},
+        fields=[],
+    )
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.question = stale
+            interview_status.seeking = [{"variable": "missing_terminal"}]
+            raise DAErrorMissingVariable("missing_terminal")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.kind == "unresolved-variable"
+    assert "could not define missing_terminal" in outcome.error.message
+    assert outcome.error.details["sought_variable"] == "missing_terminal"
+    assert "culprit" not in outcome.error.details
 
 
 def test_nested_terminal_seek_uses_the_last_referencing_block(

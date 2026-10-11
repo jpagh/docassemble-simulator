@@ -43,6 +43,9 @@ conflicts; `--strict` makes a conflict non-zero. A terminal unresolved-variable
 error includes the responsible block provenance, the expression that ultimately
 referenced the sought variable, and that variable; attribution comes from the
 ordered runtime seek history rather than a stale previously displayed screen.
+Expression matching includes the complete attribute, key, or index path; when
+that precision is not retained, the expression is reported as unknown rather
+than inferred from a shared root.
 Tolerated lazy references remain diagnostics without a culprit. With seek
 capture disabled, the simulator does not fabricate attribution when the target
 runtime does not retain the ordered history.

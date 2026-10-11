@@ -2499,14 +2499,14 @@ def _atomic_pickle(path, payload, *, lock_destination):
 
 
 def _seek_question_for_variable(seeking: list[Any] | None, variable: str):
-    """Find the block responsible for the terminal seek in runtime history.
+    """Find a block bounded by the terminal variable-seek history.
 
-    ``InterviewStatus.question`` is the last successfully populated screen.  A
-    terminal seek often occurs while evaluating a choice or code expression,
-    before docassemble can populate a new screen, so that attribute can point
-    at an unrelated, stale question.  The runtime's ordered seeking history is
-    the useful evidence: use the last question considered for the terminal
-    variable, bounded by the preceding variable seek for nested resolution.
+    ``InterviewStatus.question`` is the last successfully populated screen and
+    is not evidence for an exhausted seek.  The runtime appends a variable
+    stage before the candidate blocks it considers, while nested resolution
+    appends another variable stage inside that block.  Keep both sides of the
+    terminal stage bounded so a tolerated or later seek cannot become its
+    culprit.
     """
     stages = [stage for stage in seeking or () if isinstance(stage, dict)]
     variable = str(variable)
@@ -2518,21 +2518,29 @@ def _seek_question_for_variable(seeking: list[Any] | None, variable: str):
     if not variable_indexes:
         return None
     terminal_index = variable_indexes[-1]
-    previous_variable = max(
+    next_variable = next(
         (
             index
-            for index, stage in enumerate(stages[:terminal_index])
-            if stage.get("variable") is not None
+            for index in range(terminal_index + 1, len(stages))
+            if stages[index].get("variable") is not None
         ),
-        default=-1,
+        len(stages),
     )
     question_stages = [
         stage
-        for stage in stages[terminal_index + 1 :]
+        for stage in stages[terminal_index + 1 : next_variable]
         if stage.get("question") is not None
     ]
     if question_stages:
         return question_stages[-1]["question"]
+    previous_variable = max(
+        (
+            index
+            for index in range(terminal_index - 1, -1, -1)
+            if stages[index].get("variable") is not None
+        ),
+        default=-1,
+    )
     question_stages = [
         stage
         for stage in stages[previous_variable + 1 : terminal_index]
@@ -2541,42 +2549,127 @@ def _seek_question_for_variable(seeking: list[Any] | None, variable: str):
     return question_stages[-1]["question"] if question_stages else None
 
 
-def _variable_root(variable: str) -> str | None:
-    match = re.match(r"[A-Za-z_]\w*", str(variable))
-    return match.group(0) if match else None
+def _expression_path(node):
+    """Return a lossless-enough path for an AST reference, or ``None``.
+
+    Attribute names, string keys, numeric indexes, and other index expressions
+    are kept as distinct path components.  That prevents a reference to
+    ``root.other`` or ``items[1]`` from being mistaken for a missing
+    ``root.target`` or ``items[0]``.  The path is intentionally conservative:
+    dynamic calls, slices, and computed roots provide no reliable provenance.
+    """
+    if isinstance(node, ast.Name):
+        return (("name", node.id),)
+    if isinstance(node, ast.Attribute):
+        parent = _expression_path(node.value)
+        if parent is None:
+            return None
+        return (*parent, ("member", node.attr))
+    if isinstance(node, ast.Subscript):
+        parent = _expression_path(node.value)
+        if parent is None:
+            return None
+        index = node.slice
+        if isinstance(index, ast.Index):  # pragma: no cover - Python < 3.9
+            index = index.value
+        if isinstance(index, ast.Constant) and isinstance(index.value, (str, int)):
+            component = (
+                ("member", index.value)
+                if isinstance(index.value, str)
+                else ("index", str(index.value))
+            )
+        elif isinstance(index, ast.Name):
+            component = ("index-expression", index.id)
+        else:
+            try:
+                component = ("index-expression", ast.unparse(index))
+            except (AttributeError, ValueError):
+                return None
+        return (*parent, component)
+    return None
 
 
-def _expression_mentions(expression: str, variable: str) -> bool:
-    root = _variable_root(variable)
-    if root is None:
-        return False
+def _reference_paths(expression: str):
     try:
         tree = ast.parse(expression, mode="exec")
-    except (SyntaxError, ValueError):
-        return bool(re.search(rf"\b{re.escape(root)}\b", expression))
-    return any(
-        isinstance(node, ast.Name) and node.id == root for node in ast.walk(tree)
+    except (SyntaxError, ValueError, TypeError):
+        return ()
+    paths = []
+    for statement in getattr(tree, "body", ()):
+        for node in ast.walk(statement):
+            if not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+                continue
+            if not isinstance(getattr(node, "ctx", None), ast.Load):
+                continue
+            path = _expression_path(node)
+            if path is not None:
+                paths.append((path, statement))
+    return tuple(
+        (path, statement)
+        for path, statement in paths
+        if not any(
+            other_statement is statement
+            and len(other_path) > len(path)
+            and _path_starts_with(other_path, path)
+            for other_path, other_statement in paths
+        )
     )
 
 
-def _matching_expression(expression: str, variable: str) -> str | None:
+def _path_starts_with(path, prefix) -> bool:
+    return len(path) >= len(prefix) and path[: len(prefix)] == prefix
+
+
+def _matching_expression(
+    expression: str,
+    variable: str,
+    *,
+    generic: bool = False,
+    exact_only: bool = False,
+) -> str | None:
     expression = expression.strip()
-    if not expression or not _expression_mentions(expression, variable):
+    if not expression:
         return None
-    try:
-        tree = ast.parse(expression, mode="exec")
-    except (SyntaxError, ValueError):
+    target_paths = _reference_paths(variable)
+    if target_paths:
+        target = target_paths[0][0]
+        references = _reference_paths(expression)
+        for path, statement in references:
+            generic_exact = (
+                generic
+                and path
+                and path[0] == ("name", "x")
+                and len(target) == len(path)
+                and target[1:] == path[1:]
+            )
+            if path == target or generic_exact:
+                segment = ast.get_source_segment(expression, statement)
+                return (segment or expression).strip()
+        if exact_only:
+            if re.search(rf"(?<![\w.]){re.escape(variable)}(?![\w.])", expression):
+                return expression
+            return None
+        for path, statement in references:
+            if _path_starts_with(path, target):
+                segment = ast.get_source_segment(expression, statement)
+                return (segment or expression).strip()
+            if generic and path and path[0] == ("name", "x"):
+                candidate = path[1:]
+                if (
+                    candidate
+                    and len(target) >= len(candidate)
+                    and target[-len(candidate) :] == candidate
+                ):
+                    segment = ast.get_source_segment(expression, statement)
+                    return (segment or expression).strip()
+        return None
+
+    # A malformed or templated scalar can still provide exact textual
+    # evidence.  Do not fall back to root-only matching: that would fabricate
+    # a culprit for a different attribute under the same object.
+    if re.search(rf"(?<![\w.]){re.escape(variable)}(?![\w.])", expression):
         return expression
-    root = _variable_root(variable)
-    statements = getattr(tree, "body", ())
-    for statement in statements:
-        if root is not None and any(
-            isinstance(node, ast.Name) and node.id == root
-            for node in ast.walk(statement)
-        ):
-            segment = ast.get_source_segment(expression, statement)
-            return (segment or expression).strip()
-    return expression
+    return None
 
 
 def _question_expressions(question) -> list[str]:
@@ -2636,17 +2729,41 @@ def _question_expressions(question) -> list[str]:
 
 def _culprit_expression(question, sought_variable: str) -> str | None:
     expressions = _question_expressions(question)
+    generic = bool(
+        getattr(question, "is_generic", False)
+        or getattr(question, "generic_object", None)
+        or getattr(question, "generic_list_object", None)
+    )
     for expression in expressions:
-        matching = _matching_expression(expression, sought_variable)
+        matching = _matching_expression(
+            expression,
+            sought_variable,
+            generic=generic,
+            exact_only=True,
+        )
         if matching is not None:
             return matching[:500]
-    return None
+
+    # A longer reference can prove that it touched a missing parent (for
+    # example ``M.options.target`` while ``M.options`` is missing), but it is
+    # not enough to choose between competing attributes.  Keep that useful
+    # evidence only when it is unambiguous.
+    matches = {
+        matching[:500]
+        for expression in expressions
+        if (
+            matching := _matching_expression(
+                expression, sought_variable, generic=generic
+            )
+        )
+        is not None
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _unresolved_culprit(error: BaseException) -> dict[str, Any] | None:
     sought_variable = _unresolved_variable(error) or "<unknown>"
     status = getattr(error, "interview_status", None)
-    used_error_history = status is not None
     if status is None:
         try:
             from docassemble.base.functions import this_thread
@@ -2658,12 +2775,10 @@ def _unresolved_culprit(error: BaseException) -> dict[str, Any] | None:
     question = _seek_question_for_variable(
         getattr(status, "seeking", None), sought_variable
     )
-    if question is None and not used_error_history:
-        # Keep compatibility with lightweight runtimes that do not annotate
-        # their exception, while preferring native seeking history whenever it
-        # is present.  The active screen is only evidence of last resort.
-        question = getattr(status, "question", None)
     if question is None:
+        # A successfully displayed screen is not provenance for a later
+        # exhausted seek.  Only retained, variable-specific history can name a
+        # culprit (ADR-0004).
         return None
     provenance = _provenance(question)
     culprit = {
