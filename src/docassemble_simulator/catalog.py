@@ -215,7 +215,7 @@ def _explicit_id(question) -> str | None:
     return value or None
 
 
-def _id_relationship(question) -> str | None:
+def _authored_id_relationship(question) -> tuple[str, Any] | None:
     debug = getattr(question, "data_for_debug", None)
     authored = debug if isinstance(debug, dict) else {}
     try:
@@ -230,8 +230,33 @@ def _id_relationship(question) -> str | None:
         if value is None:
             value = authored.get(name, source_authored.get(name))
         if value:
-            return str(value) if not isinstance(value, bool) else name
+            return name, value
     return None
+
+
+def _id_relationship(question) -> str | None:
+    relationship = _authored_id_relationship(question)
+    if relationship is None:
+        return None
+    name, value = relationship
+    if isinstance(value, bool):
+        return name
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+def _relationship_targets(question) -> list[str]:
+    relationship = _authored_id_relationship(question)
+    if relationship is None:
+        return []
+    _name, value = relationship
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    target = str(value).strip()
+    return [target] if target else []
 
 
 def _provenance(question) -> dict[str, Any]:
@@ -279,22 +304,62 @@ def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, A
             continue
         block = _provenance(question)
         block["relationship"] = _id_relationship(question)
-        grouped.setdefault(explicit_id, []).append(block)
-
-    reports = []
-    for explicit_id, blocks in grouped.items():
-        if len(blocks) < 2:
-            continue
-        deliberate = any(block["relationship"] for block in blocks)
-        reports.append(
+        grouped.setdefault(explicit_id, []).append(
             {
-                "id": explicit_id,
-                "kind": "deliberate-override" if deliberate else "duplicate-id",
-                "interview": interview_identity,
-                "warning": True,
-                "blocks": blocks,
+                "question": question,
+                "block": block,
+                "targets": _relationship_targets(question),
             }
         )
+
+    reports = []
+    for explicit_id, entries in grouped.items():
+        if len(entries) < 2:
+            continue
+        deliberate_pairs = []
+        used_indexes: set[int] = set()
+        for source_index, entry in enumerate(entries):
+            if explicit_id not in entry["targets"] or source_index in used_indexes:
+                continue
+            target_indexes = [
+                index
+                for index in range(source_index - 1, -1, -1)
+                if index not in used_indexes
+            ] or [
+                index
+                for index in range(source_index + 1, len(entries))
+                if index not in used_indexes
+            ]
+            if not target_indexes:
+                continue
+            target_index = target_indexes[0]
+            used_indexes.update((source_index, target_index))
+            deliberate_pairs.append((target_index, source_index))
+
+        for target_index, source_index in deliberate_pairs:
+            reports.append(
+                {
+                    "id": explicit_id,
+                    "kind": "deliberate-override",
+                    "interview": interview_identity,
+                    "warning": True,
+                    "blocks": [
+                        entries[target_index]["block"],
+                        entries[source_index]["block"],
+                    ],
+                }
+            )
+
+        if len(used_indexes) != len(entries):
+            reports.append(
+                {
+                    "id": explicit_id,
+                    "kind": "duplicate-id",
+                    "interview": interview_identity,
+                    "warning": True,
+                    "blocks": [entry["block"] for entry in entries],
+                }
+            )
     return reports
 
 

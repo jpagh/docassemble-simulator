@@ -166,8 +166,9 @@ atomic replacement.
 
 `check` also reports duplicate explicit question ids with every block's
 provenance. They are warnings by default; `check --strict` makes accidental
-duplicates fail, while deliberate override/supersede relationships are reported
-separately.
+duplicates fail. An override/supersedes declaration only separates a collision
+when it names a block in that same id group; unrelated or missing targets do not
+exempt the duplicates, and mixed groups retain an accidental-collision report.
 
 ## Persistent journeys and the standard runner
 
