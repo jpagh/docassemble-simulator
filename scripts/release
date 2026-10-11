@@ -38,6 +38,50 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
+# Keep the slow compatibility check as the first mutating-release phase. Run it
+# through mise so the task provisions both supported runtime families before
+# invoking scripts/test-runtime. Do not capture its output: a release operator
+# needs to see provisioning and test progress, and an interrupted gate must not
+# leave a child runtime process behind.
+gate_pid=
+cleanup_gate() {
+  if [[ -n ${gate_pid:-} ]]; then
+    kill -TERM "$gate_pid" 2>/dev/null || true
+    wait "$gate_pid" 2>/dev/null || true
+    gate_pid=
+  fi
+}
+
+on_interrupt() {
+  local status=$1
+  echo "release: runtime validation interrupted; no release changes were made" >&2
+  cleanup_gate
+  trap - INT TERM
+  exit "$status"
+}
+trap 'on_interrupt 130' INT
+trap 'on_interrupt 143' TERM
+trap cleanup_gate EXIT
+
+run_runtime_gate() {
+  echo "release: running two-family runtime compatibility gate (mise run test:runtime)"
+  mise run test:runtime &
+  gate_pid=$!
+
+  local status
+  set +e
+  wait "$gate_pid"
+  status=$?
+  set -e
+  gate_pid=
+  if [[ $status -ne 0 ]]; then
+    echo "error: runtime validation failed; release files and Git state were not changed" >&2
+    return "$status"
+  fi
+}
+
+run_runtime_gate
+
 bump-my-version bump patch
 git push --follow-tags
 

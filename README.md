@@ -524,11 +524,16 @@ choose its root or `--refresh-nltk-cache` to publish a new generation. Use
 runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
 `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the script itself.
 
-Releases are cut with `mise run release`, which bumps the patch digit, pushes
-the commit and annotated tag, and publishes the GitHub release with notes
-generated from the commits since the previous tag. `mise run bump` bumps and
-pushes without creating a release, and `scripts/release --dry-run` previews the
-next bump without writing anything.
+Releases are cut with `mise run release`. A release first visibly runs the
+slow two-family runtime compatibility gate (`mise run test:runtime`, excluding
+the external corpus), then bumps the patch digit, pushes the commit and
+annotated tag, and publishes the GitHub release with notes generated from the
+commits since the previous tag. A failed or interrupted gate leaves version
+files and release Git state unchanged. Run `mise run test:corpus` separately
+when the external corpus gate is needed; it is not part of release validation.
+`mise run bump` still bumps and pushes without creating a release, and
+`scripts/release --dry-run` previews the next bump without provisioning
+interpreters or running either slow gate.
 
 ## License
 
