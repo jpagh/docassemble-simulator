@@ -870,6 +870,54 @@ def test_terminal_choices_failure_names_the_real_referencing_block(
     assert culprit_diagnostics[-1]["details"]["culprit"] == details["culprit"], label
 
 
+def test_nested_terminal_seek_names_the_last_real_referencing_block(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    failure_path = (
+        root
+        / "docassemble"
+        / "regression"
+        / "data"
+        / "questions"
+        / "nested-failure.yml"
+    )
+    failure_path.write_text(
+        "---\n"
+        "id: nested-source\n"
+        "mandatory: True\n"
+        "question: Choose a value\n"
+        "fields:\n"
+        "  - Choice: choice\n"
+        "    code: missing_outer\n"
+        "---\n"
+        "id: nested-code\n"
+        "code: |\n"
+        "  missing_outer = missing_terminal\n"
+    )
+
+    failed = _run(
+        interpreter,
+        root,
+        "start",
+        "--interview",
+        "nested-failure.yml",
+        "--seek-diagnostics",
+        "capture",
+        "--full-seek-diagnostics",
+        expected_code=2,
+    )
+
+    assert failed["error"]["kind"] == "unresolved-variable", label
+    details = failed["error"]["details"]
+    assert details["sought_variable"] == "missing_terminal", label
+    assert details["culprit"]["provenance"]["id"] == "nested-code", label
+    assert details["culprit"]["expression"] == "missing_outer = missing_terminal", label
+
+
 def test_auto_seek_submits_browser_defaults_and_completes_across_families(
     family_python, real_workspace
 ):
