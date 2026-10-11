@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
@@ -75,15 +76,47 @@ class RuntimeGate:
     required: tuple[str, ...] = REQUIRED_FAMILIES
     applicable: dict[str, frozenset[str]] = field(default_factory=dict)
     passed: set[str] = field(default_factory=set)
+    counts: dict[str, Counter[str]] = field(
+        default_factory=lambda: {family: Counter() for family in REQUIRED_FAMILIES}
+    )
+    reported: dict[str, str] = field(default_factory=dict)
 
     def attribute(self, nodeid: str, families: Iterable[str]) -> None:
         resolved = frozenset(f for f in families if f in self.required)
         if resolved:
             self.applicable[nodeid] = resolved
 
-    def record_pass(self, nodeid: str) -> None:
-        if nodeid in self.applicable:
-            self.passed.add(nodeid)
+    def record_report(self, report) -> None:
+        """Record one test outcome, including setup-only skips/failures."""
+        families = self.applicable.get(report.nodeid)
+        if not families:
+            families = frozenset(getattr(report, "_runtime_gate_families", ()))
+            if families:
+                self.applicable[report.nodeid] = families
+        if not families:
+            return
+        if report.when == "call" or (
+            report.when == "setup" and report.outcome in {"failed", "skipped"}
+        ):
+            outcome = report.outcome
+        else:
+            return
+        if report.nodeid in self.reported:
+            return
+        self.reported[report.nodeid] = outcome
+        for family in families:
+            self.counts[family][outcome] += 1
+        if outcome == "passed":
+            self.passed.add(report.nodeid)
+
+    def summary(self) -> list[str]:
+        return [
+            f"  {family}: "
+            f"passed={self.counts[family]['passed']} "
+            f"failed={self.counts[family]['failed']} "
+            f"skipped={self.counts[family]['skipped']}"
+            for family in self.required
+        ]
 
     def failures(self, environ: Mapping[str, str]) -> list[str]:
         problems: list[str] = []
@@ -117,6 +150,9 @@ _GATE: RuntimeGate | None = None
 
 def pytest_configure(config) -> None:
     global _GATE
+    # Workers keep a local accumulator only long enough to attach each test's
+    # family to its serialized report. The controller receives those reports
+    # and performs the one final aggregate check.
     if gate_requested(os.environ) and not config.getoption("collectonly"):
         _GATE = RuntimeGate()
 
@@ -128,30 +164,71 @@ def pytest_collection_modifyitems(config, items) -> None:
         _GATE.attribute(item.nodeid, families_for_item(item))
 
 
-def pytest_runtest_logreport(report) -> None:
-    if _GATE is None or report.when != "call" or not report.passed:
+def pytest_collection_finish(session) -> None:
+    """Attribute items on xdist controllers, which skip modifyitems."""
+    if _GATE is None:
         return
-    _GATE.record_pass(report.nodeid)
+    for item in session.items:
+        _GATE.attribute(item.nodeid, families_for_item(item))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_report_to_serializable(config, report):
+    outcome = yield
+    data = outcome.get_result()
+    if data is not None and _GATE is not None:
+        families = _GATE.applicable.get(report.nodeid)
+        if families:
+            data["runtime_gate_families"] = sorted(families)
+    outcome.force_result(data)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_report_from_serializable(config, data):
+    outcome = yield
+    report = outcome.get_result()
+    families = data.get("runtime_gate_families")
+    if report is not None and families:
+        report._runtime_gate_families = frozenset(families)
+    outcome.force_result(report)
+
+
+def pytest_runtest_logreport(report) -> None:
+    if _GATE is None:
+        return
+    _GATE.record_report(report)
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:
     global _GATE
     if _GATE is None:
         return
+    if hasattr(session.config, "workerinput"):
+        _GATE = None
+        return
     problems = _GATE.failures(os.environ)
+    summary = _GATE.summary()
     _GATE = None
+    terminal = session.config.pluginmanager.get_plugin("terminalreporter")
+    if terminal is not None:
+        terminal.write_line("")
+        terminal.write_line("runtime gate coverage:")
+        for line in summary:
+            terminal.write_line(line)
+    else:  # pragma: no cover - the terminal reporter is present in practice
+        print("runtime gate coverage:", file=sys.stderr)
+        for line in summary:
+            print(line, file=sys.stderr)
     if not problems:
         return
     if session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
-    terminal = session.config.pluginmanager.get_plugin("terminalreporter")
     header = "runtime gate not satisfied:"
     if terminal is not None:
-        terminal.write_line("")
         terminal.write_line(header, red=True)
         for problem in problems:
             terminal.write_line(f"  - {problem}", red=True)
-    else:  # pragma: no cover - the terminal reporter is present in practice
+    else:
         print(header, file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)

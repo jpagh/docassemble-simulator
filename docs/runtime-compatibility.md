@@ -39,15 +39,24 @@ mise run test:all-da  # aggregate lane: whole suite with both families wired
 `mise run test:runtime` is the compatibility gate. It provisions both lanes,
 exports `DASIMULATOR_REAL_PYTHON` and `DASIMULATOR_REAL_PYTHON_19`, and selects
 the `real_runtime` contract tests, including screen-trace acceptance, with the
-external corpus excluded. `scripts/test-runtime` performs that selection and
-preflights both lanes; it fails before pytest when a lane interpreter is
+external corpus excluded. The gate uses two bounded pytest-xdist workers by
+default; set `DASIMULATOR_RUNTIME_WORKERS=1` for serial debugging or comparison
+(the accepted range is 1–8). Every worker inherits both explicit interpreter
+paths, and the contract's per-test temporary workspaces keep sessions, files,
+traces, and packages isolated. `scripts/test-runtime` performs that selection
+and preflights both lanes; it fails before pytest when a lane interpreter is
 missing, cannot import the runtime, or reports the wrong family, and prints the
 `mise run sync:*` command that provisions it. `tests/_runtime_gate.py` then
 fails a session in which a required family contributed no passing test, or in
 which a lane interpreter variable is absent, so a run cannot satisfy the gate
 by skipping the coverage it exists to exercise. Individually skipped
 capability tests (for example a lane without AssemblyLine) stay legitimate
-skips.
+skips. The gate reports pass/fail/skip counts for each family so serial and
+parallel runs can be compared without treating a missing lane as a speedup.
+On 2026-10-10, on the same macOS Apple Silicon machine with warmed runtime
+caches, the full selection took 952.27 seconds serially (1 worker) and 517.19
+seconds with 2 workers. Both runs reported 23 modern and 19 legacy passes with
+no skips or failures; the difference is an observation, not a promised speedup.
 
 `mise run test:all-da` remains the aggregate lane: it runs the whole suite
 (fast tests, both runtime families, and corpus tests when their fixtures are

@@ -28,6 +28,8 @@ from _corpus_gate import (
 )
 from _runtime_gate import (  # noqa: F401 - pytest hook implementations
     pytest_collection_modifyitems,
+    pytest_report_from_serializable,
+    pytest_report_to_serializable,
 )
 from _runtime_gate import (
     pytest_configure as _runtime_pytest_configure,

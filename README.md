@@ -414,12 +414,18 @@ mise run test:all-da  # Aggregate lane: whole suite with both runtime families w
 isolated `.venv-da110` (docassemble 1.10.x) and `.venv-da19` (1.9.x)
 environments, points `DASIMULATOR_REAL_PYTHON` / `DASIMULATOR_REAL_PYTHON_19`
 at their interpreters, and runs the real-runtime contract tests, including the
-screen-trace acceptance scenario, with the external corpus excluded. A lane
-that is missing, cannot import the runtime, or belongs to the wrong family
-fails before pytest runs, and a family that contributes no passing coverage
-fails the session, so the gate can never pass by skipping its intended
-coverage. `mise run sync:da19` / `mise run sync:da110` (re)provision one family
-without running the gate.
+screen-trace acceptance scenario, with the external corpus excluded. By
+default it uses two pytest-xdist workers; set
+`DASIMULATOR_RUNTIME_WORKERS=1` for a serial comparison/debug run. The count
+is bounded to 1–8 rather than using every detected CPU, and every worker
+inherits both explicit family interpreter paths. Each runtime test uses its
+own pytest temporary workspace for sessions, files, traces, and packages, so
+parallel workers do not share writable interview state. The gate prints
+per-family pass/fail/skip counts in either mode. A lane that is missing, cannot
+import the runtime, or belongs to the wrong family fails before pytest runs,
+and a family that contributes no passing coverage fails the session, so the
+gate can never pass by skipping its intended coverage. `mise run sync:da19` /
+`mise run sync:da110` (re)provision one family without running the gate.
 
 `mise run test:corpus` is the external corpus canary gate. It provisions the
 modern `.venv-da110` lane (`sync:da110`), validates that interpreter and the

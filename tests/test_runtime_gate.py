@@ -95,7 +95,11 @@ def _run_gate(
             *extra_args,
         ],
         cwd=PROJECT,
-        env={**os.environ, **(env or {})},
+        env={
+            **os.environ,
+            "DASIMULATOR_RUNTIME_WORKERS": "2",
+            **(env or {}),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -149,6 +153,8 @@ def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, versi
     assert "-m" in argv
     selection = argv[argv.index("-m") + 1]
     assert selection == "real_runtime and not corpus"
+    assert argv[argv.index("-n") + 1] == "2"
+    assert "2 worker(s)" in result.stdout
 
     recorded = dict(
         line.split("=", 1) for line in env_log.read_text().splitlines() if line
@@ -156,6 +162,42 @@ def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, versi
     assert recorded["modern"] == str(modern)
     assert recorded["legacy"] == str(legacy)
     assert recorded["gate"] == "1"
+
+
+def test_runtime_gate_supports_serial_debugging(tmp_path):
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "DASIMULATOR_RUNTIME_WORKERS": "1",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 worker(s)" in result.stdout
+    assert "-n" not in args_log.read_text().splitlines()
+
+
+def test_runtime_gate_rejects_an_unbounded_worker_override(tmp_path):
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "DASIMULATOR_RUNTIME_WORKERS": "9",
+        },
+    )
+    assert result.returncode == 2
+    assert "from 1 to 8" in result.stderr
+    assert not args_log.exists()
 
 
 def test_runtime_gate_fails_before_pytest_when_a_lane_is_missing(tmp_path):
@@ -329,6 +371,22 @@ def _active_gate_env() -> dict[str, str]:
 def test_gate_plugin_accepts_a_session_where_both_families_pass(tmp_path):
     result = _run_plugin_probe(tmp_path, env=_active_gate_env())
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "runtime gate coverage:" in result.stdout
+    assert "modern: passed=" in result.stdout
+    assert "legacy: passed=" in result.stdout
+
+
+def test_gate_plugin_aggregates_reports_from_parallel_workers(tmp_path):
+    pytest.importorskip("xdist")
+    result = _run_plugin_probe(
+        tmp_path,
+        env=_active_gate_env(),
+        extra_args=("-p", "xdist.plugin", "-n", "2"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "runtime gate coverage:" in result.stdout
+    assert "modern: passed=" in result.stdout
+    assert "legacy: passed=" in result.stdout
 
 
 def test_gate_plugin_rejects_a_session_where_one_family_never_ran(tmp_path):
