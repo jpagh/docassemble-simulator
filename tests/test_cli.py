@@ -133,14 +133,92 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
         "ok": True,
         "command": "start",
         "result": {"kind": "finished"},
-        "diagnostics": [
-            {
-                "kind": "variable-seek",
-                "message": "seeking M.value",
-                "details": {"variable": "M.value"},
-            }
-        ],
+        "diagnostics": {
+            "count": 1,
+            "counts": {"variable-seek": 1},
+            "head": [
+                {
+                    "kind": "variable-seek",
+                    "message": "seeking M.value",
+                    "details": {"variable": "M.value"},
+                }
+            ],
+            "tail": [
+                {
+                    "kind": "variable-seek",
+                    "message": "seeking M.value",
+                    "details": {"variable": "M.value"},
+                }
+            ],
+            "truncated": False,
+        },
     }
+
+
+def test_check_human_output_ends_with_totals(monkeypatch, tmp_path, capsys):
+    class FakeCatalog:
+        def __init__(self, root, selector):
+            pass
+
+        def check(self):
+            return SimpleNamespace(
+                interview=None,
+                result={
+                    "checked": 2,
+                    "failures": 1,
+                    "totals": {"checked": 2, "ok": 1, "failed": 1},
+                    "results": [],
+                },
+            )
+
+    monkeypatch.setattr("docassemble_simulator.catalog.InterviewCatalog", FakeCatalog)
+    args = cli.build_parser().parse_args(["check"])
+
+    assert cli.cmd_catalog(args, tmp_path) == 2
+    assert capsys.readouterr().out.rstrip().endswith("checked: 2  ok: 1  failures: 1")
+
+
+def test_diagnostic_summary_is_bounded_and_counts_kinds():
+    events = [
+        Diagnostic("variable-seek" if index % 2 else "other", str(index), {})
+        for index in range(12)
+    ]
+
+    summary = cli._diagnostic_summary(events, limit=3)
+
+    assert summary["count"] == 12
+    assert summary["counts"] == {"other": 6, "variable-seek": 6}
+    assert [item["message"] for item in summary["head"]] == ["0", "1", "2"]
+    assert [item["message"] for item in summary["tail"]] == ["9", "10", "11"]
+    assert summary["truncated"] is True
+
+
+def test_explicit_full_diagnostics_keeps_ordered_events(monkeypatch, tmp_path, capsys):
+    outcome = SimpleNamespace(
+        ok=True,
+        result={"kind": "finished"},
+        error=None,
+        diagnostics=(
+            Diagnostic("variable-seek", "first", {}),
+            Diagnostic("variable-seek", "second", {}),
+        ),
+        attachments=(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_execution",
+        lambda args, root: SimpleNamespace(run=lambda operation: outcome),
+    )
+    args = cli.build_parser().parse_args(
+        ["start", "--json", "--full-seek-diagnostics"]
+    )
+
+    assert cli.cmd_execution(args, tmp_path) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["message"] for item in payload["diagnostics"]] == [
+        "first",
+        "second",
+    ]
 
 
 def test_human_output_labels_published_attachment_diagnostics(tmp_path, capsys):

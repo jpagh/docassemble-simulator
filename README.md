@@ -200,8 +200,12 @@ The identity rules and the evidence behind them are documented in
 
 ## JSON and exit codes
 
-Every command accepts `--json` and returns one envelope. Successful variable
-seeking may add a top-level `diagnostics` list, and generated download results
+Every command accepts `--json` and returns one envelope. By default,
+variable-seek diagnostics are bounded to a `count`, per-kind `counts`, and
+`head`/`tail` events; pass `--seek-diagnostics capture` or
+`--full-seek-diagnostics` for the complete ordered event list. `--seek-diagnostics
+off` remains quiet. The human `check` command ends with checked/ok/failures,
+and JSON check results include the same `totals`. Generated download results
 may add a top-level `attachments` manifest:
 
 ```json

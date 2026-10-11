@@ -86,6 +86,24 @@ def test_questions_and_index_expose_guarded_block_provenance(tmp_path, monkeypat
     assert all(entry["source_file"] for entry in indexed)
 
 
+def test_check_reports_complete_totals(tmp_path, monkeypatch):
+    package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    package.mkdir(parents=True)
+    (package.parent.parent / "__init__.py").write_text("")
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml"
+    )
+    monkeypatch.setattr(
+        catalog,
+        "_compile",
+        lambda identity: SimpleNamespace(questions_list=[]),
+    )
+
+    result = catalog.check().result
+
+    assert result["totals"] == {"checked": 1, "ok": 1, "failed": 0}
+
+
 def test_provenance_reads_authored_guard_when_runtime_drops_block_text(tmp_path):
     question = _question(
         tmp_path,

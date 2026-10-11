@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 import textwrap
+from collections import Counter
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,18 @@ def _envelope(
     if attachments:
         payload["attachments"] = _clean(attachments)
     return payload
+
+
+def _diagnostic_summary(diagnostics, limit=5):
+    events = _clean(diagnostics)
+    counts = Counter(event.get("kind", "unknown") for event in events)
+    return {
+        "count": len(events),
+        "counts": dict(sorted(counts.items())),
+        "head": events[:limit],
+        "tail": events[-limit:],
+        "truncated": len(events) > limit * 2,
+    }
 
 
 def _emit(payload, as_json):
@@ -354,6 +367,16 @@ def cmd_catalog(args, root):
         )
     )
     _emit(payload, args.json)
+    if args.command == "check" and not args.json:
+        totals = result.get("totals") or {
+            "checked": result.get("checked", 0),
+            "ok": result.get("checked", 0) - result.get("failures", 0),
+            "failed": result.get("failures", 0),
+        }
+        print(
+            f"checked: {totals['checked']}  "
+            f"ok: {totals['ok']}  failures: {totals['failed']}"
+        )
     return 0 if ok else 2
 
 
@@ -398,18 +421,25 @@ def cmd_execution(args, root):
         operation = Execute(code, not args.no_assemble)
     execution = _execution(args, root)
     outcome = execution.run(operation)
+    diagnostics = outcome.diagnostics
+    full_diagnostics = bool(
+        getattr(args, "full_seek_diagnostics", False)
+        or getattr(args, "seek_diagnostics", None) == "capture"
+    )
+    if args.json and diagnostics and not full_diagnostics:
+        diagnostics = _diagnostic_summary(diagnostics)
     payload = (
         _envelope(
             args.command,
             outcome.result,
-            diagnostics=outcome.diagnostics,
+            diagnostics=diagnostics,
             attachments=outcome.attachments,
         )
         if outcome.ok
         else _envelope(
             args.command,
             error=outcome.error,
-            diagnostics=outcome.diagnostics,
+            diagnostics=diagnostics,
             attachments=outcome.attachments,
         )
     )
@@ -722,7 +752,12 @@ def build_parser():
     parser.add_argument(
         "--seek-diagnostics",
         choices=("capture", "off"),
-        help="capture the variable-seeking trace (default: capture; off suppresses the trace)",
+        help="capture the variable-seeking trace (default output is summarized; off suppresses it)",
+    )
+    parser.add_argument(
+        "--full-seek-diagnostics",
+        action="store_true",
+        help="return the complete ordered seek trace instead of the bounded JSON summary",
     )
     common = argparse.ArgumentParser(add_help=False)
     for flag in ("root", "interview"):
@@ -746,6 +781,13 @@ def build_parser():
         "--seek-diagnostics",
         choices=("capture", "off"),
         default=argparse.SUPPRESS,
+        help="capture the seek trace (JSON summarizes it unless capture/full is explicit)",
+    )
+    common.add_argument(
+        "--full-seek-diagnostics",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="return the complete ordered seek trace in JSON",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

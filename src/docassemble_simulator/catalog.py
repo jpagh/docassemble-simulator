@@ -274,11 +274,17 @@ class InterviewCatalog:
                         "message": str(error)[:300],
                     }
                 )
+        failures = sum(not row["ok"] for row in rows)
         return CatalogOutcome(
             None,
             {
                 "checked": len(rows),
-                "failures": sum(not row["ok"] for row in rows),
+                "failures": failures,
+                "totals": {
+                    "checked": len(rows),
+                    "ok": len(rows) - failures,
+                    "failed": failures,
+                },
                 "results": rows,
             },
         )
