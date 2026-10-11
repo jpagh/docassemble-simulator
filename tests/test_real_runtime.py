@@ -529,7 +529,14 @@ def _environment():
     return environment
 
 
-def _run(real_python, root, *arguments, expected_code=0, timeout=120):
+def _run(
+    real_python,
+    root,
+    *arguments,
+    expected_code=0,
+    timeout=120,
+    stderr_contains=None,
+):
     completed = subprocess.run(
         [
             str(real_python),
@@ -547,7 +554,10 @@ def _run(real_python, root, *arguments, expected_code=0, timeout=120):
         timeout=timeout,
     )
     assert completed.returncode == expected_code, completed.stdout + completed.stderr
-    assert completed.stderr == ""
+    if stderr_contains is None:
+        assert completed.stderr == ""
+    else:
+        assert stderr_contains in completed.stderr
     return json.loads(completed.stdout)
 
 
@@ -868,6 +878,76 @@ def test_terminal_choices_failure_names_the_real_referencing_block(
     ]
     assert culprit_diagnostics, label
     assert culprit_diagnostics[-1]["details"]["culprit"] == details["culprit"], label
+
+
+def test_tolerated_review_reference_is_not_attributed_to_a_later_failure(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    failure_path = (
+        root
+        / "docassemble"
+        / "regression"
+        / "data"
+        / "questions"
+        / "tolerated-review.yml"
+    )
+    failure_path.write_text(
+        "---\n"
+        "id: tolerated-review\n"
+        "mandatory: True\n"
+        "question: Review\n"
+        "review:\n"
+        "  - label: Optional review item\n"
+        "    field: missing_review\n"
+        "continue button field: review_ok\n"
+        "---\n"
+        "id: actual-terminal\n"
+        "mandatory: True\n"
+        "question: Choose a value\n"
+        "fields:\n"
+        "  - Choice: choice\n"
+        "    code: missing_terminal\n"
+    )
+    flags = (
+        "--interview",
+        "tolerated-review.yml",
+        "--seek-diagnostics",
+        "capture",
+        "--full-seek-diagnostics",
+    )
+
+    started = _run(
+        interpreter,
+        root,
+        "start",
+        *flags,
+        stderr_contains="Exception in review block",
+    )
+    assert started["ok"], label
+    assert started["result"]["question_name"] == "ID tolerated-review", label
+
+    failed = _run(
+        interpreter,
+        root,
+        "answer",
+        "--defaults",
+        *flags,
+        expected_code=2,
+    )
+    assert failed["error"]["kind"] == "unresolved-variable", label
+    culprit = failed["error"]["details"]["culprit"]
+    assert culprit["provenance"]["id"] == "actual-terminal", label
+    assert culprit["sought_variable"] == "missing_terminal", label
+    assert all(
+        item.get("details", {}).get("culprit", {}).get("provenance", {}).get("id")
+        != "tolerated-review"
+        for item in failed.get("diagnostics", [])
+        if item.get("details", {}).get("culprit")
+    ), label
 
 
 def test_nested_terminal_seek_names_the_last_real_referencing_block(
