@@ -125,6 +125,20 @@ def test_runtime_gate_task_provisions_lanes_before_running_the_gate():
     assert set(tasks["test:all-da"]["depends"]) == {"sync:da19", "sync:da110"}
 
 
+def test_gate_scripts_share_the_runtime_lane_preflight():
+    shared = (PROJECT / "scripts" / "runtime-lane-preflight").read_text()
+    corpus = (PROJECT / "scripts" / "test-corpus").read_text()
+    runtime = GATE.read_text()
+
+    assert "runtime_lane_preflight" in shared
+    assert 'source "$repo_root/scripts/runtime-lane-preflight"' in runtime
+    assert 'source "$repo_root/scripts/runtime-lane-preflight"' in corpus
+    assert "runtime_lane_preflight" in runtime
+    assert "runtime_lane_preflight" in corpus
+    assert "def probe_lane" not in runtime
+    assert "def probe_lane" not in corpus
+
+
 def test_runtime_gate_selects_the_runtime_contract_without_the_external_corpus():
     script = GATE.read_text()
     assert "real_runtime and not corpus" in script

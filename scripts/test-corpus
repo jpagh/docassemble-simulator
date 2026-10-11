@@ -59,45 +59,7 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 2
 fi
 
-probe_lane() { # label interpreter sync_task
-  local label=$1 interpreter=$2 sync_task=$3
-  if [[ ! -x "$interpreter" ]]; then
-    echo "error: the $label runtime lane interpreter is missing or not executable:" >&2
-    echo "  $interpreter" >&2
-    echo "provision it with: mise run $sync_task" >&2
-    exit 2
-  fi
-
-  local probe
-  probe=$(
-    "$interpreter" -c '
-import importlib.metadata as metadata
-import importlib.util as util
-import docassemble.base  # noqa: F401 - importing is the capability under test
-family = "modern" if util.find_spec("docassemble.base.thread_context") else "legacy"
-print(family, metadata.version("docassemble-base"), metadata.version("docassemble-webapp"))
-' 2>&1
-  ) || {
-    echo "error: the $label runtime lane interpreter cannot import the docassemble runtime:" >&2
-    echo "  $interpreter" >&2
-    echo "$probe" | sed 's/^/  /' >&2
-    echo "provision it with: mise run $sync_task" >&2
-    exit 2
-  }
-
-  local family base webapp
-  family=$(echo "$probe" | tail -n 1 | awk '{print $1}')
-  base=$(echo "$probe" | tail -n 1 | awk '{print $2}')
-  webapp=$(echo "$probe" | tail -n 1 | awk '{print $3}')
-  if [[ "$family" != "modern" ]]; then
-    echo "error: the $label runtime lane expects the modern docassemble family but its interpreter reports $family:" >&2
-    echo "  $interpreter" >&2
-    echo "provision it with: mise run $sync_task" >&2
-    exit 2
-  fi
-
-  echo "corpus gate: $label lane -> $family (docassemble-base $base, docassemble-webapp $webapp)"
-}
+source "$repo_root/scripts/runtime-lane-preflight"
 
 verify_fixtures() { # path
   local root=$1
@@ -124,7 +86,7 @@ verify_fixtures() { # path
   echo "corpus gate: fixtures -> $root"
 }
 
-probe_lane "modern" "$python" "sync:da110"
+runtime_lane_preflight "modern" "$python" "modern" "sync:da110" "corpus gate"
 verify_fixtures "$fixtures"
 
 export DASIMULATOR_REAL_PYTHON="$python"

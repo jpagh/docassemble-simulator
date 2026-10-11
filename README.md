@@ -538,6 +538,10 @@ and a family that contributes no passing coverage fails the session, so the
 gate can never pass by skipping its intended coverage. `mise run sync:da19` /
 `mise run sync:da110` (re)provision one family without running the gate.
 
+Both gate scripts use the shared `scripts/runtime-lane-preflight` for lane
+executability, importability, family validation, and version reporting; their
+selection, fixture, worker, and false-green policies remain separate.
+
 `mise run test:corpus` is the external corpus canary gate. It provisions the
 modern `.venv-da110` lane (`sync:da110`), validates that interpreter and the
 external [docassemble-yaml](https://github.com/jpagh/docassemble-yaml) fixture
