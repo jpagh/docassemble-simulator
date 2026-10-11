@@ -34,6 +34,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from docassemble_simulator._serialization import install_serialization_guard
+from docassemble_simulator._timeouts import OperationTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -1464,7 +1465,9 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
                 "worker-only behavior is not supported by the simulator"
             )
         )
-    except BaseException as error:  # noqa: BLE001 - task must capture authored failures
+    except BaseException as error:
+        if isinstance(error, OperationTimeout):
+            raise
         return SimulatorTask(error=error)
     finally:
         _restore_generic_placeholders(namespace, placeholders)

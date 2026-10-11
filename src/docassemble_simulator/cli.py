@@ -1367,7 +1367,10 @@ def build_parser():
         )
         worker.add_argument(
             "--session-root",
-            help="directory for this worker's saved session (defaults to the project session directory)",
+            help=(
+                "directory for this worker's saved session "
+                "(default: temporary isolated session)"
+            ),
         )
         worker.add_argument(
             "--project-root",

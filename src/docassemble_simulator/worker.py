@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from docassemble_simulator._outcomes import ErrorKind
+from docassemble_simulator._timeouts import OperationTimeout
 from docassemble_simulator.execution import (
     Answer,
     Evaluate,
@@ -36,15 +37,6 @@ from docassemble_simulator.execution import (
 
 class WorkerProtocolError(ValueError):
     """A malformed worker request."""
-
-
-class OperationTimeout(BaseException):
-    """An operation exceeded the worker's configured deadline.
-
-    This deliberately bypasses ordinary ``Exception`` handlers in interview
-    assembly and seeking code.  A deadline must not be converted into an
-    authored flow error or allow a mutation to be committed.
-    """
 
 
 def _jsonable(value: Any):
