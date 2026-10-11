@@ -111,6 +111,31 @@ class TestConfigDiscovery:
         assert configured.report()["config_fingerprint"] == configured.fingerprint
         assert unset.report()["config_fingerprint"] == ""
 
+    def test_config_report_exposes_layers_and_shadowed_values(
+        self, tmp_path, monkeypatch
+    ):
+        package = tmp_path / "package"
+        package.mkdir()
+        (tmp_path / "simulator.toml").write_text('timezone = "UTC"\n', encoding="utf-8")
+        (package / ".config" / "simulator").mkdir(parents=True)
+        local = package / ".config" / "simulator" / "config.toml"
+        local.write_text('timezone = "America/Chicago"\n', encoding="utf-8")
+        monkeypatch.setenv(
+            "DOCASSEMBLE_SIMULATOR_CONFIG", str(tmp_path / "missing-global.toml")
+        )
+
+        resolved = resolve_configuration(package)
+        provenance = resolved.report()["provenance"]["timezone"]
+
+        assert provenance["source"] == str(local)
+        assert provenance["value"] == "America/Chicago"
+        assert provenance["shadowed"][-1] == {
+            "source": str(tmp_path / "simulator.toml"),
+            "value": "UTC",
+        }
+        assert provenance["layers"][-1]["value"] == "America/Chicago"
+        assert resolved.report()["provenance"]["debug"]["source"] == "built-in default"
+
     def test_simulator_settings_and_secret_redaction(self):
         settings = simulator_settings(
             {

@@ -176,7 +176,12 @@ def _execution(args, root):
 
     resolved = getattr(args, "_resolved_configuration", None)
     fingerprint = resolved.fingerprint if resolved is not None else ""
-    return InterviewExecution(root, args.interview, config_fingerprint=fingerprint)
+    return InterviewExecution(
+        root,
+        args.interview,
+        config_fingerprint=fingerprint,
+        config_context=resolved.session_context() if resolved is not None else None,
+    )
 
 
 def _config_report(root, config, args=None):

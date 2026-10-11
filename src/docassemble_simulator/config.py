@@ -227,6 +227,8 @@ class ResolvedConfiguration:
     values: dict[str, Any]
     files: tuple[Path, ...]
     override_path: Path | None = None
+    layers: tuple[tuple[str, dict[str, Any]], ...] = ()
+    command_overrides: dict[str, Any] | None = None
 
     @property
     def effective_path(self) -> Path:
@@ -245,6 +247,38 @@ class ResolvedConfiguration:
     def pass_through(self) -> dict[str, Any]:
         return pass_through_config(self.values)
 
+    def provenance(self) -> dict[str, Any]:
+        history: dict[str, list[dict[str, Any]]] = {}
+        default_layer = {
+            **DOCASSEMBLE_DEFAULTS,
+            "simulator": SIMULATOR_DEFAULTS,
+        }
+        all_layers = (("built-in default", default_layer), *self.layers)
+        for source, values in all_layers:
+            for key, value in values.items():
+                history.setdefault(str(key), []).append(
+                    {"source": source, "value": redact_config(copy.deepcopy(value))}
+                )
+        report = {}
+        for key, entries in history.items():
+            report[key] = {
+                "source": entries[-1]["source"],
+                "value": entries[-1]["value"],
+                "layers": entries,
+                "shadowed": entries[:-1],
+            }
+        return report
+
+    def session_context(self) -> dict[str, Any]:
+        return {
+            "fingerprint": self.fingerprint,
+            "config_files": [str(path) for path in self.files],
+            "config_override": str(self.override_path)
+            if self.override_path is not None
+            else None,
+            "command_overrides": copy.deepcopy(self.command_overrides or {}),
+        }
+
     def report(self) -> dict[str, Any]:
         report = {
             "files": [str(path) for path in self.files],
@@ -252,6 +286,7 @@ class ResolvedConfiguration:
             "config_fingerprint": self.fingerprint,
             "simulator": redact_config(self.simulator),
             "pass_through_keys": sorted(self.pass_through),
+            "provenance": self.provenance(),
             "defaults": {
                 "docassemble": DOCASSEMBLE_DEFAULTS,
                 "simulator": SIMULATOR_DEFAULTS,
@@ -283,16 +318,42 @@ def resolve_configuration(
 ) -> ResolvedConfiguration:
     """Resolve every source and command policy through one configuration owner."""
     root = Path(package_root).resolve()
-    values = copy.deepcopy(load_config(root) if base is None else base)
     selected_override = None
+    layers: list[tuple[str, dict[str, Any]]] = []
+    if base is None:
+        global_file = global_config_path().expanduser()
+        source_paths = [
+            *([global_file.resolve()] if global_file.is_file() else []),
+            *reversed(discover_config_files(root, global_path=global_file)),
+        ]
+        values: dict[str, Any] = {}
+        for path in source_paths:
+            loaded = _read_toml(path)
+            deep_merge(values, loaded)
+            layers.append((str(path), loaded))
+    else:
+        values = copy.deepcopy(base)
+        global_file = global_config_path().expanduser()
+        source_paths = [
+            *([global_file.resolve()] if global_file.is_file() else []),
+            *reversed(discover_config_files(root, global_path=global_file)),
+        ]
+        if source_paths:
+            for path in source_paths:
+                layers.append((str(path), _read_toml(path)))
+        else:
+            layers.append(("base", copy.deepcopy(normalize_config(base))))
     if override_path is not None:
         selected_override = Path(override_path).expanduser().resolve()
-        deep_merge(values, _read_override(selected_override))
+        override_values = _read_override(selected_override)
+        deep_merge(values, override_values)
+        layers.append((f"--config {selected_override}", override_values))
     if command_overrides:
         simulator = values.setdefault("simulator", {})
         if not isinstance(simulator, dict):
             raise TypeError("simulator config must be a table")
         deep_merge(simulator, command_overrides)
+        layers.append(("command-line overrides", {"simulator": command_overrides}))
     global_file = global_config_path().expanduser()
     files = [
         *reversed(discover_config_files(root, global_path=global_file)),
@@ -302,7 +363,12 @@ def resolve_configuration(
     if selected_override is not None:
         files.append(selected_override)
     return ResolvedConfiguration(
-        root, normalize_config(values), tuple(files), selected_override
+        root,
+        normalize_config(values),
+        tuple(files),
+        selected_override,
+        tuple(layers),
+        copy.deepcopy(command_overrides or {}),
     )
 
 

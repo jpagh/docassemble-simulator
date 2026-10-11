@@ -158,12 +158,26 @@ def test_missing_session_names_the_other_configuration(tmp_path):
     from docassemble_simulator.execution import ExecutionFailure
 
     identity = "docassemble.pkg:data/questions/main.yml"
-    StateStore(tmp_path, identity, "abc123").save({}, {"kind": "executed"})
+    StateStore(
+        tmp_path,
+        identity,
+        "abc123",
+        {
+            "fingerprint": "abc123",
+            "config_files": [str(tmp_path / "config.toml")],
+            "config_override": str(tmp_path / "override.yml"),
+        },
+    ).save({}, {"kind": "executed"})
 
     with pytest.raises(ExecutionFailure) as caught:
         StateStore(tmp_path, identity, "def456").load()
 
-    assert "different effective configuration" in str(caught.value)
+    message = str(caught.value)
+    assert "different effective configuration" in message
+    assert "abc123" in message
+    assert "override.yml" in message
+    assert "resume with:" in message
+    assert "status" in message
     assert caught.value.kind.value == "state"
 
     with pytest.raises(ExecutionFailure) as missing:

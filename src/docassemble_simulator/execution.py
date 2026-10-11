@@ -9,6 +9,7 @@ import json
 import logging
 import pickle
 import re
+import shlex
 import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -162,6 +163,45 @@ class ExecutionFailure(Exception):
         self.details = details
 
 
+def _configuration_mismatch_message(
+    root: Path, identity: str, context: dict[str, Any]
+) -> str:
+    fingerprint = context.get("fingerprint") or "unknown"
+    files = context.get("config_files") or []
+    override = context.get("config_override")
+    command_overrides = context.get("command_overrides") or {}
+    command = [
+        "docassemble-simulator",
+        "--root",
+        str(root),
+        "--interview",
+        identity,
+    ]
+    if override:
+        command.extend(("--config", str(override)))
+    if command_overrides.get("offline"):
+        command.append("--offline")
+    if command_overrides.get("background_actions"):
+        command.extend(
+            ("--background-actions", str(command_overrides["background_actions"]))
+        )
+    if command_overrides.get("seek_diagnostics"):
+        command.extend(
+            ("--seek-diagnostics", str(command_overrides["seek_diagnostics"]))
+        )
+    command.append("status")
+    source = [f"stored configuration fingerprint: {fingerprint}"]
+    if files:
+        source.append("stored config files: " + ", ".join(map(str, files)))
+    if override:
+        source.append(f"stored --config override: {override}")
+    source.append("resume with: " + shlex.join(command))
+    return (
+        "a saved session exists under a different effective configuration; "
+        + "; ".join(source)
+    )
+
+
 @dataclass(frozen=True)
 class _PayloadPolicy:
     unreadable: str
@@ -237,9 +277,17 @@ class StateStore:
     another config produced.
     """
 
-    def __init__(self, root: Path, identity: str, config_fingerprint: str = ""):
+    def __init__(
+        self,
+        root: Path,
+        identity: str,
+        config_fingerprint: str = "",
+        config_context: dict[str, Any] | None = None,
+    ):
+        self.root = root
         self.identity = identity
         self.config_fingerprint = config_fingerprint
+        self.config_context = config_context or {"fingerprint": config_fingerprint}
         # An unset fingerprint reproduces the original interview-only path so
         # zero-config workspaces keep their existing saved sessions.
         if config_fingerprint:
@@ -260,7 +308,7 @@ class StateStore:
         with flock(self.lock_path):
             yield
 
-    def _other_configuration(self) -> Path | None:
+    def _other_configuration(self) -> tuple[Path, dict[str, Any]] | None:
         """Return a same-interview session stored under another fingerprint."""
         for candidate in sorted(self.directory.glob(f"{self.slug}-*.pkl")):
             if candidate == self.path:
@@ -276,17 +324,24 @@ class StateStore:
                 logger.debug("ignoring session file %r: %s", candidate, error)
                 continue
             if (payload.get("config_fingerprint") or "") != self.config_fingerprint:
-                return candidate
+                return candidate, payload.get("config_context") or {
+                    "fingerprint": payload.get("config_fingerprint") or ""
+                }
         return None
 
     def load(self, *, namespace: bool = True) -> dict[str, Any]:
         if not self.path.exists():
-            if self._other_configuration() is not None:
+            other = self._other_configuration()
+            if other is not None:
+                _path, context = other
                 raise ExecutionFailure(
                     ErrorKind.STATE,
-                    "a saved session for this interview exists under a "
-                    "different effective configuration; run `start` to begin "
-                    "one for this configuration",
+                    _configuration_mismatch_message(
+                        self.root,
+                        self.identity,
+                        context,
+                    ),
+                    {"stored_configuration": context},
                 )
             raise ExecutionFailure(
                 ErrorKind.STATE, "no saved session; run `start` first"
@@ -299,10 +354,13 @@ class StateStore:
         )
         stored = payload.get("config_fingerprint") or ""
         if stored != self.config_fingerprint:
+            context = payload.get("config_context") or {
+                "fingerprint": stored,
+            }
             raise ExecutionFailure(
                 ErrorKind.STATE,
-                "saved state was produced under a different effective "
-                "configuration; run `start` again",
+                _configuration_mismatch_message(self.root, self.identity, context),
+                {"stored_configuration": context},
             )
         return payload
 
@@ -316,6 +374,7 @@ class StateStore:
             "schema": STATE_SCHEMA,
             "interview": self.identity,
             "config_fingerprint": self.config_fingerprint,
+            "config_context": self.config_context,
             "namespace": pickle.dumps(_picklable_view(namespace)),
             "outcome": _jsonable(outcome),
             "active_seek": active_seek,
@@ -349,11 +408,17 @@ class InterviewExecution:
         selector: str | None = None,
         *,
         config_fingerprint: str = "",
+        config_context: dict[str, Any] | None = None,
     ):
         self.root = Path(root).resolve()
         self._catalog = InterviewCatalog(self.root, selector)
         self._identity = self._catalog.identity
-        self._store = StateStore(self.root, self._identity, config_fingerprint)
+        self._store = StateStore(
+            self.root,
+            self._identity,
+            config_fingerprint,
+            config_context,
+        )
 
     @_activate_runtime
     def run(self, operation: Operation) -> ExecutionOutcome:

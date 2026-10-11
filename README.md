@@ -133,12 +133,15 @@ configuration is fingerprinted over its resolved values, so two runs share a
 session exactly when their discovered files, `--config` overrides, and
 command-line policy flags resolve to the same content; changing any of them
 starts a separate session instead of silently rehydrating the old one.
-`config --json` reports this as `config_fingerprint`. Loading state saved under
-a different configuration fails with a message saying so, and the previous
-session stays on disk for the configuration that produced it. Files are
-trusted-local pickle payloads. Unsupported or stale state fails with an
-instruction to run `start` again. Mutations hold a per-interview advisory lock
-and commit with atomic replacement.
+`config --json` reports this as `config_fingerprint` and, for every effective
+top-level key, the contributing file/override layers and shadowed values.
+Loading state saved under a different configuration reports the stored
+fingerprint, config files/override, and an exact resume command; the previous
+session stays on disk for the configuration that produced it. This diagnostic
+is shared by `status`, `vars`, `answer`, and `seek`. Files are trusted-local
+pickle payloads. Unsupported or stale state fails with an instruction to run
+`start` again. Mutations hold a per-interview advisory lock and commit with
+atomic replacement.
 
 ## Screen traces
 
