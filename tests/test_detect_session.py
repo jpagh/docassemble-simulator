@@ -750,6 +750,194 @@ def test_unresolved_variable_names_terminal_culprit_and_expression(
     assert outcome.diagnostics[0].details["culprit"] == culprit
 
 
+def test_terminal_seek_uses_the_block_that_referenced_the_missing_variable(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+
+    def question(identifier, source_code):
+        return SimpleNamespace(
+            name=f"Question_{identifier}",
+            id=identifier,
+            question_type="fields",
+            line_number=2,
+            from_source=SimpleNamespace(
+                path="docassemble.pkg:data/questions/main.yml",
+                filepath=str(tmp_path / f"{identifier}.yml"),
+            ),
+            source_code=source_code,
+            data_for_debug={"question": identifier},
+            fields=[],
+        )
+
+    stale = question("stale-screen", "---\nquestion: Old screen\n")
+    source = question(
+        "choices-source",
+        "---\nquestion: Pick\nfields:\n"
+        "  - Pick: choice\n    choices: missing_choices\n",
+    )
+    (tmp_path / "choices-source.yml").write_text(source.source_code)
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            # The runtime has not populated a new screen when a choices
+            # expression exhausts seeking; this is the previous screen.
+            interview_status.question = stale
+            interview_status.seeking = [
+                {"question": stale, "reason": "asking"},
+                {"question": source, "reason": "mandatory question"},
+                {"variable": "missing_choices"},
+            ]
+            error = DAErrorMissingVariable("missing_choices")
+            error.interview_status = interview_status
+            error.interview = self
+            raise error
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.kind == "unresolved-variable"
+    culprit = outcome.error.details["culprit"]
+    assert culprit["provenance"]["id"] == "choices-source"
+    assert culprit["sought_variable"] == "missing_choices"
+    assert "missing_choices" in culprit["expression"]
+    assert outcome.diagnostics[-1].details["culprit"] == culprit
+
+
+def test_nested_terminal_seek_uses_the_last_referencing_block(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+
+    def question(identifier, source_code):
+        return SimpleNamespace(
+            name=f"Question_{identifier}",
+            id=identifier,
+            question_type="code",
+            line_number=2,
+            from_source=SimpleNamespace(
+                path="docassemble.pkg:data/questions/main.yml",
+                filepath=str(tmp_path / f"{identifier}.yml"),
+            ),
+            source_code=source_code,
+            data_for_debug={"question": identifier},
+            fields=[],
+        )
+
+    stale = question("stale-screen", "---\nquestion: Old screen\n")
+    first = question(
+        "first-reference",
+        "---\ncode: |\n  first = missing_first\n",
+    )
+    terminal = question(
+        "terminal-reference",
+        "---\ncode: |\n  allowed = known\n  result = missing_terminal\n",
+    )
+    for item in (first, terminal):
+        (tmp_path / f"{item.id}.yml").write_text(item.source_code)
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.question = stale
+            interview_status.seeking = [
+                {"question": stale, "reason": "asking"},
+                {"question": first, "reason": "considering"},
+                {"variable": "missing_first"},
+                {"question": terminal, "reason": "running"},
+                {"variable": "missing_terminal"},
+            ]
+            error = DAErrorMissingVariable("missing_terminal")
+            error.interview_status = interview_status
+            raise error
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    culprit = outcome.error.details["culprit"]
+    assert culprit["provenance"]["id"] == "terminal-reference"
+    assert culprit["expression"] == "result = missing_terminal"
+    assert all(
+        entry.details.get("culprit", {}).get("provenance", {}).get("id")
+        == "terminal-reference"
+        for entry in outcome.diagnostics
+        if "culprit" in entry.details
+    )
+
+
+def test_tolerated_seek_is_not_reused_for_a_later_terminal_failure(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+
+    tolerated = SimpleNamespace(
+        name="review_item",
+        id="review-item",
+        question_type="review",
+        source_code="---\nquestion: Review\n",
+        data_for_debug={},
+        fields=[],
+    )
+    terminal = SimpleNamespace(
+        name="choices_question",
+        id="actual-terminal",
+        question_type="fields",
+        source_code="---\nfields:\n  - Pick: choice\n    choices: missing_terminal\n",
+        data_for_debug={},
+        fields=[],
+    )
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.question = tolerated
+            interview_status.seeking = [
+                {"question": tolerated, "reason": "review item"},
+                {"variable": "review_item", "reason": "skipped review item"},
+                {"question": terminal, "reason": "mandatory question"},
+                {"variable": "missing_terminal"},
+            ]
+            error = DAErrorMissingVariable("missing_terminal")
+            error.interview_status = interview_status
+            raise error
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+
+    outcome = execution.run(Start())
+
+    culprit = outcome.error.details["culprit"]
+    assert culprit["provenance"]["id"] == "actual-terminal"
+    assert culprit["sought_variable"] == "missing_terminal"
+    assert all(
+        item.details.get("culprit", {}).get("provenance", {}).get("id") != "review-item"
+        for item in outcome.diagnostics
+        if "culprit" in item.details
+    )
+
+
 def test_tolerated_lazy_reference_does_not_name_a_culprit(
     tmp_path, monkeypatch, da_stubs
 ):

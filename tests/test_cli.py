@@ -223,6 +223,50 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
     }
 
 
+def test_unresolved_culprit_matches_json_and_human_failure_output(
+    monkeypatch, tmp_path, capsys
+):
+    culprit = {
+        "provenance": {"id": "choices-source", "location": "main.yml:4"},
+        "expression": "missing_choices",
+        "sought_variable": "missing_choices",
+    }
+    outcome = SimpleNamespace(
+        ok=False,
+        result=None,
+        error=Failure(
+            ErrorKind.UNRESOLVED_VARIABLE,
+            "could not define missing_choices",
+            {"sought_variable": "missing_choices", "culprit": culprit},
+        ),
+        diagnostics=(
+            Diagnostic(
+                "variable-seek",
+                "seeking missing_choices",
+                {"variable": "missing_choices", "culprit": culprit},
+            ),
+        ),
+        attachments=(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_execution",
+        lambda args, root: SimpleNamespace(run=lambda operation: outcome),
+    )
+
+    json_args = cli.build_parser().parse_args(["start", "--json"])
+    assert cli.cmd_execution(json_args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["kind"] == "unresolved-variable"
+    assert payload["error"]["details"]["culprit"] == culprit
+
+    human_args = cli.build_parser().parse_args(["start"])
+    assert cli.cmd_execution(human_args, tmp_path) == 2
+    human = capsys.readouterr().err
+    assert "choices-source" in human
+    assert "missing_choices" in human
+
+
 def test_why_uses_the_read_only_execution_seam(monkeypatch, tmp_path, capsys):
     from docassemble_simulator.execution import ExplainResolution
 

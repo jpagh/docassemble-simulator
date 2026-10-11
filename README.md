@@ -40,8 +40,12 @@ and docassemble objects behave normally; the operation never saves the prepared
 state. Without a saved session it reports guard text without fabricating guard
 values. It marks the runtime winner when it can and reports resolution
 conflicts; `--strict` makes a conflict non-zero. A terminal unresolved-variable
-error includes the responsible block provenance and expression; tolerated lazy
-references remain diagnostics without a culprit.
+error includes the responsible block provenance, the expression that ultimately
+referenced the sought variable, and that variable; attribution comes from the
+ordered runtime seek history rather than a stale previously displayed screen.
+Tolerated lazy references remain diagnostics without a culprit. With seek
+capture disabled, the simulator does not fabricate attribution when the target
+runtime does not retain the ordered history.
 
 The simulator must run in the same environment as the target package; a global
 installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the

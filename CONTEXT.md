@@ -17,7 +17,7 @@
 - **Runtime compatibility lane**: One of the two provisioned target interpreters (`da19` for docassemble 1.9.x, `da110` for 1.10.x) whose dependency group pins a tested docassemble/AssemblyLine pair; it is a test fixture the real-runtime lane exercises, never a dependency of the published package, and it keeps upstream's exact transitive pins even where those pins carry known advisories.
 - **Runtime compatibility probe**: A non-mutating compile of the standard AssemblyLine birthdate field metadata through the real docassemble compiler, run before the target Interview when AssemblyLine is installed.
 - **AssemblyLine compatibility failure**: The typed result (`runtime-compatibility`) when the installed docassemble/AssemblyLine pair cannot compile the probe; it names the runtime family, package versions, failing capability, and recovery direction, and never creates session state.
-- **Unresolved-variable failure**: The terminal result when docassemble exhausts variable seeking without finding a question or code block capable of defining the sought variable.
+- **Unresolved-variable failure**: The terminal result when docassemble exhausts variable seeking without finding a question or code block capable of defining the sought variable; when ordered seek history is available, it names the last block and expression that referenced that variable rather than reusing a stale screen.
 - **Render source**: Exactly one namespace origin for rendering: saved session, fresh state, snapshot, or fixture.
 - **Snapshot**: A versioned, interview-specific namespace capture used as an explicit render source; it is not a saved session.
 - **Artifact**: A successfully rendered DOCX written to an explicit target path.
