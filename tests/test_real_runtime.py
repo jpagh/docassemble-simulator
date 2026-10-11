@@ -2044,6 +2044,7 @@ def test_worker_protocol_keeps_real_interview_output_separate(family_python, tmp
         capture_output=True,
         text=True,
         check=False,
+        env=_environment(),
         timeout=120,
     )
 
