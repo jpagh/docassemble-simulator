@@ -321,6 +321,24 @@ def cmd_config(args, root):
 
 def cmd_catalog(args, root):
     from docassemble_simulator.catalog import CatalogFailure, InterviewCatalog
+    from docassemble_simulator.execution import ExecutionFailure
+
+    namespace = None
+    if args.command == "why":
+        try:
+            namespace = _execution(args, root)._store.load()["namespace"]
+        except ExecutionFailure as error:
+            if error.kind != ErrorKind.STATE or "no saved session" not in str(error):
+                _emit(
+                    _envelope(
+                        args.command,
+                        error=Failure(error.kind, str(error), error.details or {}),
+                    ),
+                    args.json,
+                )
+                return _exit_for_error(error.kind)
+
+    catalog = InterviewCatalog(root, args.interview)
 
     catalog = InterviewCatalog(root, args.interview)
     try:
@@ -328,8 +346,10 @@ def cmd_catalog(args, root):
             outcome = catalog.check()
         elif args.command == "questions":
             outcome = catalog.questions(args.var)
-        else:
+        elif args.command == "index":
             outcome = catalog.index(args.var)
+        else:
+            outcome = catalog.why(args.variable, namespace)
     except AssemblyLineCompatibilityError as error:
         _emit(
             _envelope(
@@ -353,15 +373,26 @@ def cmd_catalog(args, root):
     result = outcome.result | (
         {"interview": outcome.interview} if outcome.interview else {}
     )
-    ok = not (args.command == "check" and result["failures"])
+    ok = not (
+        (args.command == "check" and result["failures"])
+        or (args.command == "why" and args.strict and result["conflict"])
+    )
     payload = (
         _envelope(args.command, result)
         if ok
         else _envelope(
             args.command,
             error={
-                "kind": ErrorKind.COMPILE,
-                "message": "one or more interviews failed to compile",
+                "kind": (
+                    "resolution-conflict"
+                    if args.command == "why"
+                    else ErrorKind.COMPILE
+                ),
+                "message": (
+                    "variable resolution conflict found"
+                    if args.command == "why"
+                    else "one or more interviews failed to compile"
+                ),
                 "details": result,
             },
         )
@@ -809,6 +840,22 @@ def build_parser():
         item = add(name, help=f"inspect interview {name}")
         item.add_argument("--var")
         item.set_defaults(func=cmd_catalog)
+    why = add(
+        "why",
+        help="explain which blocks can resolve a variable",
+        description=(
+            "List variable-resolution candidates in last-loaded-first order, "
+            "with provenance and guard text. A saved session also evaluates "
+            "which guards are live."
+        ),
+    )
+    why.add_argument("variable")
+    why.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero when the candidate set has a resolution conflict",
+    )
+    why.set_defaults(func=cmd_catalog)
 
     recording_epilog = (
         "Example:\n"

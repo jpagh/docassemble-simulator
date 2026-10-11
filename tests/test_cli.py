@@ -92,12 +92,14 @@ def test_command_contract_uses_new_names_and_flags():
     execute = parser.parse_args(["exec", "M.value = 1", "--no-assemble"])
     seek = parser.parse_args(["seek", "M.value", "--fresh", "--activate", "--auto"])
     defaults = parser.parse_args(["answer", "--defaults"])
+    why = parser.parse_args(["why", "M.value", "--strict"])
 
     assert answer.func is cli.cmd_execution
     assert evaluate.command == "eval"
     assert execute.no_assemble is True
     assert seek.fresh and seek.activate and seek.auto
     assert defaults.defaults and defaults.assignments == []
+    assert why.variable == "M.value" and why.strict
     for obsolete in (["set", "x=1"], ["get", "x"]):
         try:
             parser.parse_args(obsolete)
@@ -209,9 +211,7 @@ def test_explicit_full_diagnostics_keeps_ordered_events(monkeypatch, tmp_path, c
         "_execution",
         lambda args, root: SimpleNamespace(run=lambda operation: outcome),
     )
-    args = cli.build_parser().parse_args(
-        ["start", "--json", "--full-seek-diagnostics"]
-    )
+    args = cli.build_parser().parse_args(["start", "--json", "--full-seek-diagnostics"])
 
     assert cli.cmd_execution(args, tmp_path) == 0
     payload = json.loads(capsys.readouterr().out)

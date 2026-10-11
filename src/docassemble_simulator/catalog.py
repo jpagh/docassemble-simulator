@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 import sys
@@ -171,6 +172,38 @@ def _source_details(question) -> tuple[str, int | None]:
     return str(source_file or "unknown"), line
 
 
+def _guards_are_provably_disjoint(left: list[str], right: list[str]) -> bool:
+    def signature(expression: str):
+        try:
+            node = ast.parse(expression, mode="eval").body
+        except (SyntaxError, ValueError):
+            return None
+        if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+            return None
+        if not isinstance(node.ops[0], (ast.Eq, ast.Is)):
+            return None
+        if not isinstance(node.left, (ast.Name, ast.Attribute)):
+            return None
+        if len(node.comparators) != 1 or not isinstance(
+            node.comparators[0], ast.Constant
+        ):
+            return None
+        return ast.unparse(node.left), node.comparators[0].value
+
+    left_signatures = [signature(item) for item in left]
+    right_signatures = [signature(item) for item in right]
+    if not left_signatures or not right_signatures:
+        return False
+    return all(
+        left_signature is not None
+        and right_signature is not None
+        and left_signature[0] == right_signature[0]
+        and left_signature[1] != right_signature[1]
+        for left_signature in left_signatures
+        for right_signature in right_signatures
+    )
+
+
 def _provenance(question) -> dict[str, Any]:
     source_file, line = _source_details(question)
     debug = getattr(question, "data_for_debug", None)
@@ -335,6 +368,104 @@ class InterviewCatalog:
                     )
             mapping[variable] = screens or None
         return CatalogOutcome(self.identity, {"index": mapping})
+
+    def why(self, variable: str, namespace: dict[str, Any] | None = None):
+        """Explain variable resolution in the runtime's last-loaded-first order."""
+        interview = self._compile_for_inspection()
+        entry = (getattr(interview, "questions", {}) or {}).get(variable) or {}
+        questions = []
+        for language in ("en", "*"):
+            for question in reversed(entry.get(language) or []):
+                if not any(question is existing for existing, _language in questions):
+                    questions.append((question, language))
+        # Runtime releases sometimes expose only one language key. Preserve
+        # that data after the preferred keys above without changing ordering.
+        for language, values in entry.items():
+            if language in {"en", "*"}:
+                continue
+            for question in reversed(values or []):
+                if not any(question is existing for existing, _language in questions):
+                    questions.append((question, language))
+
+        candidates = []
+        for order, (question, language) in enumerate(questions, start=1):
+            provenance = _provenance(question)
+            guards = provenance["guards"]
+            live = None
+            evaluation_error = None
+            if namespace is not None:
+                if not guards:
+                    live = True
+                else:
+                    try:
+                        live = all(bool(eval(guard, namespace)) for guard in guards)
+                    except Exception as error:  # noqa: BLE001 - guard code varies by runtime
+                        live = None
+                        evaluation_error = f"{type(error).__name__}: {error}"
+            candidate = {
+                "order": order,
+                "language": language,
+                "winner": False,
+                "live": live,
+                "provenance": provenance,
+                **provenance,
+            }
+            if evaluation_error:
+                candidate["guard_error"] = evaluation_error
+            candidates.append(candidate)
+
+        live_indexes = [
+            index
+            for index, candidate in enumerate(candidates)
+            if candidate["live"] is True
+        ]
+        winner_index = (
+            live_indexes[0]
+            if namespace is not None and live_indexes
+            else (0 if namespace is None and candidates else None)
+        )
+        if winner_index is not None:
+            candidates[winner_index]["winner"] = True
+
+        statically_disjoint = all(
+            _guards_are_provably_disjoint(
+                candidates[left]["guards"], candidates[right]["guards"]
+            )
+            for left in range(len(candidates))
+            for right in range(left + 1, len(candidates))
+        )
+        unguarded_duplicate = len(candidates) > 1 and any(
+            not candidate["guards"] for candidate in candidates
+        )
+        conflict = False
+        if len(candidates) > 1:
+            if namespace is None:
+                conflict = not statically_disjoint
+            else:
+                conflict = len(live_indexes) > 1 or unguarded_duplicate
+        winner = candidates[winner_index] if winner_index is not None else None
+        return CatalogOutcome(
+            self.identity,
+            {
+                "variable": variable,
+                "order": "last-loaded-first",
+                "session_state": "saved" if namespace is not None else "not saved",
+                "candidates": candidates,
+                "winner": winner,
+                "conflict": conflict,
+                "conflict_details": (
+                    {
+                        "kind": "resolution-conflict",
+                        "variable": variable,
+                        "candidates": [
+                            candidate["provenance"] for candidate in candidates
+                        ],
+                    }
+                    if conflict
+                    else None
+                ),
+            },
+        )
 
     def _compile_for_inspection(self):
         try:

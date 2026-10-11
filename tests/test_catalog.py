@@ -86,13 +86,51 @@ def test_questions_and_index_expose_guarded_block_provenance(tmp_path, monkeypat
     assert all(entry["source_file"] for entry in indexed)
 
 
+def test_why_uses_last_loaded_order_and_reports_guard_conflicts(tmp_path, monkeypatch):
+    package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    package.mkdir(parents=True)
+    (package.parent.parent / "__init__.py").write_text("")
+    first = _question(
+        tmp_path,
+        line=1,
+        variable="shared",
+        guard="user.kind == 'a'",
+        explicit_id="first",
+    )
+    second = _question(
+        tmp_path,
+        line=8,
+        variable="shared",
+        guard="user.kind == 'b'",
+        explicit_id="second",
+    )
+    interview = SimpleNamespace(
+        questions={"shared": {"*": [first, second]}},
+        questions_list=[first, second],
+    )
+    catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    monkeypatch.setattr(catalog, "_compile_for_inspection", lambda: interview)
+
+    report = catalog.why("shared").result
+
+    assert [item["id"] for item in report["candidates"]] == ["second", "first"]
+    assert report["candidates"][0]["winner"] is True
+    assert report["candidates"][0]["guards"] == ["user.kind == 'b'"]
+    assert report["conflict"] is False
+
+    unguarded = _question(tmp_path, line=15, variable="shared")
+    interview.questions["shared"]["*"] = [first, unguarded]
+    report = catalog.why("shared", {"user": SimpleNamespace(kind="a")}).result
+    assert report["conflict"] is True
+    assert report["conflict_details"]["kind"] == "resolution-conflict"
+    assert report["candidates"][0]["live"] is True
+
+
 def test_check_reports_complete_totals(tmp_path, monkeypatch):
     package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     package.mkdir(parents=True)
     (package.parent.parent / "__init__.py").write_text("")
-    catalog = InterviewCatalog(
-        tmp_path, "docassemble.pkg:data/questions/main.yml"
-    )
+    catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
     monkeypatch.setattr(
         catalog,
         "_compile",

@@ -32,6 +32,11 @@ non-uv project, install it into the target package interpreter:
 Pin a release tag when reproducibility matters, for example
 `git+https://github.com/jpagh/docassemble-simulator@v26.9.0`.
 
+`why VARIABLE` lists variable-resolution candidates in last-loaded-first
+order, including catalog provenance and authored guards. With a saved session it
+marks guards live/inactive and reports resolution conflicts; `--strict` makes a
+conflict non-zero.
+
 The simulator must run in the same environment as the target package; a global
 installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
 missing fixed package names with `uv pip` (or the interpreter's `pip`) without
@@ -66,6 +71,7 @@ docassemble-simulator info
 docassemble-simulator check
 docassemble-simulator questions
 docassemble-simulator index --var M.family
+docassemble-simulator why M.family --strict
 
 docassemble-simulator start
 docassemble-simulator answer M.name=Alice
