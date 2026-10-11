@@ -129,6 +129,68 @@ def test_why_uses_last_loaded_order_and_reports_guard_conflicts(tmp_path, monkey
     assert report["candidates"][0]["live"] is True
 
 
+def test_why_keeps_unknown_guards_conservative_without_overstating_winners(
+    tmp_path, monkeypatch
+):
+    package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    package.mkdir(parents=True)
+    (package.parent.parent / "__init__.py").write_text("")
+    catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    interview = SimpleNamespace(questions={"shared": {"*": []}}, questions_list=[])
+    monkeypatch.setattr(catalog, "_compile_for_inspection", lambda: interview)
+    namespace = {"user": SimpleNamespace(kind="a")}
+
+    def explain(guards):
+        candidates = [
+            _question(
+                tmp_path,
+                line=index,
+                variable="shared",
+                guard=guard,
+                explicit_id=f"candidate-{index}",
+            )
+            for index, guard in enumerate(guards, start=1)
+        ]
+        interview.questions["shared"]["*"] = candidates
+        return catalog.why("shared", namespace).result
+
+    unknown_unknown = explain(["missing == 'a'", "missing == 'a'"])
+    assert unknown_unknown["conflict"] is True
+    assert unknown_unknown["winner"] is None
+    assert [candidate["state"] for candidate in unknown_unknown["candidates"]] == [
+        "unknown",
+        "unknown",
+    ]
+    assert all(
+        "NameError" in candidate["guard_error"]
+        for candidate in unknown_unknown["candidates"]
+    )
+
+    live_unknown = explain(["user.kind == 'a'", "missing == 'a'"])
+    assert live_unknown["conflict"] is True
+    assert live_unknown["winner"] is None
+    assert [candidate["state"] for candidate in live_unknown["candidates"]] == [
+        "unknown",
+        "live",
+    ]
+
+    false_unknown = explain(["user.kind == 'never'", "missing == 'a'"])
+    assert false_unknown["conflict"] is False
+    assert false_unknown["winner"] is None
+    assert {candidate["state"] for candidate in false_unknown["candidates"]} == {
+        "inactive",
+        "unknown",
+    }
+
+    unguarded_duplicates = explain([None, None])
+    assert unguarded_duplicates["conflict"] is True
+    assert unguarded_duplicates["winner"]["state"] == "live"
+
+    provably_disjoint = explain(["missing == 'a'", "missing == 'b'"])
+    assert provably_disjoint["conflict"] is False
+    assert provably_disjoint["winner"] is None
+
+
 def test_check_reports_duplicate_ids_and_separates_overrides(tmp_path, monkeypatch):
     package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     package.mkdir(parents=True)

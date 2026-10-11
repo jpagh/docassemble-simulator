@@ -205,6 +205,18 @@ def _guards_are_provably_disjoint(left: list[str], right: list[str]) -> bool:
     )
 
 
+def _candidates_can_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Return whether two evaluated candidates could resolve together.
+
+    A definitely inactive guard cannot overlap anything.  An unknown guard is
+    deliberately not treated as inactive; only authored guard expressions we
+    can prove disjoint are excluded from the conservative conflict policy.
+    """
+    if left["live"] is False or right["live"] is False:
+        return False
+    return not _guards_are_provably_disjoint(left["guards"], right["guards"])
+
+
 def _explicit_id(question) -> str | None:
     explicit_id = getattr(question, "id", None)
     debug = getattr(question, "data_for_debug", None)
@@ -564,6 +576,10 @@ class InterviewCatalog:
                 "provenance": provenance,
                 **provenance,
             }
+            if namespace is not None:
+                candidate["state"] = (
+                    "unknown" if live is None else ("live" if live else "inactive")
+                )
             if evaluation_error:
                 candidate["guard_error"] = evaluation_error
             candidates.append(candidate)
@@ -573,14 +589,6 @@ class InterviewCatalog:
             for index, candidate in enumerate(candidates)
             if candidate["live"] is True
         ]
-        winner_index = (
-            live_indexes[0]
-            if namespace is not None and live_indexes
-            else (0 if namespace is None and candidates else None)
-        )
-        if winner_index is not None:
-            candidates[winner_index]["winner"] = True
-
         statically_disjoint = all(
             _guards_are_provably_disjoint(
                 candidates[left]["guards"], candidates[right]["guards"]
@@ -588,15 +596,31 @@ class InterviewCatalog:
             for left in range(len(candidates))
             for right in range(left + 1, len(candidates))
         )
-        unguarded_duplicate = len(candidates) > 1 and any(
-            not candidate["guards"] for candidate in candidates
-        )
-        conflict = False
-        if len(candidates) > 1:
-            if namespace is None:
-                conflict = not statically_disjoint
-            else:
-                conflict = len(live_indexes) > 1 or unguarded_duplicate
+        unknown_overlap = False
+        if namespace is None:
+            conflict = len(candidates) > 1 and not statically_disjoint
+            winner_index = 0 if candidates else None
+        else:
+            conflict = False
+            for left in range(len(candidates)):
+                for right in range(left + 1, len(candidates)):
+                    if not _candidates_can_overlap(candidates[left], candidates[right]):
+                        continue
+                    conflict = True
+                    unknown_overlap |= (
+                        candidates[left]["live"] is None
+                        or candidates[right]["live"] is None
+                    )
+            # A live candidate is a winner only when its guard state is known
+            # enough to exclude an overlapping unknown candidate.  Keep the
+            # established first-live winner for known live/live conflicts, but
+            # never claim a winner that an evaluation error could displace.
+            winner_index = (
+                live_indexes[0] if live_indexes and not unknown_overlap else None
+            )
+        if winner_index is not None:
+            candidates[winner_index]["winner"] = True
+
         winner = candidates[winner_index] if winner_index is not None else None
         return CatalogOutcome(
             self.identity,
@@ -612,7 +636,21 @@ class InterviewCatalog:
                         "kind": ErrorKind.RESOLUTION_CONFLICT,
                         "variable": variable,
                         "candidates": [
-                            candidate["provenance"] for candidate in candidates
+                            {
+                                **candidate["provenance"],
+                                "order": candidate["order"],
+                                **(
+                                    {"state": candidate["state"]}
+                                    if "state" in candidate
+                                    else {}
+                                ),
+                                **(
+                                    {"guard_error": candidate["guard_error"]}
+                                    if "guard_error" in candidate
+                                    else {}
+                                ),
+                            }
+                            for candidate in candidates
                         ],
                     }
                     if conflict

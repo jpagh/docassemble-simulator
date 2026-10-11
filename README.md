@@ -39,10 +39,15 @@ guards are evaluated after read-only execution preparation, so rehydrated helper
 and docassemble objects behave normally; the operation never saves the prepared
 state. Without a saved session it reports guard text without fabricating guard
 values. It marks the runtime winner when it can and reports resolution
-conflicts; `--strict` makes a conflict non-zero. A terminal unresolved-variable
-error includes the responsible block provenance, the expression that ultimately
-referenced the sought variable, and that variable; attribution comes from the
-ordered runtime seek history rather than a stale previously displayed screen.
+conflicts; `--strict` makes a conflict non-zero. Saved-state reports label each
+candidate `live`, `inactive`, or `unknown`. Unknown guard errors are handled
+conservatively: overlapping unknown/live candidates conflict without claiming a
+winner, while definitely inactive or provably disjoint candidates do not. The
+original guard error remains in the candidate report for diagnosis. A terminal
+unresolved-variable error includes the responsible block provenance, the
+expression that ultimately referenced the sought variable, and that variable;
+attribution comes from the ordered runtime seek history rather than a stale
+previously displayed screen.
 Expression matching includes the complete attribute, key, or index path; when
 that precision is not retained, the expression is reported as unknown rather
 than inferred from a shared root.

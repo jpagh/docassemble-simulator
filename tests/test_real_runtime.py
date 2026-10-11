@@ -267,6 +267,25 @@ def real_workspace(tmp_path, real_python):
         "fields:\n"
         "  - Value: resolution_value\n"
     )
+    (questions / "resolution-unknown.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Resolution seed\n"
+        "fields:\n"
+        "  - Seed: resolution_seed\n"
+        "---\n"
+        "id: unknown-first\n"
+        "if: missing_resolution_guard == 'one'\n"
+        "question: Unknown first\n"
+        "fields:\n"
+        "  - Value: unresolved_resolution_value\n"
+        "---\n"
+        "id: unknown-second\n"
+        "if: missing_resolution_guard == 'one'\n"
+        "question: Unknown second\n"
+        "fields:\n"
+        "  - Value: unresolved_resolution_value\n"
+    )
     (questions / "background.yml").write_text(
         "---\n"
         "mandatory: True\n"
@@ -905,6 +924,72 @@ def test_resolution_explanation_is_runtime_ordered_and_read_only(
         "resolution_value",
         "--interview",
         "resolution.yml",
+        "--strict",
+        expected_code=2,
+    )
+    assert strict["error"]["kind"] == "resolution-conflict", label
+    assert session.read_bytes() == before, label
+
+
+def test_unknown_resolution_overlap_is_conservative_across_families(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    static = _run(
+        interpreter,
+        root,
+        "why",
+        "unresolved_resolution_value",
+        "--interview",
+        "resolution-unknown.yml",
+    )
+    assert static["ok"], label
+    assert static["result"]["session_state"] == "not saved", label
+
+    started = _run(
+        interpreter,
+        root,
+        "start",
+        "--interview",
+        "resolution-unknown.yml",
+    )
+    assert started["ok"], label
+    assert started["result"]["question_text"] == "Resolution seed", label
+    session = next(
+        path
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+        if "resolution-unknown" in path.name
+    )
+    before = session.read_bytes()
+    prepared = _run(
+        interpreter,
+        root,
+        "why",
+        "unresolved_resolution_value",
+        "--interview",
+        "resolution-unknown.yml",
+    )
+    assert prepared["ok"], label
+    report = prepared["result"]
+    assert report["conflict"] is True, label
+    assert report.get("winner") is None, label
+    assert {candidate["state"] for candidate in report["candidates"]} == {"unknown"}, (
+        label
+    )
+    assert all(
+        "NameError" in candidate["guard_error"] for candidate in report["candidates"]
+    ), label
+    strict = _run(
+        interpreter,
+        root,
+        "why",
+        "unresolved_resolution_value",
+        "--interview",
+        "resolution-unknown.yml",
         "--strict",
         expected_code=2,
     )
