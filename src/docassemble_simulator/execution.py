@@ -678,6 +678,7 @@ class InterviewExecution:
             )
         blank_submissions = _blank_submissions(operation)
         dispositions = []
+        submission_snapshot = _snapshot_namespace(namespace)
         with self._prepared_operation(namespace) as (interview, status):
             errors = _apply_assignments(
                 namespace,
@@ -688,11 +689,24 @@ class InterviewExecution:
                 dispositions=dispositions,
             )
             if errors:
-                details = {"errors": errors, "assignments": dispositions}
-                if any(
-                    item.get("disposition") == "unknown field" for item in dispositions
-                ):
+                try:
+                    details = {"errors": errors, "assignments": dispositions}
+                    # Keep the established active-field and closest-name guidance
+                    # on every early rejection, including parse errors.
                     details.update(_unknown_field_details(screen, dispositions))
+                    details.update(
+                        _early_rejection_required_guidance(
+                            namespace,
+                            screen,
+                            blank_submissions,
+                        )
+                    )
+                finally:
+                    # A rejected submission is not a partial commit. Guidance
+                    # may inspect valid assignments and defaults in this
+                    # operation-local namespace, but it must not leave them in
+                    # Working state or let them reach persistence.
+                    _restore_namespace(namespace, submission_snapshot)
                 raise ExecutionFailure(
                     ErrorKind.ANSWER_INPUT,
                     "one or more answers could not be applied",
@@ -1805,6 +1819,41 @@ def _required_message(variable, reason):
         f"required field '{variable}' is {state} "
         "(the browser would refuse to submit this screen)"
     )
+
+
+def _early_rejection_required_guidance(namespace, screen, blank_submissions):
+    """Assess missing required inputs without running a second submission.
+
+    The assignments already attempted are present in ``namespace`` only for
+    this rejected operation.  Required defaults are applied solely to the
+    same operation-local namespace so a valid default is not reported as
+    missing; validation code and browser blank synthesis are intentionally not
+    run on this early-rejection path.
+    """
+    targets = _screen_field_targets(screen)
+    for field in screen.get("fields") or []:
+        variable = field.get("variable")
+        if (
+            not isinstance(variable, str)
+            or not variable
+            or field.get("visible") is False
+            or field.get("required") is False
+            or str(field.get("type", "")).lower() == "signature"
+            or _rendered_no_object_choices(str(field.get("type", "")).lower(), field)
+            or _field_value(namespace, variable, targets)[0]
+        ):
+            continue
+        default = field.get("default")
+        if not isinstance(default, str) or not default.strip():
+            continue
+        # Use the ordinary field-aware coercion on the operation-local state;
+        # this is default assessment, not a second browser submission.
+        _apply_assignments(namespace, screen, ((variable, default),), False)
+
+    violations = _required_violations(namespace, screen, blank_submissions)
+    return {
+        "missing_required": [variable for variable, _reason in violations],
+    }
 
 
 def _blank_submissions(operation):

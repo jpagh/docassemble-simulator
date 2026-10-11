@@ -6,10 +6,11 @@ import datetime
 import sys
 import types
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
-from docassemble_simulator.execution import Answer, InterviewExecution, Start
+from docassemble_simulator.execution import Answer, Evaluate, InterviewExecution, Start
 
 INTERVIEW = "docassemble.pkg:data/questions/main.yml"
 
@@ -52,6 +53,31 @@ class CheckboxInterview(ScreenInterview):
             choices=(("housing", "Housing"),),
         ),
     )
+
+
+class GuidanceInterview(ScreenInterview):
+    fields = (
+        SimpleNamespace(saveas="name", datatype="text", required=True),
+        SimpleNamespace(
+            saveas="filing_date",
+            datatype="date",
+            required=True,
+            default="2026-01-15",
+        ),
+        SimpleNamespace(saveas="optional_date", datatype="date", required=False),
+        SimpleNamespace(
+            saveas="hidden_value",
+            datatype="text",
+            required=True,
+            showif_code="False",
+        ),
+    )
+
+
+class ValidatingGuidanceInterview(GuidanceInterview):
+    questions_by_name: ClassVar = {
+        "answer-contract": SimpleNamespace(validation_code="validation_marker = True")
+    }
 
 
 @pytest.fixture
@@ -149,3 +175,84 @@ def test_answer_error_payload_preserves_active_field_examples(answer_execution):
     assert details["active_field_details"][0]["example"] == 'topics={"housing":true}'
     assert details["closest_matches"] == {"topic": "topics"}
     assert session_bytes(execution) == before
+
+
+def test_early_rejection_reports_missing_required_fields_without_partial_state(
+    answer_execution,
+):
+    execution, selected = answer_execution
+    selected["interview"] = ValidatingGuidanceInterview
+
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+    rejected = execution.run(
+        Answer(
+            (
+                ("name", "Ada"),
+                ("nmae", "typo"),
+                ("optional_date", "not-a-date"),
+            )
+        )
+    )
+
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    details = rejected.error.details
+    assert [item["disposition"] for item in details["assignments"]] == [
+        "applied",
+        "unknown field",
+        "parse error",
+    ]
+    assert details["missing_required"] == []
+    assert details["active_fields"] == [
+        "name",
+        "filing_date",
+        "optional_date",
+        "hidden_value",
+    ]
+    assert details["closest_matches"] == {"nmae": "name"}
+    assert session_bytes(execution) == before
+    assert not execution.run(Evaluate("name")).ok
+    assert (
+        execution.run(Evaluate("'validation_marker' in globals()")).result["value"]
+        == "False"
+    )
+
+
+def test_explicitly_empty_required_value_is_missing_on_unknown_rejection(
+    answer_execution,
+):
+    execution, selected = answer_execution
+    selected["interview"] = GuidanceInterview
+
+    assert execution.run(Start()).ok
+    rejected = execution.run(Answer((("name", ""), ("nmae", "typo"))))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    assert rejected.error.details["missing_required"] == ["name"]
+    assert rejected.error.details["assignments"][0]["disposition"] == "applied"
+    assert rejected.error.details["assignments"][1]["disposition"] == "unknown field"
+
+
+def test_parse_rejection_reports_missing_required_but_not_defaults_or_hidden_fields(
+    answer_execution,
+):
+    execution, selected = answer_execution
+    selected["interview"] = GuidanceInterview
+
+    assert execution.run(Start()).ok
+    rejected = execution.run(Answer((("optional_date", "not-a-date"),)))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    details = rejected.error.details
+    assert details["missing_required"] == ["name"]
+    assert "filing_date" not in details["missing_required"]
+    assert "hidden_value" not in details["missing_required"]
+    assert details["active_fields"] == [
+        "name",
+        "filing_date",
+        "optional_date",
+        "hidden_value",
+    ]

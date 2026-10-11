@@ -223,6 +223,49 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
     }
 
 
+def test_answer_rejection_guidance_matches_json_and_human_output(
+    monkeypatch, tmp_path, capsys
+):
+    details = {
+        "errors": ["typo: not a field on the active screen"],
+        "assignments": [
+            {"variable": "typo", "input": "value", "disposition": "unknown field"}
+        ],
+        "active_fields": ["name", "filing_date"],
+        "closest_matches": {"typo": "name"},
+        "missing_required": ["name"],
+    }
+    outcome = SimpleNamespace(
+        ok=False,
+        result=None,
+        error=Failure(
+            ErrorKind.ANSWER_INPUT,
+            "one or more answers could not be applied",
+            details,
+        ),
+        diagnostics=(),
+        attachments=(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_execution",
+        lambda args, root: SimpleNamespace(run=lambda operation: outcome),
+    )
+
+    json_args = cli.build_parser().parse_args(["answer", "typo=value", "--json"])
+    assert cli.cmd_execution(json_args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["details"] == details
+
+    human_args = cli.build_parser().parse_args(["answer", "typo=value"])
+    assert cli.cmd_execution(human_args, tmp_path) == 2
+    human = capsys.readouterr().err
+    assert "active_fields" in human
+    assert "closest_matches" in human
+    assert "missing_required" in human
+    assert "name" in human
+
+
 def test_unresolved_culprit_matches_json_and_human_failure_output(
     monkeypatch, tmp_path, capsys
 ):

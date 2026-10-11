@@ -2159,6 +2159,22 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
     assert any(
         "off_screen" in item for item in off_screen["error"]["details"]["errors"]
     ), label
+    assert off_screen["error"]["details"]["missing_required"] == ["required_topics"], (
+        label
+    )
+
+    parse_failure = _run(
+        interpreter,
+        root,
+        "answer",
+        "extra_date=not-a-date",
+        expected_code=2,
+    )
+    assert parse_failure["error"]["kind"] == "answer-input", (label, parse_failure)
+    assert parse_failure["error"]["details"]["missing_required"] == [
+        "person_name",
+        "required_topics",
+    ], label
 
     # A required checkbox group with every choice false cannot be submitted;
     # the browser requires at least one checked option.

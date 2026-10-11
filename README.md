@@ -147,7 +147,10 @@ docassemble-simulator seek M.family --activate
 `answer` parses JSON, then Python literals, then plain text. Its JSON result
 reports each assignment as `applied`, `unknown field`, or `parse error`, and
 rejections include the active fields, closest-name suggestions, and missing
-required fields. The active screen describes every field with a copy-pasteable
+required fields. Unknown-field and parse-error rejections provide that same
+missing-input guidance from valid assignments and rendered defaults without
+running interview validation; all rejected values are discarded. The active
+screen describes every field with a copy-pasteable
 `example` (including checkbox mappings, object choices/groups, blanks, and
 ISO dates); `answer --help` documents the same grammar. Checkbox and object
 choice fields use the active field metadata. An exact `YYYY-MM-DD` submitted to
