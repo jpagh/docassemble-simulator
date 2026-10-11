@@ -90,12 +90,14 @@ def test_command_contract_uses_new_names_and_flags():
     answer = parser.parse_args(["answer", "M.value=1"])
     evaluate = parser.parse_args(["eval", "M.value"])
     execute = parser.parse_args(["exec", "M.value = 1", "--no-assemble"])
-    seek = parser.parse_args(["seek", "M.value", "--fresh", "--activate"])
+    seek = parser.parse_args(["seek", "M.value", "--fresh", "--activate", "--auto"])
+    defaults = parser.parse_args(["answer", "--defaults"])
 
     assert answer.func is cli.cmd_execution
     assert evaluate.command == "eval"
     assert execute.no_assemble is True
-    assert seek.fresh and seek.activate
+    assert seek.fresh and seek.activate and seek.auto
+    assert defaults.defaults and defaults.assignments == []
     for obsolete in (["set", "x=1"], ["get", "x"]):
         try:
             parser.parse_args(obsolete)

@@ -87,6 +87,7 @@ class Answer:
     validate: bool = True
     strict: bool = False
     partial: bool = False
+    defaults: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class Seek:
     fresh: bool = False
     activate: bool = False
     trace: bool = False
+    auto: bool = False
 
 
 @dataclass(frozen=True)
@@ -487,7 +489,7 @@ class InterviewExecution:
         return outcome
 
     def _answer(self, operation: Answer):
-        if not operation.assignments:
+        if not operation.assignments and not operation.defaults:
             raise ExecutionFailure(
                 ErrorKind.INPUT, "no VAR=VALUE assignments were provided"
             )
@@ -579,8 +581,22 @@ class InterviewExecution:
                 else self._store.load()["namespace"]
             )
             with self._prepared_operation(namespace) as (interview, status):
-                outcome = _seek(
-                    interview, namespace, status, operation.variable, operation.trace
+                outcome = (
+                    _seek_auto(
+                        interview,
+                        namespace,
+                        status,
+                        operation.variable,
+                        operation.trace,
+                    )
+                    if operation.auto
+                    else _seek(
+                        interview,
+                        namespace,
+                        status,
+                        operation.variable,
+                        operation.trace,
+                    )
                 )
             if operation.activate:
                 self._store.save(namespace, outcome, operation.variable)
@@ -1012,6 +1028,94 @@ def _assemble(interview, namespace, status):
         "kind": "continue",
         "message": "mandatory code completed without reaching a screen",
     }
+
+
+def _auto_screen_summary(screen):
+    return {
+        "question_name": screen.get("question_name"),
+        "sought": screen.get("sought"),
+        "orig_sought": screen.get("orig_sought"),
+        "variables": [
+            field.get("variable")
+            for field in screen.get("fields") or []
+            if field.get("variable")
+        ],
+        "screen": screen,
+    }
+
+
+def _auto_submit_screen(interview, namespace, status, screen):
+    """Submit one screen exactly as an untouched browser form would."""
+    _submit_screen_fields(namespace, screen)
+    violations = _required_violations(namespace, screen, set())
+    if violations:
+        return None, {
+            "reason": "required fields missing",
+            "submitted": False,
+            "missing_required": [variable for variable, _reason in violations],
+            "errors": [
+                _required_message(variable, reason) for variable, reason in violations
+            ],
+            "screen": screen,
+        }
+    validation = _validate(interview, namespace, screen)
+    if validation["errors"]:
+        return None, {
+            "reason": "validation failed",
+            "submitted": False,
+            "errors": validation["errors"],
+            "warnings": validation["warnings"],
+            "screen": screen,
+        }
+    _mark_answered(interview, namespace, screen.get("question_name"))
+    outcome = _assemble(interview, namespace, status)
+    if outcome.get("kind") == "error":
+        return outcome, {
+            "reason": "flow error",
+            "submitted": True,
+            "error": outcome,
+            "screen": screen,
+        }
+    if validation["warnings"]:
+        outcome["warnings"] = validation["warnings"]
+    return outcome, None
+
+
+def _seek_auto(interview, namespace, status, variable, trace):
+    result = _seek(interview, namespace, status, variable, trace)
+    submitted = []
+    auto_trace = []
+    stop = None
+    for _ in range(100):
+        if result.get("kind") != "question":
+            reason = (
+                "sought variable resolved"
+                if result.get("kind") == "continue"
+                else "seek stopped"
+            )
+            stop = {"reason": reason}
+            break
+        screen = result
+        result, stop = _auto_submit_screen(interview, namespace, status, screen)
+        if stop is None or stop.get("submitted"):
+            submitted.append(_auto_screen_summary(screen))
+            auto_trace.append({"screen": screen, "submitted": {}})
+        if stop is not None:
+            if result is None:
+                result = stop["screen"]
+            break
+        if result.get("kind") == "finished":
+            stop = {"reason": "interview completed"}
+            break
+        result = _seek(interview, namespace, status, variable, trace)
+    else:
+        stop = {"reason": "auto-advance limit reached", "limit": 100}
+
+    result = dict(result)
+    result["auto_submitted"] = submitted
+    result["auto_stop"] = stop or {"reason": "seek stopped"}
+    result["auto_trace"] = auto_trace
+    return result
 
 
 def _missing_name(error):

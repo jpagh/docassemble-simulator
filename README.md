@@ -69,6 +69,8 @@ docassemble-simulator index --var M.family
 
 docassemble-simulator start
 docassemble-simulator answer M.name=Alice
+docassemble-simulator answer --defaults
+docassemble-simulator seek M.family --auto
 docassemble-simulator status
 docassemble-simulator refresh
 docassemble-simulator eval 'M.name'
@@ -92,7 +94,10 @@ docassemble-simulator seek M.family --activate
   Hidden `show if` fields are neither assigned nor required, and signature
   fields become `DAEmpty()` so documents still render.
   Fields that are not on the active screen are rejected; use `exec` for
-  deliberate state surgery. `--partial` restores per-field submission
+  deliberate state surgery. `--defaults` submits the active screen without
+  explicit assignments, using visible defaults and browser-blank values;
+  required fields without defaults are reported instead of being guessed.
+  `--partial` restores per-field submission
   (missing required fields become warnings and lazy re-seeking is allowed),
   and `--no-validate` skips only the interview's validation code, not the
   required gate. Assignment or validation failure discards every submitted
@@ -100,7 +105,9 @@ docassemble-simulator seek M.family --activate
 - `status` only reads the saved outcome. `refresh` explicitly rehydrates and
   reassembles saved state.
 - `seek` starts from saved state by default. `--fresh` is isolated and
-  `--activate` persists the sought screen as the active screen.
+  `--activate` persists the sought screen as the active screen. `--auto`
+  repeatedly submits screens that can be completed from defaults/blanks and
+  reports the ordered screens it passed plus the first reason it stopped.
 - Lazy variable seeking is reported as ordered `variable-seek` diagnostics,
   not as errors. A seek fails only when docassemble exhausts its definitions;
   that produces an `unresolved-variable` error containing the sought variable.

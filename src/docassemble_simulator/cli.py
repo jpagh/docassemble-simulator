@@ -378,9 +378,12 @@ def cmd_execution(args, root):
             not args.no_validate,
             args.strict,
             args.partial,
+            args.defaults,
         )
     elif args.command == "seek":
-        operation = Seek(args.variable, args.fresh, args.activate, args.trace)
+        operation = Seek(
+            args.variable, args.fresh, args.activate, args.trace, args.auto
+        )
     elif args.command == "eval":
         operation = Evaluate(args.expression)
     elif args.command == "vars":
@@ -447,6 +450,21 @@ def _record_execution(args, root, execution, operation, payload):
     """Append the operation's screen outcome to the requested trace sidecar."""
     from docassemble_simulator.execution import Status
     from docassemble_simulator.trace import append_trace, is_screen_outcome
+
+    result = payload.get("result") if payload.get("ok") else None
+    auto_trace = result.get("auto_trace") if isinstance(result, dict) else None
+    if auto_trace:
+        metadata = _trace_metadata(args, root)
+        for step in auto_trace:
+            append_trace(
+                args.record,
+                metadata,
+                operation=args.command,
+                ok=True,
+                screen=step.get("screen"),
+                phase=getattr(args, "phase", None),
+                submitted=step.get("submitted") or {},
+            )
 
     screen = None
     if payload.get("ok"):
@@ -809,7 +827,12 @@ def build_parser():
             ),
         )
     )
-    answer.add_argument("assignments", nargs="+")
+    answer.add_argument("assignments", nargs="*")
+    answer.add_argument(
+        "--defaults",
+        action="store_true",
+        help="submit visible defaults and browser-blank values without assignments",
+    )
     answer.add_argument("--code", action="store_true")
     answer.add_argument(
         "--no-validate",
@@ -845,6 +868,11 @@ def build_parser():
     seek.add_argument("--fresh", action="store_true")
     seek.add_argument("--activate", action="store_true")
     seek.add_argument("--trace", action="store_true")
+    seek.add_argument(
+        "--auto",
+        action="store_true",
+        help="auto-submit defaultable screens until the variable resolves or input is needed",
+    )
     seek.set_defaults(func=cmd_execution)
     evaluate = add("eval", help="evaluate an expression without saving")
     evaluate.add_argument("expression")
@@ -985,7 +1013,13 @@ def _reexec_with_dyld_path():
 
 
 def _validate_trace_arguments(args):
-    """Fail fast on trace flags that would otherwise be silently ignored."""
+    """Fail fast on flags that would otherwise be silently ignored."""
+    if (
+        getattr(args, "command", None) == "answer"
+        and not args.assignments
+        and not args.defaults
+    ):
+        raise InputFailure("the following arguments are required: assignments")
     if getattr(args, "phase", None) and not getattr(args, "record", None):
         raise InputFailure(
             "--phase requires --record PATH; phases are only meaningful in a trace"
