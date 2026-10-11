@@ -19,6 +19,8 @@ class ErrorKind(StrEnum):
     SEEK = "seek"
     RENDER = "render"
     COMPILE = "compile"
+    RESOLUTION_CONFLICT = "resolution-conflict"
+    DUPLICATE_ID = "duplicate-id"
     RUNTIME_COMPATIBILITY = "runtime-compatibility"
     FAULT = "fault"
     WORKSPACE = "workspace"

@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+from docassemble_simulator._outcomes import ErrorKind
 from docassemble_simulator.catalog import InterviewCatalog, _provenance
 
 
@@ -122,7 +123,7 @@ def test_why_uses_last_loaded_order_and_reports_guard_conflicts(tmp_path, monkey
     interview.questions["shared"]["*"] = [first, unguarded]
     report = catalog.why("shared", {"user": SimpleNamespace(kind="a")}).result
     assert report["conflict"] is True
-    assert report["conflict_details"]["kind"] == "resolution-conflict"
+    assert report["conflict_details"]["kind"] is ErrorKind.RESOLUTION_CONFLICT
     assert report["candidates"][0]["live"] is True
 
 
@@ -221,7 +222,7 @@ def test_unrelated_supersedes_does_not_exempt_duplicate_id(tmp_path, monkeypatch
     result = catalog.check().result
 
     assert result["totals"]["duplicate_ids"] == 1
-    assert result["duplicate_ids"][0]["kind"] == "duplicate-id"
+    assert result["duplicate_ids"][0]["kind"] is ErrorKind.DUPLICATE_ID
     assert [block["id"] for block in result["duplicate_ids"][0]["blocks"]] == [
         "shared",
         "shared",

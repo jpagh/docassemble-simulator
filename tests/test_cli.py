@@ -297,6 +297,42 @@ def test_why_uses_the_read_only_execution_seam(monkeypatch, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["result"]["variable"] == "M.value"
 
 
+def test_why_conflict_is_warning_by_default_and_strict_failure(
+    monkeypatch, tmp_path, capsys
+):
+    class FakeExecution:
+        def run(self, operation):
+            return SimpleNamespace(
+                ok=True,
+                result={
+                    "variable": "M.value",
+                    "candidates": [{"id": "first"}, {"id": "second"}],
+                    "winner": {"id": "first"},
+                    "conflict": True,
+                },
+                error=None,
+                diagnostics=(),
+                attachments=(),
+            )
+
+    monkeypatch.setattr(cli, "_execution", lambda args, root: FakeExecution())
+
+    warning_args = cli.build_parser().parse_args(["why", "M.value", "--json"])
+    assert cli.cmd_catalog(warning_args, tmp_path) == 0
+    warning = json.loads(capsys.readouterr().out)
+    assert warning["ok"] is True
+    assert warning["result"]["conflict"] is True
+
+    strict_args = cli.build_parser().parse_args(
+        ["why", "M.value", "--strict", "--json"]
+    )
+    assert cli.cmd_catalog(strict_args, tmp_path) == 2
+    failure = json.loads(capsys.readouterr().out)
+    assert failure["ok"] is False
+    assert failure["error"]["kind"] == "resolution-conflict"
+    assert failure["error"]["details"]["conflict"] is True
+
+
 def test_check_human_output_ends_with_totals(monkeypatch, tmp_path, capsys):
     class FakeCatalog:
         def __init__(self, root, selector):

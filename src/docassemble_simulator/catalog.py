@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from docassemble_simulator._outcomes import ErrorKind
 from docassemble_simulator.compatibility import (
     AssemblyLineCompatibilityError,
     require_assemblyline_compatibility,
@@ -320,7 +321,7 @@ def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, A
         reports.append(
             {
                 "id": explicit_id,
-                "kind": "duplicate-id",
+                "kind": ErrorKind.DUPLICATE_ID,
                 "interview": interview_identity,
                 "warning": True,
                 "blocks": [entry["block"] for entry in blocks],
@@ -452,7 +453,7 @@ class InterviewCatalog:
                         [
                             item
                             for item in duplicate_ids
-                            if item["kind"] == "duplicate-id"
+                            if item["kind"] == ErrorKind.DUPLICATE_ID
                         ]
                     ),
                 },
@@ -608,7 +609,7 @@ class InterviewCatalog:
                 "conflict": conflict,
                 "conflict_details": (
                     {
-                        "kind": "resolution-conflict",
+                        "kind": ErrorKind.RESOLUTION_CONFLICT,
                         "variable": variable,
                         "candidates": [
                             candidate["provenance"] for candidate in candidates

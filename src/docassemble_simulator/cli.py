@@ -383,34 +383,32 @@ def cmd_catalog(args, root):
         )
         or (args.command == "why" and args.strict and result["conflict"])
     )
-    payload = (
-        _envelope(args.command, result)
-        if ok
-        else _envelope(
-            args.command,
-            error={
-                "kind": (
-                    "resolution-conflict"
-                    if args.command == "why"
-                    else (
-                        "duplicate-id"
-                        if result.get("totals", {}).get("duplicate_ids", 0)
-                        else ErrorKind.COMPILE
-                    )
-                ),
-                "message": (
-                    "variable resolution conflict found"
-                    if args.command == "why"
-                    else (
-                        "duplicate explicit question ids found"
-                        if result.get("totals", {}).get("duplicate_ids", 0)
-                        else "one or more interviews failed to compile"
-                    )
-                ),
-                "details": result,
-            },
+    failure_kind = ErrorKind.COMPILE
+    if ok:
+        payload = _envelope(args.command, result)
+    else:
+        failure_kind = (
+            ErrorKind.RESOLUTION_CONFLICT
+            if args.command == "why"
+            else (
+                ErrorKind.DUPLICATE_ID
+                if result.get("totals", {}).get("duplicate_ids", 0)
+                else ErrorKind.COMPILE
+            )
         )
-    )
+        failure_message = (
+            "variable resolution conflict found"
+            if args.command == "why"
+            else (
+                "duplicate explicit question ids found"
+                if result.get("totals", {}).get("duplicate_ids", 0)
+                else "one or more interviews failed to compile"
+            )
+        )
+        payload = _envelope(
+            args.command,
+            error=Failure(failure_kind, failure_message, result),
+        )
     _emit(payload, args.json)
     if args.command == "check" and not args.json:
         totals = result.get("totals") or {
@@ -424,7 +422,7 @@ def cmd_catalog(args, root):
             f"ok: {totals['ok']}  failures: {totals['failed']}  "
             f"duplicate ids: {totals.get('duplicate_ids', 0)}"
         )
-    return 0 if ok else 2
+    return 0 if ok else _exit_for_error(failure_kind)
 
 
 def cmd_execution(args, root):
