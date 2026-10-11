@@ -655,6 +655,8 @@ def test_seek_contract_across_families(family_python, real_workspace):
         "seek",
         "no_such_variable_xyz",
         "--fresh",
+        "--seek-diagnostics",
+        "capture",
         expected_code=2,
     )
     assert not missing["ok"], label
@@ -1148,6 +1150,7 @@ def test_assemblyline_bundle_pdf_requests_skip_to_docx(family_python, real_works
         "bundle_user_name=Simulator",
         "--interview",
         "al-bundle.yml",
+        "--full-seek-diagnostics",
     )
     assert answered["ok"], label
     assert answered["result"]["kind"] == "question", label

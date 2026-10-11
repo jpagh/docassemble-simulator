@@ -24,6 +24,7 @@ from docassemble_simulator._artifacts import capture_published_attachments
 from docassemble_simulator._diagnostics import (
     capture_diagnostics,
     is_capture_enabled,
+    record_culprit,
     record_seeking,
 )
 from docassemble_simulator._files import (
@@ -35,7 +36,11 @@ from docassemble_simulator._files import (
     validate_destinations,
 )
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
-from docassemble_simulator.catalog import CatalogFailure, InterviewCatalog
+from docassemble_simulator.catalog import (
+    CatalogFailure,
+    InterviewCatalog,
+    _provenance,
+)
 from docassemble_simulator.compatibility import (
     AssemblyLineCompatibilityError,
     require_assemblyline_compatibility,
@@ -456,12 +461,16 @@ class InterviewExecution:
             except Exception as error:
                 unresolved = _unresolved_variable(error)
                 if unresolved is not None:
+                    culprit = _unresolved_culprit(error)
+                    details = {"sought_variable": unresolved}
+                    if culprit is not None:
+                        details["culprit"] = culprit
                     outcome = ExecutionOutcome(
                         False,
                         error=ExecutionError(
                             ErrorKind.UNRESOLVED_VARIABLE,
                             str(error),
-                            {"sought_variable": unresolved},
+                            details,
                         ),
                     )
                 elif _is_compile_failure(error):
@@ -1068,6 +1077,9 @@ def _assemble(interview, namespace, status):
         if unresolved is not None:
             result["failure_kind"] = ErrorKind.UNRESOLVED_VARIABLE
             result["sought_variable"] = unresolved
+            culprit = _unresolved_culprit(error)
+            if culprit is not None:
+                result["culprit"] = culprit
         return result
     question = getattr(status, "question", None)
     if question is not None and getattr(question, "question_type", None) == "continue":
@@ -2066,6 +2078,58 @@ def _atomic_pickle(path, payload, *, lock_destination):
         write_pickle,
         lock_destination=lock_destination,
     )
+
+
+def _culprit_expression(question) -> str | None:
+    source = getattr(question, "source_code", None)
+    if isinstance(source, str):
+        lines = source.splitlines()
+        for index, line in enumerate(lines):
+            match = re.match(r"^(\s*)(choices|code|if|show if)\s*:\s*(.*)$", line)
+            if not match:
+                continue
+            key = match.group(2)
+            value = match.group(3).strip()
+            if value in {"|", ">", "|-", ">-", "|+", ">+"}:
+                base_indent = len(match.group(1))
+                block = []
+                for following in lines[index + 1 :]:
+                    if following.strip() and len(following) <= base_indent:
+                        break
+                    block.append(following.strip())
+                value = " ".join(item for item in block if item)
+            if value:
+                return f"{key}: {value}"
+        if source.strip():
+            return source.strip()[:500]
+    for field in getattr(question, "fields", None) or ():
+        selections = getattr(field, "selections", None)
+        if isinstance(selections, dict):
+            expression = selections.get("sourcecode")
+            if isinstance(expression, str) and expression.strip():
+                return expression.strip()
+    return None
+
+
+def _unresolved_culprit(error: BaseException) -> dict[str, Any] | None:
+    try:
+        from docassemble.base.functions import this_thread
+
+        status = getattr(this_thread, "interview_status", None)
+        question = getattr(status, "question", None)
+    except (ImportError, AttributeError):
+        question = None
+    if question is None:
+        return None
+    provenance = _provenance(question)
+    sought_variable = _unresolved_variable(error) or "<unknown>"
+    culprit = {
+        "provenance": provenance,
+        "expression": _culprit_expression(question),
+        "sought_variable": sought_variable,
+    }
+    record_culprit(sought_variable, culprit)
+    return culprit
 
 
 def _unresolved_variable(error: BaseException) -> str | None:

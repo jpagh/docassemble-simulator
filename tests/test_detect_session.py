@@ -502,6 +502,78 @@ def test_start_commits_versioned_per_interview_state_and_status_is_pure(
     assert "main.yml" in next(iter(before))
 
 
+def test_unresolved_variable_names_terminal_culprit_and_expression(
+    tmp_path, monkeypatch, da_stubs
+):
+    class DAErrorMissingVariable(Exception):
+        def __init__(self, variable):
+            super().__init__(f"could not define {variable}")
+            self.variable = variable
+
+    sys.modules[
+        "docassemble.base.error"
+    ].DAErrorMissingVariable = DAErrorMissingVariable
+
+    question = SimpleNamespace(
+        name="Question_choices",
+        id="choices-question",
+        question_type="fields",
+        line_number=4,
+        from_source=SimpleNamespace(
+            path="docassemble.pkg:data/questions/main.yml",
+            filepath=str(tmp_path / "source.yml"),
+        ),
+        source_code=(
+            "---\nquestion: Pick\nfields:\n  - Choices: choice\n"
+            "    choices: missing_choices\n"
+        ),
+        data_for_debug={"question": "Pick"},
+        fields=[],
+    )
+    (tmp_path / "source.yml").write_text(question.source_code)
+
+    class CulpritInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.question = question
+            interview_status.seeking = [{"variable": "missing_choices"}]
+            raise DAErrorMissingVariable("missing_choices")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, CulpritInterview)
+
+    outcome = execution.run(Start())
+
+    assert not outcome.ok
+    assert outcome.error.kind == "unresolved-variable"
+    culprit = outcome.error.details["culprit"]
+    assert culprit["provenance"]["id"] == "choices-question"
+    assert culprit["sought_variable"] == "missing_choices"
+    assert "choices" in culprit["expression"]
+    assert outcome.diagnostics[0].details["culprit"] == culprit
+
+
+def test_tolerated_lazy_reference_does_not_name_a_culprit(
+    tmp_path, monkeypatch, da_stubs
+):
+    class ToleratedInterview(FakeInterview):
+        def assemble(self, namespace, interview_status):
+            interview_status.seeking = [
+                {"variable": "review_item", "reason": "skipped review item"}
+            ]
+            try:
+                eval("missing_review_reference", {}, {})
+            except NameError:
+                pass
+            raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, ToleratedInterview)
+
+    outcome = execution.run(Start())
+
+    assert outcome.ok
+    assert outcome.diagnostics
+    assert all("culprit" not in item.details for item in outcome.diagnostics)
+
+
 def test_variable_seek_diagnostics_do_not_depend_on_server_debug_mode(
     tmp_path, monkeypatch, da_stubs
 ):

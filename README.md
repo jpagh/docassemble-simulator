@@ -35,7 +35,9 @@ Pin a release tag when reproducibility matters, for example
 `why VARIABLE` lists variable-resolution candidates in last-loaded-first
 order, including catalog provenance and authored guards. With a saved session it
 marks guards live/inactive and reports resolution conflicts; `--strict` makes a
-conflict non-zero.
+conflict non-zero. A terminal unresolved-variable error includes the responsible
+block provenance and expression; tolerated lazy references remain diagnostics
+without a culprit.
 
 The simulator must run in the same environment as the target package; a global
 installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
