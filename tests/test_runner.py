@@ -103,6 +103,20 @@ def test_runner_closes_unusable_response_transports(tmp_path, body):
         runner.status()
 
 
+def test_runner_reports_a_crashed_worker_and_closes_it(tmp_path):
+    executable = _worker_executable(tmp_path, "os._exit(7)\n")
+    runner = SimulatorRunner(_project(tmp_path), python=executable, timeout=1)
+
+    response = runner.execute("secret = 1")
+
+    assert response["id"] == "1"
+    assert response.error["kind"] == "fault"
+    assert response.error["details"]["operation"] == "exec"
+    with pytest.raises(RunnerError, match="closed"):
+        runner.status()
+    runner.close()
+
+
 def test_runner_rejects_unsolicited_data_after_a_response(tmp_path):
     executable = _worker_executable(
         tmp_path,

@@ -1994,3 +1994,106 @@ def test_partial_answer_keeps_the_permissive_mode_across_families(
     )
     undefined = _run(interpreter, root, "eval", "nickname", expected_code=2)
     assert undefined["error"]["kind"] == "execution", label
+
+
+def _worker_fixture(root: Path) -> str:
+    package = root / "docassemble" / "worker_probe"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (questions / "main.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        '  print("AUTHORED-WORKER-OUTPUT")\n'
+        "  worker_value\n"
+        "---\n"
+        "question: Worker value\n"
+        "field: worker_value\n",
+        encoding="utf-8",
+    )
+    return "docassemble.worker_probe:data/questions/main.yml"
+
+
+def test_worker_protocol_keeps_real_interview_output_separate(family_python, tmp_path):
+    identity = _worker_fixture(tmp_path)
+    journey = tmp_path / "journey.json"
+    journey.write_text(
+        json.dumps(
+            [
+                {"id": "one", "operation": "start"},
+                {"id": "two", "operation": "status"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            str(family_python.interpreter),
+            "-m",
+            "docassemble_simulator",
+            "--root",
+            str(tmp_path),
+            "--interview",
+            identity,
+            "--offline",
+            "run",
+            "--journey",
+            str(journey),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert [response["id"] for response in responses] == ["one", "two"]
+    assert all(response["ok"] for response in responses)
+    assert "AUTHORED-WORKER-OUTPUT" in completed.stderr
+
+
+def test_real_worker_timeout_keeps_the_previous_saved_session(family_python, tmp_path):
+    package = tmp_path / "docassemble" / "worker_timeout"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (questions / "main.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  counter = 1\n"
+        "  done\n"
+        "---\n"
+        "question: Done\n"
+        "field: done\n",
+        encoding="utf-8",
+    )
+
+    from docassemble_simulator.runner import SimulatorRunner
+
+    with SimulatorRunner(
+        tmp_path,
+        interview="docassemble.worker_timeout:data/questions/main.yml",
+        python=family_python.interpreter,
+        offline=True,
+        seek_diagnostics="off",
+        timeout=30,
+    ) as runner:
+        started = runner.start()
+        assert started.ok, started
+        timed_out = runner.request(
+            "exec",
+            code="counter = 2\nimport time\ntime.sleep(1)",
+            assemble=False,
+            timeout=0.05,
+        )
+        assert not timed_out.ok
+        assert timed_out.error["kind"] == "timeout"
+        assert timed_out.error["details"]["operation"] == "exec"
+        assert timed_out.error["details"]["timeout"] == 0.05
+
+        counter = runner.evaluate("counter")
+        assert counter.ok, counter
+        assert counter.result["value"] == "1"
