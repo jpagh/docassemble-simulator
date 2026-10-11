@@ -3,10 +3,9 @@ from __future__ import annotations
 import io
 import json
 import time
-from types import SimpleNamespace
 
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
-from docassemble_simulator.execution import Answer, Start
+from docassemble_simulator.execution import Answer, ExecutionScope, Start
 from docassemble_simulator.worker import Worker, operation_from_request, serve
 
 
@@ -14,9 +13,12 @@ class FakeExecution:
     _identity = "docassemble.example:data/questions/main.yml"
 
     def __init__(self, tmp_path):
-        self._store = SimpleNamespace(
-            path=tmp_path / "sessions" / "main.pkl",
-            directory=tmp_path / "sessions",
+        self.scope = ExecutionScope(
+            tmp_path,
+            self._identity,
+            "",
+            tmp_path / "sessions",
+            tmp_path / "sessions" / "main.pkl",
         )
         self.operations = []
         self.reset_count = 0
@@ -82,6 +84,26 @@ def test_serve_continues_after_malformed_and_operation_requests(tmp_path):
     assert responses[2]["result"]["kind"] == "shutdown"
 
 
+def test_serve_keeps_authored_stdout_out_of_protocol(tmp_path, capsys):
+    class PrintingExecution(FakeExecution):
+        def run(self, operation):
+            print("authored output")
+            return super().run(operation)
+
+    worker = Worker(tmp_path, execution=PrintingExecution(tmp_path))
+    incoming = io.StringIO(
+        '{"id":"one","operation":"start"}\n'
+        '{"id":"two","operation":"status"}\n'
+        '{"id":"stop","operation":"shutdown"}\n'
+    )
+    outgoing = io.StringIO()
+
+    assert serve(worker, incoming, outgoing) == 0
+    responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+    assert [response["id"] for response in responses] == ["one", "two", "stop"]
+    assert "authored output" not in capsys.readouterr().out
+
+
 def test_worker_timeout_is_typed_and_stream_remains_usable(tmp_path):
     class SlowExecution(FakeExecution):
         def run(self, operation):
@@ -93,3 +115,28 @@ def test_worker_timeout_is_typed_and_stream_remains_usable(tmp_path):
 
     assert response["ok"] is False
     assert response["error"]["kind"] == "timeout"
+
+
+def test_execution_scope_is_immutable_and_configuration_specific(tmp_path):
+    from dataclasses import FrozenInstanceError
+
+    import pytest
+
+    from docassemble_simulator.execution import InterviewExecution
+
+    questions = tmp_path / "docassemble" / "example" / "data" / "questions"
+    questions.mkdir(parents=True)
+    (questions.parents[1] / "__init__.py").write_text("")
+    (questions / "main.yml").write_text("---\nquestion: Hello\n")
+    execution = InterviewExecution(tmp_path, config_fingerprint="config-a")
+    scope = execution.scope
+    assert scope.interview == "docassemble.example:data/questions/main.yml"
+    assert scope.root == tmp_path
+    assert scope.config_fingerprint == "config-a"
+    assert scope.session_root == tmp_path / ".simulator" / "sessions"
+    assert scope.session_id == scope.session.stem
+    with pytest.raises(FrozenInstanceError):
+        scope.interview = "changed"
+    other = InterviewExecution(tmp_path, config_fingerprint="config-b")
+    assert other.scope.session != scope.session
+    assert Worker(tmp_path, execution=execution).scope["interview"] == scope.interview

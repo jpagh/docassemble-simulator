@@ -44,8 +44,11 @@ controls.
 - A worker does not support concurrent mutations. Parallel journeys use
   separate workers and session roots.
 - A worker timeout returns a typed `timeout` error when the process can recover;
-  the Python client terminates the child if no response arrives. Logs remain on
-  stderr so stdout stays machine-readable.
+  the Python client applies its deadline through one complete response frame
+  (including partial lines), terminates the child on timeout/crash/protocol
+  failure, and never retries an operation whose commit status is uncertain.
+  Interview and bootstrap output remains on stderr so stdout stays
+  machine-readable.
 - Source copying is safer but can cost setup time. Projects with a deliberate
   shared or symlinked source policy must opt into it explicitly.
 - Existing one-shot commands are unchanged and remain the compatibility path

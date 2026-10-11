@@ -22,6 +22,41 @@ def _run_cli(*arguments):
     )
 
 
+def test_json_array_journey_becomes_one_protocol_frame_per_request(
+    monkeypatch, tmp_path
+):
+    journey = tmp_path / "journey.json"
+    journey.write_text(
+        '[{"id":"one","operation":"start"},{"id":"two","operation":"status"}]',
+        encoding="utf-8",
+    )
+    seen = {}
+
+    class FakeWorker:
+        closed = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    def fake_serve(worker, input_stream, output_stream):
+        seen["requests"] = [json.loads(line) for line in input_stream]
+        return 0
+
+    monkeypatch.setattr("docassemble_simulator.worker.Worker", FakeWorker)
+    monkeypatch.setattr("docassemble_simulator.worker.serve", fake_serve)
+    args = types.SimpleNamespace(
+        session_root=str(tmp_path / "sessions"),
+        journey=str(journey),
+        interview=None,
+        timeout=1.0,
+        timings=False,
+        project_root=None,
+    )
+
+    assert cli.cmd_worker(args, tmp_path) == 0
+    assert [request["id"] for request in seen["requests"]] == ["one", "two"]
+
+
 def test_error_kinds_keep_exit_codes_and_json_values_stable():
     assert cli._exit_for_error(ErrorKind.INPUT) == 1
     assert cli._exit_for_error(ErrorKind.FAULT) == 3
@@ -107,6 +142,37 @@ def test_command_contract_uses_new_names_and_flags():
             pass
         else:
             raise AssertionError(f"obsolete command accepted: {obsolete[0]}")
+
+
+def test_worker_setup_output_is_not_written_to_protocol(monkeypatch, tmp_path, capsys):
+    import docassemble_simulator.worker as worker_module
+
+    protocol = __import__("io").StringIO()
+
+    class PrintingWorker:
+        def __init__(self, *args, **kwargs):
+            print("bootstrap output")
+
+    def fake_serve(worker, stream, output):
+        output.write(json.dumps({"ok": True}) + "\\n")
+        return 0
+
+    monkeypatch.setattr(worker_module, "Worker", PrintingWorker)
+    monkeypatch.setattr(worker_module, "serve", fake_serve)
+    args = SimpleNamespace(
+        session_root=str(tmp_path / "sessions"),
+        interview=None,
+        timeout=1.0,
+        timings=False,
+        project_root=None,
+        journey=None,
+        _worker_protocol_stdout=protocol,
+    )
+
+    assert cli.cmd_worker(args, tmp_path) == 0
+    captured = capsys.readouterr()
+    assert protocol.getvalue() == '{"ok": true}\\n'
+    assert "bootstrap output" in captured.err
 
 
 def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):

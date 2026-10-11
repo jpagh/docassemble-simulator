@@ -6,6 +6,7 @@ to step through screens, answer fields, and debug variable-resolution errors.
 """
 
 from docassemble_simulator.cli import main
+from docassemble_simulator.execution import ExecutionScope
 from docassemble_simulator.runner import (
     Runner,
     RunnerError,
@@ -13,4 +14,11 @@ from docassemble_simulator.runner import (
     SimulatorRunner,
 )
 
-__all__ = ["Runner", "RunnerError", "RunnerResponse", "SimulatorRunner", "main"]
+__all__ = [
+    "ExecutionScope",
+    "Runner",
+    "RunnerError",
+    "RunnerResponse",
+    "SimulatorRunner",
+    "main",
+]

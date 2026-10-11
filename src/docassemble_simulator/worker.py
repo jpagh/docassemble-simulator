@@ -14,6 +14,7 @@ import signal
 import sys
 import threading
 import time
+from contextlib import redirect_stdout
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -37,8 +38,13 @@ class WorkerProtocolError(ValueError):
     """A malformed worker request."""
 
 
-class OperationTimeout(Exception):
-    """An operation exceeded the worker's configured deadline."""
+class OperationTimeout(BaseException):
+    """An operation exceeded the worker's configured deadline.
+
+    This deliberately bypasses ordinary ``Exception`` handlers in interview
+    assembly and seeking code.  A deadline must not be converted into an
+    authored flow error or allow a mutation to be committed.
+    """
 
 
 def _jsonable(value: Any):
@@ -216,23 +222,19 @@ class Worker:
 
     @property
     def identity(self) -> str:
-        return str(getattr(self.execution, "_identity", "unknown"))
+        return self.execution.scope.interview
 
     @property
     def scope(self) -> dict[str, Any]:
-        store = getattr(self.execution, "_store", None)
-        session_path = getattr(store, "path", None)
-        session_root = getattr(store, "directory", None)
-        session_id = None
-        if session_path is not None:
-            session_id = Path(session_path).stem
+        description = self.execution.scope
         return {
             "root": str(self.root),
             "project_root": str(self.project_root),
             "interview": self.identity,
-            "session_root": str(session_root) if session_root is not None else None,
-            "session": str(session_path) if session_path is not None else None,
-            "session_id": session_id,
+            "config_fingerprint": description.config_fingerprint,
+            "session_root": str(description.session_root),
+            "session": str(description.session),
+            "session_id": description.session_id,
             "pid": os.getpid(),
         }
 
@@ -262,6 +264,19 @@ class Worker:
             "operation_ms": round((time.perf_counter() - started) * 1000, 3),
             "worker_startup_ms": round((started - self._started) * 1000, 3),
         }
+
+    def _request_timeout(self, request: dict[str, Any]) -> float | None:
+        timeout = request.get("timeout", self.timeout)
+        if timeout is not None:
+            try:
+                timeout = float(timeout)
+            except (TypeError, ValueError) as error:
+                raise WorkerProtocolError(
+                    "timeout must be a positive number"
+                ) from error
+            if timeout <= 0:
+                raise WorkerProtocolError("timeout must be a positive number")
+        return timeout
 
     def _response(
         self,
@@ -317,24 +332,16 @@ class Worker:
                     timing=self._timing(started, timing_enabled),
                 )
             if normalized == "reset":
+                timeout = self._request_timeout(request)
                 with self._lock:
-                    self.execution.reset()
+                    self._run_deadline(self.execution.reset, timeout)
                 return self._response(
                     request_id,
                     result={"kind": "reset", "scope": self.scope},
                     timing=self._timing(started, timing_enabled),
                 )
             operation = operation_from_request(request)
-            timeout = request.get("timeout", self.timeout)
-            if timeout is not None:
-                try:
-                    timeout = float(timeout)
-                except (TypeError, ValueError) as error:
-                    raise WorkerProtocolError(
-                        "timeout must be a positive number"
-                    ) from error
-                if timeout <= 0:
-                    raise WorkerProtocolError("timeout must be a positive number")
+            timeout = self._request_timeout(request)
             with self._lock:
                 outcome = self._run_deadline(
                     lambda: self.execution.run(operation), timeout
@@ -398,26 +405,31 @@ def serve(
 ) -> int:
     """Serve newline-delimited requests until EOF or graceful shutdown."""
     failed = False
-    for line in input_stream:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as error:
-            failed = True
-            response = worker._response(
-                None,
-                error=_failure(ErrorKind.INPUT, f"malformed JSON request: {error.msg}"),
+    # Interview code is allowed to print.  Keep those diagnostics visible on
+    # stderr without letting them become protocol frames on stdout.
+    with redirect_stdout(sys.stderr):
+        for line in input_stream:
+            if not line.strip():
+                continue
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as error:
+                failed = True
+                response = worker._response(
+                    None,
+                    error=_failure(
+                        ErrorKind.INPUT, f"malformed JSON request: {error.msg}"
+                    ),
+                )
+            else:
+                response = worker.handle(request)
+                failed = failed or not response.get("ok", False)
+            output_stream.write(
+                json.dumps(response, separators=(",", ":"), default=str) + "\n"
             )
-        else:
-            response = worker.handle(request)
-            failed = failed or not response.get("ok", False)
-        output_stream.write(
-            json.dumps(response, separators=(",", ":"), default=str) + "\n"
-        )
-        output_stream.flush()
-        if worker.closed:
-            break
+            output_stream.flush()
+            if worker.closed:
+                break
     return 2 if failed else 0
 
 
