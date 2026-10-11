@@ -16,6 +16,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from gate_fixtures import fake_interpreter, write_executable
 
 PROJECT = Path(__file__).resolve().parents[1]
 GATE = PROJECT / "scripts" / "test-runtime"
@@ -26,36 +27,13 @@ LEGACY_ENV = "DASIMULATOR_REAL_PYTHON_19"
 GATE_ENV = "DASIMULATOR_RUNTIME_GATE"
 
 
-def _write_executable(path: Path, body: str) -> Path:
-    path.write_text(body)
-    path.chmod(0o755)
-    return path
-
-
-def _fake_lane(tmp_path: Path, name: str, family: str, version: str) -> Path:
-    """A stand-in interpreter whose probe reports one docassemble family."""
-    return _write_executable(
-        tmp_path / name,
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env bash
-            if [[ "${{1:-}}" != "-c" ]]; then
-              echo "unsupported invocation: $*" >&2
-              exit 2
-            fi
-            echo "{family} {version} {version}"
-            """
-        ),
-    )
-
-
 def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A controlled ``uv`` substitute: records argv/env and reports a status."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     args_log = tmp_path / "uv-args.txt"
     env_log = tmp_path / "uv-env.txt"
-    _write_executable(
+    write_executable(
         bin_dir / "uv",
         textwrap.dedent(
             f"""\
@@ -150,8 +128,8 @@ def test_runtime_gate_selects_the_runtime_contract_without_the_external_corpus()
 )
 def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, version):
     bin_dir, args_log, env_log = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
     result = _run_gate(
         tmp_path,
         modern=modern,
@@ -180,8 +158,8 @@ def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, versi
 
 def test_runtime_gate_supports_serial_debugging(tmp_path):
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
     result = _run_gate(
         tmp_path,
         modern=modern,
@@ -198,8 +176,8 @@ def test_runtime_gate_supports_serial_debugging(tmp_path):
 
 def test_runtime_gate_rejects_an_unbounded_worker_override(tmp_path):
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
     result = _run_gate(
         tmp_path,
         modern=modern,
@@ -216,7 +194,7 @@ def test_runtime_gate_rejects_an_unbounded_worker_override(tmp_path):
 
 def test_runtime_gate_fails_before_pytest_when_a_lane_is_missing(tmp_path):
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     result = _run_gate(
         tmp_path,
         modern=modern,
@@ -232,8 +210,8 @@ def test_runtime_gate_fails_before_pytest_when_a_lane_cannot_import_docassemble(
     tmp_path,
 ):
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    broken = _write_executable(
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    broken = write_executable(
         tmp_path / "broken-python",
         textwrap.dedent(
             """\
@@ -258,8 +236,8 @@ def test_runtime_gate_fails_before_pytest_when_a_lane_cannot_import_docassemble(
 
 def test_runtime_gate_rejects_a_lane_from_the_wrong_family(tmp_path):
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    wrong_family = _fake_lane(tmp_path, "wrong-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    wrong_family = fake_interpreter(tmp_path, "wrong-python", "modern", "1.10.13")
     result = _run_gate(
         tmp_path,
         modern=modern,
@@ -274,8 +252,8 @@ def test_runtime_gate_rejects_a_lane_from_the_wrong_family(tmp_path):
 
 def test_runtime_gate_propagates_pytest_failures(tmp_path):
     bin_dir, _, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
     result = _run_gate(
         tmp_path,
         modern=modern,
@@ -290,8 +268,8 @@ def test_runtime_gate_propagates_pytest_failures(tmp_path):
 
 def test_runtime_gate_explains_an_empty_selection(tmp_path):
     bin_dir, _, _ = _fake_uv(tmp_path)
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
-    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
     result = _run_gate(
         tmp_path,
         modern=modern,

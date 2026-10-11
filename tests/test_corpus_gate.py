@@ -16,6 +16,8 @@ import textwrap
 import tomllib
 from pathlib import Path
 
+from gate_fixtures import fake_interpreter, write_executable
+
 PROJECT = Path(__file__).resolve().parents[1]
 GATE = PROJECT / "scripts" / "test-corpus"
 PLUGIN_DIR = PROJECT / "tests"
@@ -29,36 +31,13 @@ GATE_ENV = "DASIMULATOR_CORPUS_GATE"
 DEFAULT_JOBS = "4"
 
 
-def _write_executable(path: Path, body: str) -> Path:
-    path.write_text(body)
-    path.chmod(0o755)
-    return path
-
-
-def _fake_lane(tmp_path: Path, name: str, family: str, version: str) -> Path:
-    """A stand-in interpreter whose probe reports one docassemble family."""
-    return _write_executable(
-        tmp_path / name,
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env bash
-            if [[ "${{1:-}}" != "-c" ]]; then
-              echo "unsupported invocation: $*" >&2
-              exit 2
-            fi
-            echo "{family} {version} {version}"
-            """
-        ),
-    )
-
-
 def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A controlled ``uv`` substitute: records argv/env and reports a status."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     args_log = tmp_path / "uv-args.txt"
     env_log = tmp_path / "uv-env.txt"
-    _write_executable(
+    write_executable(
         bin_dir / "uv",
         textwrap.dedent(
             f"""\
@@ -128,7 +107,7 @@ def test_corpus_task_provisions_the_modern_lane_and_runs_the_gate():
 
 
 def test_corpus_gate_selects_only_corpus_marked_tests(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = _fixture_tree(tmp_path)
     bin_dir, args_log, _ = _fake_uv(tmp_path)
     result = _run_gate(
@@ -147,7 +126,7 @@ def test_corpus_gate_selects_only_corpus_marked_tests(tmp_path):
 
 
 def test_corpus_gate_wires_lane_fixtures_cache_jobs_and_gate_environment(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = _fixture_tree(tmp_path)
     bin_dir, _, env_log = _fake_uv(tmp_path)
     result = _run_gate(
@@ -172,7 +151,7 @@ def test_corpus_gate_wires_lane_fixtures_cache_jobs_and_gate_environment(tmp_pat
 
 
 def test_corpus_gate_honours_explicit_cache_and_worker_overrides(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = _fixture_tree(tmp_path)
     shared_cache = tmp_path / "shared-nltk-cache"
     bin_dir, _, env_log = _fake_uv(tmp_path)
@@ -196,7 +175,7 @@ def test_corpus_gate_honours_explicit_cache_and_worker_overrides(tmp_path):
 
 
 def test_corpus_gate_rejects_an_invalid_worker_count_before_pytest(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = _fixture_tree(tmp_path)
     bin_dir, args_log, _ = _fake_uv(tmp_path)
     result = _run_gate(
@@ -232,7 +211,7 @@ def test_corpus_gate_fails_before_pytest_when_the_lane_cannot_import_docassemble
 ):
     fixtures = _fixture_tree(tmp_path)
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    broken = _write_executable(
+    broken = write_executable(
         tmp_path / "broken-python",
         textwrap.dedent(
             """\
@@ -258,7 +237,7 @@ def test_corpus_gate_fails_before_pytest_when_the_lane_cannot_import_docassemble
 def test_corpus_gate_rejects_a_lane_from_the_wrong_family(tmp_path):
     fixtures = _fixture_tree(tmp_path)
     bin_dir, args_log, _ = _fake_uv(tmp_path)
-    legacy = _fake_lane(tmp_path, "legacy-python", "legacy", "1.9.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
     result = _run_gate(
         tmp_path,
         python=legacy,
@@ -272,7 +251,7 @@ def test_corpus_gate_rejects_a_lane_from_the_wrong_family(tmp_path):
 
 
 def test_corpus_gate_fails_before_pytest_when_fixtures_are_missing(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     bin_dir, args_log, _ = _fake_uv(tmp_path)
     result = _run_gate(
         tmp_path,
@@ -287,7 +266,7 @@ def test_corpus_gate_fails_before_pytest_when_fixtures_are_missing(tmp_path):
 
 
 def test_corpus_gate_rejects_a_fixture_checkout_without_examples(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = tmp_path / "fixtures"
     (fixtures / "examples").mkdir(parents=True)
     (fixtures / "demo_package").mkdir()
@@ -305,7 +284,7 @@ def test_corpus_gate_rejects_a_fixture_checkout_without_examples(tmp_path):
 
 
 def test_corpus_gate_rejects_a_fixture_checkout_without_the_demo_package(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = tmp_path / "fixtures"
     (fixtures / "examples").mkdir(parents=True)
     (fixtures / "examples" / "yesno.yml").write_text("question: Are you sure?\n")
@@ -323,7 +302,7 @@ def test_corpus_gate_rejects_a_fixture_checkout_without_the_demo_package(tmp_pat
 
 
 def test_corpus_gate_explains_an_empty_selection(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = _fixture_tree(tmp_path)
     bin_dir, _, _ = _fake_uv(tmp_path)
     result = _run_gate(
@@ -340,7 +319,7 @@ def test_corpus_gate_explains_an_empty_selection(tmp_path):
 
 
 def test_corpus_gate_propagates_pytest_failures(tmp_path):
-    modern = _fake_lane(tmp_path, "modern-python", "modern", "1.10.13")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
     fixtures = _fixture_tree(tmp_path)
     bin_dir, _, _ = _fake_uv(tmp_path)
     result = _run_gate(
