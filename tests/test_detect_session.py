@@ -466,6 +466,204 @@ class BooleanStyleInterview(FakeInterview):
         interview_status.selectcompute = {}
 
 
+class AutoSeekInputInterview(FakeInterview):
+    """Two defaultable screens followed by a required screen needing input."""
+
+    def assemble(self, namespace, interview_status):
+        if "first" not in namespace:
+            fields = [
+                SimpleNamespace(
+                    saveas="first", datatype="text", required=True, default="one"
+                )
+            ]
+            sought = "first"
+        elif "second" not in namespace:
+            fields = [
+                SimpleNamespace(
+                    saveas="second", datatype="text", required=True, default="two"
+                )
+            ]
+            sought = "second"
+        else:
+            fields = [
+                SimpleNamespace(saveas="target", datatype="text", required=True),
+                SimpleNamespace(saveas="optional", datatype="text", required=False),
+            ]
+            sought = "target"
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=sought,
+            validation_code=None,
+            fields=fields,
+        )
+        interview_status.question_text = sought
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = sought
+        interview_status.orig_sought = sought
+        interview_status.selectcompute = {}
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        status = args[1]
+        self.assemble(namespace, status)
+        return {
+            "type": "question",
+            "question": status.question,
+            "question_text": status.question_text,
+            "subquestion_text": status.subquestion_text,
+            "continue_label": status.continue_label,
+            "sought": status.sought,
+            "orig_sought": status.orig_sought,
+            "selectcompute": status.selectcompute,
+        }
+
+
+class AutoSeekNonProgressingInterview(FakeInterview):
+    """A walk that never defines its target remains bounded."""
+
+    def assemble(self, namespace, interview_status):
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="step",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="step", datatype="text", required=False, default="again"
+                )
+            ],
+        )
+        interview_status.question_text = "step"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "step"
+        interview_status.orig_sought = "step"
+        interview_status.selectcompute = {}
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        status = args[1]
+        self.assemble(namespace, status)
+        return {
+            "type": "question",
+            "question": status.question,
+            "question_text": status.question_text,
+            "subquestion_text": status.subquestion_text,
+            "continue_label": status.continue_label,
+            "sought": status.sought,
+            "orig_sought": status.orig_sought,
+            "selectcompute": status.selectcompute,
+        }
+
+
+class AutoSeekResolvedInterview(FakeInterview):
+    """A resolved target must not be submitted repeatedly."""
+
+    def assemble(self, namespace, interview_status):
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="target",
+            validation_code=None,
+            fields=[
+                SimpleNamespace(
+                    saveas="target", datatype="text", required=True, default="done"
+                )
+            ],
+        )
+        interview_status.question_text = "target"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "target"
+        interview_status.orig_sought = "target"
+        interview_status.selectcompute = {}
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        status = args[1]
+        self.assemble(namespace, status)
+        return {
+            "type": "question",
+            "question": status.question,
+            "question_text": status.question_text,
+            "subquestion_text": status.subquestion_text,
+            "continue_label": status.continue_label,
+            "sought": status.sought,
+            "orig_sought": status.orig_sought,
+            "selectcompute": status.selectcompute,
+        }
+
+
+class AutoSeekCompletionInterview(AutoSeekInputInterview):
+    """A defaultable target proves auto-seek stops at completion."""
+
+    def assemble(self, namespace, interview_status):
+        if "first" not in namespace:
+            return super().assemble(namespace, interview_status)
+        if "target" not in namespace:
+            interview_status.question = SimpleNamespace(
+                question_type="fields",
+                name="target",
+                validation_code=None,
+                fields=[
+                    SimpleNamespace(
+                        saveas="target", datatype="text", required=True, default="done"
+                    )
+                ],
+            )
+            interview_status.question_text = "target"
+            interview_status.subquestion_text = None
+            interview_status.continue_label = None
+            interview_status.sought = "target"
+            interview_status.orig_sought = "target"
+            interview_status.selectcompute = {}
+            return
+        raise sys.modules["docassemble.base.error"].DAErrorNoEndpoint("finished")
+
+
+class AutoSeekValidationInterview(FakeInterview):
+    """Validation mutates the namespace before rejecting an auto submission."""
+
+    questions_by_name: ClassVar[dict] = {
+        "validated": SimpleNamespace(
+            validation_code=(
+                "marker = 'changed'\n"
+                "from docassemble.base.error import DAValidationError\n"
+                "raise DAValidationError('not yet')"
+            )
+        )
+    }
+
+    def assemble(self, namespace, interview_status):
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name="validated",
+            validation_code=self.questions_by_name["validated"].validation_code,
+            fields=[
+                SimpleNamespace(
+                    saveas="value", datatype="text", required=True, default="ok"
+                ),
+                SimpleNamespace(saveas="optional", datatype="text", required=False),
+            ],
+        )
+        interview_status.question_text = "validated"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "target"
+        interview_status.orig_sought = "target"
+        interview_status.selectcompute = {}
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        status = args[1]
+        self.assemble(namespace, status)
+        return {
+            "type": "question",
+            "question": status.question,
+            "question_text": status.question_text,
+            "subquestion_text": status.subquestion_text,
+            "continue_label": status.continue_label,
+            "sought": status.sought,
+            "orig_sought": status.orig_sought,
+            "selectcompute": status.selectcompute,
+        }
+
+
 def _execution(tmp_path, monkeypatch, da_stubs, interview=FakeInterview):
     qdir = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     qdir.mkdir(parents=True, exist_ok=True)
@@ -900,6 +1098,130 @@ def test_refresh_variables_exec_and_seek_follow_their_commit_policies(
     activated = execution.run(Seek("target", activate=True))
     assert activated.ok
     assert execution.run(Status()).result["sought_variable"] == "target"
+
+
+def test_auto_seek_walks_defaults_and_stops_at_the_first_required_screen(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekInputInterview
+    )
+    assert execution.run(Start()).ok
+
+    sought = execution.run(Seek("target", auto=True))
+
+    assert sought.ok
+    assert [item["question_name"] for item in sought.result["auto_submitted"]] == [
+        "first",
+        "second",
+    ]
+    assert sought.result["auto_stop"]["reason"] == "required fields missing"
+    assert sought.result["auto_stop"]["missing_required"] == ["target"]
+    assert sought.result["question_name"] == "target"
+
+
+def test_auto_seek_reports_a_non_progressing_walk_as_bounded(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekNonProgressingInterview
+    )
+    assert execution.run(Start()).ok
+
+    sought = execution.run(Seek("target", auto=True))
+
+    assert sought.ok
+    assert len(sought.result["auto_submitted"]) == 100
+    assert sought.result["auto_stop"] == {
+        "reason": "auto-advance limit reached",
+        "limit": 100,
+    }
+
+
+def test_auto_seek_stops_when_the_target_resolves_without_reasking_it(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekResolvedInterview
+    )
+    assert execution.run(Start()).ok
+
+    sought = execution.run(Seek("target", auto=True))
+
+    assert sought.ok
+    assert len(sought.result["auto_submitted"]) == 1
+    assert sought.result["auto_stop"] == {"reason": "sought variable resolved"}
+
+
+def test_auto_seek_stops_at_completion_after_submitting_the_target(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekCompletionInterview
+    )
+    assert execution.run(Start()).ok
+
+    sought = execution.run(Seek("target", auto=True))
+
+    assert sought.ok
+    assert [item["question_name"] for item in sought.result["auto_submitted"]] == [
+        "first",
+        "target",
+    ]
+    assert sought.result["auto_stop"] == {"reason": "interview completed"}
+    assert sought.result["kind"] == "finished"
+
+
+def test_auto_seek_rolls_back_rejected_defaults_and_validation_mutations(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekValidationInterview
+    )
+    assert execution.run(Start()).ok
+    before = _session_bytes(tmp_path)
+
+    rejected = execution.run(Seek("target", auto=True, activate=True))
+
+    assert rejected.ok
+    assert rejected.result["auto_submitted"] == []
+    assert rejected.result["auto_stop"]["reason"] == "validation failed"
+    assert execution.run(Evaluate("'value' in globals()")).result["value"] == "False"
+    assert execution.run(Evaluate("'optional' in globals()")).result["value"] == "False"
+    assert execution.run(Evaluate("'marker' in globals()")).result["value"] == "False"
+    assert _session_bytes(tmp_path) != before  # activation stores the final seek
+
+
+def test_auto_seek_required_rejection_rolls_back_optional_blanks(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekInputInterview
+    )
+    assert execution.run(Start()).ok
+
+    rejected = execution.run(Seek("target", auto=True, activate=True))
+
+    assert rejected.ok
+    assert rejected.result["auto_stop"]["reason"] == "required fields missing"
+    assert execution.run(Evaluate("'first' in globals()")).result["value"] == "True"
+    assert execution.run(Evaluate("'second' in globals()")).result["value"] == "True"
+    assert execution.run(Evaluate("'optional' in globals()")).result["value"] == "False"
+
+
+def test_auto_seek_read_only_rejection_keeps_the_saved_session_unchanged(
+    tmp_path, monkeypatch, da_stubs
+):
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, AutoSeekInputInterview
+    )
+    assert execution.run(Start()).ok
+    before = _session_bytes(tmp_path)
+
+    rejected = execution.run(Seek("target", auto=True))
+
+    assert rejected.ok
+    assert _session_bytes(tmp_path) == before
 
 
 def test_state_seed_is_explicit_and_persists_without_assembly(

@@ -114,8 +114,13 @@ docassemble-simulator seek M.family --activate
   reassembles saved state.
 - `seek` starts from saved state by default. `--fresh` is isolated and
   `--activate` persists the sought screen as the active screen. `--auto`
-  repeatedly submits screens that can be completed from defaults/blanks and
-  reports the ordered screens it passed plus the first reason it stopped.
+  submits each screen that can be completed from defaults/blanks as its own
+  browser-shaped transaction, reports the ordered accepted screens, and stops
+  immediately when the sought variable resolves, the interview completes, or
+  real input/validation is needed. A rejected auto-submission rolls back its
+  defaults, synthesized blanks, and validation mutations; earlier accepted
+  screens remain committed in the operation-local walk. Non-activated and
+  fresh seeks do not save the walk.
 - Lazy variable seeking is reported as ordered `variable-seek` diagnostics,
   not as errors. A seek fails only when docassemble exhausts its definitions;
   that produces an `unresolved-variable` error containing the sought variable.

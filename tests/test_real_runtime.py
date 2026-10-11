@@ -732,6 +732,65 @@ def test_seek_contract_across_families(family_python, real_workspace):
     assert all(entry["kind"] == "variable-seek" for entry in diagnostics), label
 
 
+def test_auto_seek_submits_browser_defaults_and_completes_across_families(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    assert _run(interpreter, root, "start")["ok"], label
+    auto = _run(interpreter, root, "seek", "filing_date", "--auto")
+
+    assert auto["ok"], (label, auto)
+    assert auto["result"]["auto_submitted"], (label, auto)
+    assert auto["result"]["auto_stop"] == {"reason": "interview completed"}, (
+        label,
+        auto,
+    )
+    assert auto["result"]["kind"] == "finished", (label, auto)
+
+
+def test_auto_seek_rejection_is_transactional_and_can_be_answered_after_activation(
+    family_python, tmp_path
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = _whole_screen_workspace(tmp_path)
+    _assert_family_interpreter(case)
+
+    assert _run(interpreter, root, "start")["ok"], label
+    rejected = _run(
+        interpreter,
+        root,
+        "seek",
+        "person_name",
+        "--auto",
+        "--activate",
+    )
+    assert rejected["ok"], (label, rejected)
+    assert rejected["result"]["auto_submitted"] == [], (label, rejected)
+    assert rejected["result"]["auto_stop"]["reason"] == "required fields missing", (
+        label,
+        rejected,
+    )
+    assert (
+        _run(interpreter, root, "eval", "nickname", expected_code=2)["error"]["kind"]
+        == "execution"
+    ), label
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "person_name=Alice",
+        'required_topics={"housing": true}',
+    )
+    assert answered["ok"], (label, answered)
+    assert answered["result"]["question_name"] == "ID summary", label
+
+
 def test_cyclic_namespace_reports_unresolved_variable(family_python, real_workspace):
     """A dense object graph must not hide the original assembly failure.
 

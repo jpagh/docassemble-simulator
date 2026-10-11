@@ -52,6 +52,15 @@ from docassemble_simulator.describe import (
 
 STATE_SCHEMA = 1
 _MISSING = object()
+_NAMESPACE_COPY_ERRORS = (
+    TypeError,
+    ValueError,
+    RuntimeError,
+    AttributeError,
+    OSError,
+    MemoryError,
+    RecursionError,
+)
 
 
 def _activate_runtime(method):
@@ -1195,41 +1204,109 @@ def _auto_screen_summary(screen):
     }
 
 
+def _snapshot_namespace(namespace):
+    """Copy an operation-local namespace for one transactional submission.
+
+    Interview namespaces normally contain docassemble objects as well as a
+    few runtime helpers.  A deep copy gives validation code the same rollback
+    boundary as an ordinary answer, while the per-value fallback keeps an
+    unusual uncopyable helper from turning auto-seek into a new failure mode.
+    """
+    import copy
+
+    try:
+        return copy.deepcopy(namespace)
+    except _NAMESPACE_COPY_ERRORS:
+        snapshot = {}
+        for key, value in namespace.items():
+            try:
+                snapshot[key] = copy.deepcopy(value)
+            except _NAMESPACE_COPY_ERRORS:
+                snapshot[key] = value
+        return snapshot
+
+
+def _restore_namespace(namespace, snapshot):
+    namespace.clear()
+    namespace.update(snapshot)
+    try:
+        from docassemble.base.functions import this_thread
+
+        this_thread.current_dict = namespace
+        this_thread.internal = namespace.get("_internal", {})
+    except (ImportError, AttributeError):
+        # The runtime context is not available in isolated unit-level callers.
+        pass
+
+
 def _auto_submit_screen(interview, namespace, status, screen):
-    """Submit one screen exactly as an untouched browser form would."""
-    _submit_screen_fields(namespace, screen)
-    violations = _required_violations(namespace, screen, set())
-    if violations:
-        return None, {
-            "reason": "required fields missing",
-            "submitted": False,
-            "missing_required": [variable for variable, _reason in violations],
-            "errors": [
-                _required_message(variable, reason) for variable, reason in violations
-            ],
-            "screen": screen,
-        }
-    validation = _validate(interview, namespace, screen)
-    if validation["errors"]:
-        return None, {
-            "reason": "validation failed",
-            "submitted": False,
-            "errors": validation["errors"],
-            "warnings": validation["warnings"],
-            "screen": screen,
-        }
-    _mark_answered(interview, namespace, screen.get("question_name"))
-    outcome = _assemble(interview, namespace, status)
-    if outcome.get("kind") == "error":
-        return outcome, {
-            "reason": "flow error",
-            "submitted": True,
-            "error": outcome,
-            "screen": screen,
-        }
-    if validation["warnings"]:
-        outcome["warnings"] = validation["warnings"]
-    return outcome, None
+    """Submit one screen exactly as an untouched browser form would.
+
+    Defaults, browser blanks, and validation code all run inside a transaction.
+    A rejected screen is still returned to the caller, but none of those
+    attempted mutations become the next auto-seek state.
+    """
+    snapshot = _snapshot_namespace(namespace)
+    try:
+        _submit_screen_fields(namespace, screen)
+        violations = _required_violations(namespace, screen, set())
+        if violations:
+            _restore_namespace(namespace, snapshot)
+            return None, {
+                "reason": "required fields missing",
+                "submitted": False,
+                "missing_required": [variable for variable, _reason in violations],
+                "errors": [
+                    _required_message(variable, reason)
+                    for variable, reason in violations
+                ],
+                "screen": screen,
+            }
+        validation = _validate(interview, namespace, screen)
+        if validation["errors"]:
+            _restore_namespace(namespace, snapshot)
+            return None, {
+                "reason": "validation failed",
+                "submitted": False,
+                "errors": validation["errors"],
+                "warnings": validation["warnings"],
+                "screen": screen,
+            }
+        _mark_answered(interview, namespace, screen.get("question_name"))
+        outcome = _assemble(interview, namespace, status)
+        if outcome.get("kind") == "error":
+            return outcome, {
+                "reason": "flow error",
+                "submitted": True,
+                "error": outcome,
+                "screen": screen,
+            }
+        if validation["warnings"]:
+            outcome["warnings"] = validation["warnings"]
+        return outcome, None
+    except BaseException:
+        _restore_namespace(namespace, snapshot)
+        raise
+
+
+def _variable_is_resolved(namespace, variable):
+    try:
+        eval(variable, namespace)
+    except (
+        NameError,
+        AttributeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+        SyntaxError,
+        RuntimeError,
+        ImportError,
+        LookupError,
+        OSError,
+    ):
+        return False
+    return True
 
 
 def _seek_auto(interview, namespace, status, variable, trace):
@@ -1246,6 +1323,9 @@ def _seek_auto(interview, namespace, status, variable, trace):
             )
             stop = {"reason": reason}
             break
+        if _variable_is_resolved(namespace, variable):
+            stop = {"reason": "sought variable resolved"}
+            break
         screen = result
         result, stop = _auto_submit_screen(interview, namespace, status, screen)
         if stop is None or stop.get("submitted"):
@@ -1257,6 +1337,9 @@ def _seek_auto(interview, namespace, status, variable, trace):
             break
         if result.get("kind") == "finished":
             stop = {"reason": "interview completed"}
+            break
+        if _variable_is_resolved(namespace, variable):
+            stop = {"reason": "sought variable resolved"}
             break
         result = _seek(interview, namespace, status, variable, trace)
     else:

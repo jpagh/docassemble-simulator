@@ -121,6 +121,47 @@ def test_execution_records_a_screen_sidecar(tmp_path, monkeypatch):
     assert entry.ok is True
 
 
+def test_cli_records_each_auto_submitted_screen_before_the_final_outcome(
+    tmp_path, monkeypatch
+):
+    steps = [_screen("ID first"), _screen("ID second")]
+    final = _screen("ID final")
+    execution = _FakeExecution(
+        _outcome(
+            True,
+            {
+                **final,
+                "auto_trace": [
+                    {"screen": steps[0], "submitted": {"first": "one"}},
+                    {"screen": steps[1], "submitted": {"second": "two"}},
+                ],
+            },
+        )
+    )
+    monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "run.trace.jsonl"
+    args = _parse(
+        "seek",
+        "target",
+        "--auto",
+        "--record",
+        str(record),
+        "--json",
+    )
+
+    assert cli.cmd_execution(args, tmp_path) == 0
+
+    trace = load_trace(record)
+    assert [entry.identity.key for entry in trace.entries] == [
+        "id:first",
+        "id:second",
+        "id:final",
+    ]
+    assert trace.entries[0].submitted == {"first": "one"}
+    assert trace.entries[1].submitted == {"second": "two"}
+
+
 def test_failed_answer_records_the_unchanged_active_screen(tmp_path, monkeypatch):
     failure = _outcome(
         False, error=Failure(ErrorKind.VALIDATION, "screen rejected", {})
