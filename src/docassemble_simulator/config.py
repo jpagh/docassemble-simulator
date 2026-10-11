@@ -229,6 +229,7 @@ class ResolvedConfiguration:
     override_path: Path | None = None
     layers: tuple[tuple[str, dict[str, Any]], ...] = ()
     command_overrides: dict[str, Any] | None = None
+    additional_override_paths: tuple[Path, ...] = ()
 
     @property
     def effective_path(self) -> Path:
@@ -270,14 +271,16 @@ class ResolvedConfiguration:
         return report
 
     def session_context(self) -> dict[str, Any]:
-        return {
+        ephemeral = set(self.additional_override_paths)
+        context: dict[str, Any] = {
             "fingerprint": self.fingerprint,
-            "config_files": [str(path) for path in self.files],
+            "config_files": [str(path) for path in self.files if path not in ephemeral],
             "config_override": str(self.override_path)
             if self.override_path is not None
             else None,
             "command_overrides": copy.deepcopy(self.command_overrides or {}),
         }
+        return context
 
     def report(self) -> dict[str, Any]:
         report = {
@@ -294,6 +297,10 @@ class ResolvedConfiguration:
         }
         if self.override_path is not None:
             report["config_override"] = str(self.override_path)
+        if self.additional_override_paths:
+            report["config_overrides"] = [
+                str(path) for path in self.additional_override_paths
+            ]
         return report
 
 
@@ -312,20 +319,32 @@ def _read_override(path: Path) -> dict[str, Any]:
 def resolve_configuration(
     package_root: str | Path,
     *,
+    discovery_root: str | Path | None = None,
     override_path: str | Path | None = None,
+    additional_override_paths: tuple[str | Path, ...] = (),
+    mapping_overrides: dict[str, Any] | None = None,
     base: dict[str, Any] | None = None,
     command_overrides: dict[str, Any] | None = None,
 ) -> ResolvedConfiguration:
-    """Resolve every source and command policy through one configuration owner."""
+    """Resolve every source and command policy through one configuration owner.
+
+    ``package_root`` owns generated runtime files.  ``discovery_root`` lets an
+    isolated runner retain the original project's ancestor layers while the
+    worker writes its effective handoff in the isolated workspace.
+    """
     root = Path(package_root).resolve()
+    discovery = Path(discovery_root or root).resolve()
     selected_override = None
+    extra_overrides = tuple(
+        Path(path).expanduser().resolve() for path in additional_override_paths
+    )
     layers: list[tuple[str, dict[str, Any]]] = []
+    global_file = global_config_path().expanduser()
+    source_paths = [
+        *([global_file.resolve()] if global_file.is_file() else []),
+        *reversed(discover_config_files(discovery, global_path=global_file)),
+    ]
     if base is None:
-        global_file = global_config_path().expanduser()
-        source_paths = [
-            *([global_file.resolve()] if global_file.is_file() else []),
-            *reversed(discover_config_files(root, global_path=global_file)),
-        ]
         values: dict[str, Any] = {}
         for path in source_paths:
             loaded = _read_toml(path)
@@ -333,11 +352,6 @@ def resolve_configuration(
             layers.append((str(path), loaded))
     else:
         values = copy.deepcopy(base)
-        global_file = global_config_path().expanduser()
-        source_paths = [
-            *([global_file.resolve()] if global_file.is_file() else []),
-            *reversed(discover_config_files(root, global_path=global_file)),
-        ]
         if source_paths:
             for path in source_paths:
                 layers.append((str(path), _read_toml(path)))
@@ -348,20 +362,28 @@ def resolve_configuration(
         override_values = _read_override(selected_override)
         deep_merge(values, override_values)
         layers.append((f"--config {selected_override}", override_values))
+    for path in extra_overrides:
+        override_values = _read_override(path)
+        deep_merge(values, override_values)
+        layers.append((f"--config-layer {path}", override_values))
+    if mapping_overrides:
+        override_values = normalize_config(copy.deepcopy(mapping_overrides))
+        deep_merge(values, override_values)
+        layers.append(("explicit configuration mapping", override_values))
     if command_overrides:
         simulator = values.setdefault("simulator", {})
         if not isinstance(simulator, dict):
             raise TypeError("simulator config must be a table")
         deep_merge(simulator, command_overrides)
         layers.append(("command-line overrides", {"simulator": command_overrides}))
-    global_file = global_config_path().expanduser()
     files = [
-        *reversed(discover_config_files(root, global_path=global_file)),
+        *reversed(discover_config_files(discovery, global_path=global_file)),
     ]
     if global_file.is_file():
         files.insert(0, global_file.resolve())
     if selected_override is not None:
         files.append(selected_override)
+    files.extend(extra_overrides)
     return ResolvedConfiguration(
         root,
         normalize_config(values),
@@ -369,6 +391,7 @@ def resolve_configuration(
         selected_override,
         tuple(layers),
         copy.deepcopy(command_overrides or {}),
+        extra_overrides,
     )
 
 

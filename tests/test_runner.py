@@ -242,6 +242,46 @@ def test_runner_rejects_unsolicited_data_after_a_response(tmp_path):
         runner.status()
 
 
+@pytest.mark.parametrize("source_policy", ["copy", "symlink"])
+def test_runner_hands_worker_the_original_project_for_config_discovery(
+    tmp_path, source_policy
+):
+    project = _project(tmp_path / "original")
+    (tmp_path / "simulator.toml").write_text('timezone = "UTC"\n', encoding="utf-8")
+    (project / "simulator.toml").write_text(
+        'timezone = "America/Chicago"\n', encoding="utf-8"
+    )
+    marker = tmp_path / f"{source_policy}-argv.json"
+    executable = tmp_path / f"{source_policy}-worker"
+    executable.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv))\n"
+        "request = json.loads(sys.stdin.readline())\n"
+        f"print(json.dumps({{'id': request.get('id'), 'ok': True, 'result': {{}}, 'scope': {_scope()!r}}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+    with SimulatorRunner(
+        project,
+        config={"timezone": "America/Los_Angeles"},
+        source_policy=source_policy,
+        python=executable,
+    ) as runner:
+        response = runner.request("ping")
+        arguments = json.loads(marker.read_text(encoding="utf-8"))
+        assert response.ok
+        assert runner.project_root == project.resolve()
+        assert "--project-root" in arguments
+        assert arguments[arguments.index("--project-root") + 1] == str(
+            project.resolve()
+        )
+        assert "--config-layer" in arguments
+        generated = Path(arguments[arguments.index("--config-layer") + 1])
+        assert generated.is_file()
+        assert "America/Los_Angeles" in generated.read_text(encoding="utf-8")
+
+
 def test_runner_shared_policy_does_not_copy_source(tmp_path):
     project = _project(tmp_path)
     runner = SimulatorRunner(project, isolate=False)

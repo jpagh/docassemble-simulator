@@ -1345,6 +1345,12 @@ def build_parser():
         default=argparse.SUPPRESS,
         help="override config file (YAML or TOML); sessions are scoped by the effective configuration",
     )
+    common.add_argument(
+        "--config-layer",
+        action="append",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     common.add_argument(
         "--stub-defined", action="store_true", default=argparse.SUPPRESS
@@ -1800,10 +1806,15 @@ def main(argv=None):
             command_overrides["background_actions"] = args.background_actions
         if getattr(args, "seek_diagnostics", None):
             command_overrides["seek_diagnostics"] = args.seek_diagnostics
+        config_root = root
+        if getattr(args, "project_root", None):
+            config_root = Path(args.project_root).expanduser().resolve()
         resolved = resolve_configuration(
             root,
+            discovery_root=config_root,
             override_path=getattr(args, "config", None),
-            base=load_config(root),
+            additional_override_paths=tuple(getattr(args, "config_layer", None) or ()),
+            base=load_config(config_root),
             command_overrides=command_overrides,
         )
         config = resolved.values

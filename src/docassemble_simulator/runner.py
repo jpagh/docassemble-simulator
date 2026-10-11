@@ -17,7 +17,11 @@ from typing import Any
 
 import yaml
 
-from docassemble_simulator.config import deep_merge
+from docassemble_simulator.config import (
+    deep_merge,
+    load_config,
+    resolve_configuration,
+)
 from docassemble_simulator.detect import find_package_root
 
 
@@ -177,6 +181,9 @@ class SimulatorRunner:
         self._workspace: Path | None = None
         self._session_root: Path | None = None
         self._config_path: Path | None = None
+        self._config_layers: tuple[Path, ...] = ()
+        self._config_temporary: tempfile.TemporaryDirectory[str] | None = None
+        self._resolved_configuration = None
         self._process: subprocess.Popen[bytes] | None = None
         self._reader: _ResponseReader | None = None
         self._next_id = 0
@@ -203,9 +210,56 @@ class SimulatorRunner:
     def scope(self) -> dict[str, Any] | None:
         return (self._last_response or {}).get("scope")
 
+    def _explicit_config_path(self) -> Path | None:
+        if not isinstance(self.config, (str, Path)):
+            if self.config is not None and not isinstance(self.config, dict):
+                raise RunnerError("config must be a path or mapping")
+            return None
+        path = Path(self.config).expanduser()
+        if not path.is_absolute():
+            path = self.project_root / path
+        path = path.resolve()
+        if not path.is_file():
+            raise RunnerError(f"config {path} does not exist")
+        return path
+
+    def _mapping_overrides(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if isinstance(self.config, dict):
+            deep_merge(values, copy.deepcopy(self.config))
+        deep_merge(values, copy.deepcopy(self.config_overrides))
+        return values
+
+    def _command_overrides(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        if self.offline:
+            values["offline"] = True
+        if self.background_actions:
+            values["background_actions"] = self.background_actions
+        if self.seek_diagnostics:
+            values["seek_diagnostics"] = self.seek_diagnostics
+        return values
+
+    def _resolve_original_configuration(self) -> None:
+        if self._resolved_configuration is not None:
+            return
+        override_path = self._explicit_config_path()
+        mapping = self._mapping_overrides()
+        self._resolved_configuration = resolve_configuration(
+            self.project_root,
+            override_path=override_path,
+            mapping_overrides=mapping or None,
+            base=load_config(self.project_root),
+            command_overrides=self._command_overrides(),
+        )
+
     def _prepare_workspace(self) -> None:
         if self._workspace is not None:
             return
+        # Resolve before copying or symlinking.  The worker receives the
+        # original project root separately, so its discovery cannot be fooled
+        # by the temporary workspace's ancestors.
+        self._resolve_original_configuration()
         if self.source_policy == "shared":
             self._workspace = self.project_root
             self._temporary = None
@@ -264,42 +318,21 @@ class SimulatorRunner:
         self._prepare_config()
 
     def _prepare_config(self) -> None:
-        config_path: Path | None = None
-        if isinstance(self.config, (str, Path)):
-            config_path = Path(self.config).expanduser()
-            if not config_path.is_absolute():
-                config_path = (self.project_root / config_path).resolve()
+        config_path = self._explicit_config_path()
+        mapping = self._mapping_overrides()
+        if mapping:
+            if self._temporary is None:
+                self._config_temporary = tempfile.TemporaryDirectory(
+                    prefix="docassemble-runner-config-"
+                )
+                directory = Path(self._config_temporary.name)
             else:
-                config_path = config_path.resolve()
-        elif self.config is not None and not isinstance(self.config, dict):
-            raise RunnerError("config must be a path or mapping")
-        if config_path is not None and not config_path.is_file():
-            raise RunnerError(f"config {config_path} does not exist")
-        if self.config_overrides or isinstance(self.config, dict):
-            values: dict[str, Any] = {}
-            if config_path is not None:
-                if config_path.suffix.lower() == ".toml":
-                    import tomllib
-
-                    values = tomllib.loads(config_path.read_text(encoding="utf-8"))
-                else:
-                    values = (
-                        yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-                    )
-            elif isinstance(self.config, dict):
-                values = copy.deepcopy(self.config)
-            deep_merge(values, self.config_overrides)
-            assert self._temporary is not None or self._workspace is not None
-            directory = (
-                Path(self._temporary.name)
-                if self._temporary is not None
-                else self._workspace
+                directory = Path(self._temporary.name)
+            generated = directory / "runner-config.yml"
+            generated.write_text(
+                yaml.safe_dump(mapping, sort_keys=False), encoding="utf-8"
             )
-            assert directory is not None
-            config_path = directory / "runner-config.yml"
-            config_path.write_text(
-                yaml.safe_dump(values, sort_keys=False), encoding="utf-8"
-            )
+            self._config_layers = (generated,)
         self._config_path = config_path
 
     def _command(self) -> list[str]:
@@ -334,6 +367,8 @@ class SimulatorRunner:
                 str(self.timeout),
             ]
         )
+        for layer in self._config_layers:
+            command.extend(("--config-layer", str(layer)))
         if self.timings:
             command.append("--timings")
         return command
@@ -610,6 +645,9 @@ class SimulatorRunner:
         if self._temporary is not None:
             self._temporary.cleanup()
             self._temporary = None
+        if self._config_temporary is not None:
+            self._config_temporary.cleanup()
+            self._config_temporary = None
         self._workspace = None
         self._session_root = None
         self._config_path = None

@@ -226,8 +226,11 @@ operation's commit status may be uncertain.
 
 The runner discovers the project root when `root` is omitted, accepts a config
 path or mapping, and defaults to a copied source workspace plus a temporary
-session root. Its deadline covers writing the request and reading one complete
-newline-delimited response, including partial or stalled frames. A timeout,
+session root. Configuration is resolved against the original project root before
+copying or symlinking, so ancestor layers and relative explicit paths are not
+reinterpreted from the temporary directory. Its deadline covers writing the
+request and reading one complete newline-delimited response, including partial
+or stalled frames. A timeout,
 crash, malformed frame, or unexpected response id closes the runner. Timeout responses
 are typed as `timeout` and include only operation context. Use
 `source_policy="symlink"` or `isolate=False` only when shared source behavior is

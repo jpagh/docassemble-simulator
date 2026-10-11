@@ -58,6 +58,60 @@ class TestConfigDiscovery:
             "jinja data": {"category": {"family": "Family"}}
         }
 
+    def test_isolated_handoff_keeps_original_discovery_root_and_precedence(
+        self, tmp_path
+    ):
+        original = tmp_path / "project"
+        isolated = tmp_path / "temporary" / "project"
+        original.mkdir()
+        isolated.mkdir(parents=True)
+        (tmp_path / "simulator.toml").write_text(
+            'timezone = "UTC"\n[jinja-data]\nancestor = "yes"\n',
+            encoding="utf-8",
+        )
+        (original / "simulator.toml").write_text(
+            'timezone = "America/Chicago"\n[jinja-data]\nproject = "yes"\n',
+            encoding="utf-8",
+        )
+        resolved = resolve_configuration(
+            isolated,
+            discovery_root=original,
+            base=load_config(original),
+            mapping_overrides={"timezone": "America/Los_Angeles"},
+            command_overrides={"background_actions": "disabled"},
+        )
+
+        assert resolved.values["timezone"] == "America/Los_Angeles"
+        assert resolved.values["jinja data"] == {
+            "ancestor": "yes",
+            "project": "yes",
+        }
+        assert resolved.simulator["background_actions"] == "disabled"
+        assert resolved.files == (
+            tmp_path / "simulator.toml",
+            original / "simulator.toml",
+        )
+        assert (
+            str(tmp_path / "simulator.toml")
+            in resolved.session_context()["config_files"]
+        )
+        assert resolved.effective_path == (
+            isolated / ".simulator" / "config-effective.yml"
+        )
+
+    def test_ephemeral_handoff_layer_is_not_saved_as_a_resume_input(self, tmp_path):
+        handoff = tmp_path / "runner-config.yml"
+        handoff.write_text("timezone: UTC\n", encoding="utf-8")
+
+        resolved = resolve_configuration(
+            tmp_path,
+            additional_override_paths=(handoff,),
+        )
+
+        assert resolved.report()["config_overrides"] == [str(handoff)]
+        assert str(handoff) not in resolved.session_context()["config_files"]
+        assert "config_overrides" not in resolved.session_context()
+
     def test_resolved_configuration_owns_override_and_command_precedence(
         self, tmp_path
     ):
