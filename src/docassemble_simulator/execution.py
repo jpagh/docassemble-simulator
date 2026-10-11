@@ -125,6 +125,13 @@ class Variables:
 
 
 @dataclass(frozen=True)
+class ExplainResolution:
+    """Explain one variable's runtime resolution without committing state."""
+
+    variable: str
+
+
+@dataclass(frozen=True)
 class Execute:
     code: str
     assemble: bool = True
@@ -178,6 +185,7 @@ Operation = (
     | Seek
     | Evaluate
     | Variables
+    | ExplainResolution
     | Execute
     | SeedState
 )
@@ -513,6 +521,8 @@ class InterviewExecution:
                     outcome = self._evaluate(operation)
                 elif isinstance(operation, Variables):
                     outcome = self._variables(operation)
+                elif isinstance(operation, ExplainResolution):
+                    outcome = self._explain_resolution(operation)
                 elif isinstance(operation, Execute):
                     outcome = self._mutate(lambda: self._execute(operation))
                 elif isinstance(operation, SeedState):
@@ -793,6 +803,49 @@ class InterviewExecution:
                     ErrorKind.SEEK, f"{type(error).__name__}: {error}"
                 ),
             )
+
+    def _explain_resolution(self, operation: ExplainResolution):
+        """Run the saved-session catalog explanation read-only.
+
+        The saved namespace is prepared inside the normal execution context,
+        but this operation never calls ``save``.  With no session, catalog
+        inspection remains static and does not create one.
+        """
+        namespace = None
+        try:
+            namespace = self._store.load()["namespace"]
+        except ExecutionFailure as error:
+            if error.kind != ErrorKind.STATE or str(error) != (
+                "no saved session; run `start` first"
+            ):
+                raise
+
+        if namespace is None:
+            return ExecutionOutcome(
+                True,
+                self._resolution_report(self._catalog.why(operation.variable)),
+            )
+
+        with self._prepared_operation(namespace) as (interview, _status):
+            language = None
+            try:
+                from docassemble.base.functions import get_language
+
+                language = get_language()
+            except (ImportError, AttributeError, RuntimeError):
+                pass
+            report = self._catalog.why(
+                operation.variable,
+                namespace,
+                interview=interview,
+                language=language,
+            )
+        return ExecutionOutcome(True, self._resolution_report(report))
+
+    def _resolution_report(self, outcome):
+        """Keep catalog identity in the plain execution result."""
+        interview = getattr(outcome, "interview", None) or self._identity
+        return outcome.result | {"interview": interview}
 
     def _evaluate(self, operation: Evaluate):
         payload = self._store.load()
@@ -2447,6 +2500,7 @@ __all__ = [
     "Execute",
     "ExecutionError",
     "ExecutionOutcome",
+    "ExplainResolution",
     "FixtureSource",
     "FreshSource",
     "InterviewExecution",

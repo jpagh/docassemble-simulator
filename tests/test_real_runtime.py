@@ -244,6 +244,29 @@ def real_workspace(tmp_path, real_python):
         "subquestion: |\n"
         "  ${ T.miscellaneous.rav.date }\n"
     )
+    (questions / "resolution.yml").write_text(
+        "---\n"
+        "modules:\n"
+        "  - docassemble.regression.helpers\n"
+        "---\n"
+        "order:\n"
+        "  - resolution-helper\n"
+        "  - resolution-fallback\n"
+        "---\n"
+        "id: resolution-helper\n"
+        "mandatory: True\n"
+        "if: declared_helper('ready') == 'declared:ready'\n"
+        "question: Helper-backed candidate\n"
+        "fields:\n"
+        "  - Value: resolution_value\n"
+        "---\n"
+        "id: resolution-fallback\n"
+        "mandatory: True\n"
+        "if: declared_helper('missing') == 'declared:missing'\n"
+        "question: Fallback candidate\n"
+        "fields:\n"
+        "  - Value: resolution_value\n"
+    )
     (questions / "background.yml").write_text(
         "---\n"
         "mandatory: True\n"
@@ -699,6 +722,70 @@ def test_minimal_start_answer_contract_across_families(family_python, real_works
     # Dates screen must reach interview completion on either family (issue #1,
     # story 3: same start command, same outcome shape).
     assert answered["result"]["kind"] == "finished", (label, answered["result"])
+
+
+def test_resolution_explanation_is_runtime_ordered_and_read_only(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    static = _run(
+        interpreter,
+        root,
+        "why",
+        "resolution_value",
+        "--interview",
+        "resolution.yml",
+    )
+    assert static["ok"], label
+    assert static["result"]["session_state"] == "not saved", label
+    assert static["result"]["candidates"][0]["winner"] is True, label
+    assert static["result"]["candidates"][0]["language"] in {"en", "*"}, label
+
+    started = _run(
+        interpreter,
+        root,
+        "start",
+        "--interview",
+        "resolution.yml",
+    )
+    assert started["ok"], label
+    assert started["result"]["kind"] == "question", started
+    assert started["result"]["question_text"] == "Helper-backed candidate", label
+    session = next((root / ".simulator" / "sessions").glob("*.pkl"))
+    before = session.read_bytes()
+    prepared = _run(
+        interpreter,
+        root,
+        "why",
+        "resolution_value",
+        "--interview",
+        "resolution.yml",
+    )
+    assert prepared["ok"], label
+    report = prepared["result"]
+    assert report["session_state"] == "saved", label
+    assert report["winner"]["id"] == "resolution-helper", label
+    by_id = {candidate["id"]: candidate for candidate in report["candidates"]}
+    assert by_id["resolution-helper"]["live"] is True, label
+    assert by_id["resolution-fallback"]["live"] is True, label
+    assert report["conflict"] is True, label
+    assert report["winner"]["provenance"]["source_file"], label
+    strict = _run(
+        interpreter,
+        root,
+        "why",
+        "resolution_value",
+        "--interview",
+        "resolution.yml",
+        "--strict",
+        expected_code=2,
+    )
+    assert strict["error"]["kind"] == "resolution-conflict", label
+    assert session.read_bytes() == before, label
 
 
 def test_seek_contract_across_families(family_python, real_workspace):

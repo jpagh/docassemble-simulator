@@ -223,6 +223,36 @@ def test_execution_json_uses_one_envelope(monkeypatch, tmp_path, capsys):
     }
 
 
+def test_why_uses_the_read_only_execution_seam(monkeypatch, tmp_path, capsys):
+    from docassemble_simulator.execution import ExplainResolution
+
+    seen = {}
+
+    class FakeExecution:
+        def run(self, operation):
+            seen["operation"] = operation
+            return types.SimpleNamespace(
+                ok=True,
+                result={
+                    "variable": "M.value",
+                    "candidates": [],
+                    "winner": None,
+                    "conflict": False,
+                },
+                error=None,
+                diagnostics=(),
+                attachments=(),
+            )
+
+    monkeypatch.setattr(cli, "_execution", lambda args, root: FakeExecution())
+    args = cli.build_parser().parse_args(["why", "M.value", "--json"])
+
+    assert cli.cmd_catalog(args, tmp_path) == 0
+    assert isinstance(seen["operation"], ExplainResolution)
+    assert seen["operation"].variable == "M.value"
+    assert json.loads(capsys.readouterr().out)["result"]["variable"] == "M.value"
+
+
 def test_check_human_output_ends_with_totals(monkeypatch, tmp_path, capsys):
     class FakeCatalog:
         def __init__(self, root, selector):

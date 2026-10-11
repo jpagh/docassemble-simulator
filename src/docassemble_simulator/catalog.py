@@ -454,23 +454,38 @@ class InterviewCatalog:
             mapping[variable] = screens or None
         return CatalogOutcome(self.identity, {"index": mapping})
 
-    def why(self, variable: str, namespace: dict[str, Any] | None = None):
-        """Explain variable resolution in the runtime's last-loaded-first order."""
-        interview = self._compile_for_inspection()
+    def why(
+        self,
+        variable: str,
+        namespace: dict[str, Any] | None = None,
+        *,
+        interview=None,
+        language: str | None = None,
+    ):
+        """Explain resolution using the compiled runtime's candidate order.
+
+        ``interview`` is supplied by a prepared execution when a saved
+        session is available.  Keeping compilation and guard evaluation in
+        that execution context lets real runtime objects and helpers behave as
+        they do during seeking, while the returned report contains only plain
+        values.
+        """
+        interview = interview or self._compile_for_inspection()
         entry = (getattr(interview, "questions", {}) or {}).get(variable) or {}
+        if language is None:
+            try:
+                from docassemble.base.functions import get_language
+
+                language = get_language()
+            except (ImportError, AttributeError, RuntimeError):
+                language = None
+        language = language or getattr(interview, "default_language", None) or "en"
         questions = []
-        for language in ("en", "*"):
-            for question in reversed(entry.get(language) or []):
-                if not any(question is existing for existing, _language in questions):
-                    questions.append((question, language))
-        # Runtime releases sometimes expose only one language key. Preserve
-        # that data after the preferred keys above without changing ordering.
-        for language, values in entry.items():
-            if language in {"en", "*"}:
-                continue
-            for question in reversed(values or []):
-                if not any(question is existing for existing, _language in questions):
-                    questions.append((question, language))
+        for candidate_language in (language, "*"):
+            values = entry.get(candidate_language) or []
+            sorter = getattr(interview, "sort_with_orderings", None)
+            ordered = sorter(values) if callable(sorter) else reversed(values)
+            questions.extend((question, candidate_language) for question in ordered)
 
         candidates = []
         for order, (question, language) in enumerate(questions, start=1):

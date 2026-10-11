@@ -326,57 +326,53 @@ def cmd_config(args, root):
 
 def cmd_catalog(args, root):
     from docassemble_simulator.catalog import CatalogFailure, InterviewCatalog
-    from docassemble_simulator.execution import ExecutionFailure
+    from docassemble_simulator.execution import ExplainResolution
 
-    namespace = None
     if args.command == "why":
-        try:
-            namespace = _execution(args, root)._store.load()["namespace"]
-        except ExecutionFailure as error:
-            if error.kind != ErrorKind.STATE or "no saved session" not in str(error):
-                _emit(
-                    _envelope(
-                        args.command,
-                        error=Failure(error.kind, str(error), error.details or {}),
-                    ),
-                    args.json,
-                )
-                return _exit_for_error(error.kind)
-
-    catalog = InterviewCatalog(root, args.interview)
-
-    catalog = InterviewCatalog(root, args.interview)
-    try:
-        if args.command == "check":
-            outcome = catalog.check()
-        elif args.command == "questions":
-            outcome = catalog.questions(args.var)
-        elif args.command == "index":
-            outcome = catalog.index(args.var)
-        else:
-            outcome = catalog.why(args.variable, namespace)
-    except AssemblyLineCompatibilityError as error:
-        _emit(
-            _envelope(
-                args.command,
-                error=Failure(
-                    ErrorKind.RUNTIME_COMPATIBILITY, str(error), error.details
+        outcome = _execution(args, root).run(ExplainResolution(args.variable))
+        if not outcome.ok:
+            _emit(
+                _envelope(
+                    args.command,
+                    error=outcome.error,
+                    diagnostics=outcome.diagnostics,
                 ),
-            ),
-            args.json,
-        )
-        return _exit_for_error(ErrorKind.RUNTIME_COMPATIBILITY)
-    except CatalogFailure as error:
-        _emit(
-            _envelope(
-                args.command,
-                error=Failure(ErrorKind.COMPILE, str(error), {}),
-            ),
-            args.json,
-        )
-        return 2
+                args.json,
+            )
+            return _exit_for_error(outcome.error.kind)
+    else:
+        catalog = InterviewCatalog(root, args.interview)
+        try:
+            if args.command == "check":
+                outcome = catalog.check()
+            elif args.command == "questions":
+                outcome = catalog.questions(args.var)
+            else:
+                outcome = catalog.index(args.var)
+        except AssemblyLineCompatibilityError as error:
+            _emit(
+                _envelope(
+                    args.command,
+                    error=Failure(
+                        ErrorKind.RUNTIME_COMPATIBILITY, str(error), error.details
+                    ),
+                ),
+                args.json,
+            )
+            return _exit_for_error(ErrorKind.RUNTIME_COMPATIBILITY)
+        except CatalogFailure as error:
+            _emit(
+                _envelope(
+                    args.command,
+                    error=Failure(ErrorKind.COMPILE, str(error), {}),
+                ),
+                args.json,
+            )
+            return 2
     result = outcome.result | (
-        {"interview": outcome.interview} if outcome.interview else {}
+        {"interview": getattr(outcome, "interview", None)}
+        if getattr(outcome, "interview", None)
+        else {}
     )
     ok = not (
         (args.command == "check" and result["failures"])
@@ -1308,9 +1304,10 @@ def build_parser():
         "why",
         help="explain which blocks can resolve a variable",
         description=(
-            "List variable-resolution candidates in last-loaded-first order, "
-            "with provenance and guard text. A saved session also evaluates "
-            "which guards are live."
+            "List variable-resolution candidates in the real runtime's order, "
+            "with provenance and guard text. A saved session evaluates guards "
+            "through prepared read-only execution; without one, the report is "
+            "static and does not create state."
         ),
     )
     why.add_argument("variable")

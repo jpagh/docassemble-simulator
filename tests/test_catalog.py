@@ -173,6 +173,41 @@ def test_check_reports_duplicate_ids_and_separates_overrides(tmp_path, monkeypat
     assert result["totals"]["checked"] == 1
 
 
+def test_why_uses_runtime_ordering_and_current_language(tmp_path, monkeypatch):
+    package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    package.mkdir(parents=True)
+    (package.parent.parent / "__init__.py").write_text("")
+    english = _question(
+        tmp_path,
+        line=1,
+        variable="shared",
+        explicit_id="english",
+    )
+    french = _question(
+        tmp_path,
+        line=8,
+        variable="shared",
+        explicit_id="french",
+    )
+
+    class RuntimeInterview(SimpleNamespace):
+        def sort_with_orderings(self, questions):
+            return iter(reversed(questions))
+
+    interview = RuntimeInterview(
+        questions={"shared": {"en": [english], "fr": [english, french]}},
+        questions_list=[english, french],
+    )
+    catalog = InterviewCatalog(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    monkeypatch.setattr(catalog, "_compile_for_inspection", lambda: interview)
+
+    report = catalog.why("shared", language="fr").result
+
+    assert [item["id"] for item in report["candidates"]] == ["french", "english"]
+    assert report["candidates"][0]["language"] == "fr"
+    assert report["winner"]["id"] == "french"
+
+
 def test_check_reports_complete_totals(tmp_path, monkeypatch):
     package = tmp_path / "docassemble" / "pkg" / "data" / "questions"
     package.mkdir(parents=True)

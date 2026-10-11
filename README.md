@@ -32,12 +32,16 @@ non-uv project, install it into the target package interpreter:
 Pin a release tag when reproducibility matters, for example
 `git+https://github.com/jpagh/docassemble-simulator@v26.9.0`.
 
-`why VARIABLE` lists variable-resolution candidates in last-loaded-first
-order, including catalog provenance and authored guards. With a saved session it
-marks guards live/inactive and reports resolution conflicts; `--strict` makes a
-conflict non-zero. A terminal unresolved-variable error includes the responsible
-block provenance and expression; tolerated lazy references remain diagnostics
-without a culprit.
+`why VARIABLE` lists variable-resolution candidates in the same order the real
+runtime will try them, including explicit ordering directives, applicable
+language fallback, catalog provenance, and authored guards. With a saved session,
+guards are evaluated after read-only execution preparation, so rehydrated helpers
+and docassemble objects behave normally; the operation never saves the prepared
+state. Without a saved session it reports guard text without fabricating guard
+values. It marks the runtime winner when it can and reports resolution
+conflicts; `--strict` makes a conflict non-zero. A terminal unresolved-variable
+error includes the responsible block provenance and expression; tolerated lazy
+references remain diagnostics without a culprit.
 
 The simulator must run in the same environment as the target package; a global
 installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
