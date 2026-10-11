@@ -71,6 +71,20 @@ def _write_request(stream, data: bytes, deadline: float) -> None:
             pending = pending[written:]
 
 
+_REQUIRED_SCOPE_FIELDS = frozenset(
+    {
+        "root",
+        "project_root",
+        "interview",
+        "config_fingerprint",
+        "session_root",
+        "session",
+        "session_id",
+        "pid",
+    }
+)
+
+
 class RunnerResponse(dict):
     """Dictionary response with the familiar typed-outcome conveniences."""
 
@@ -160,6 +174,7 @@ class SimulatorRunner:
         self._reader: _ResponseReader | None = None
         self._next_id = 0
         self._last_response: dict[str, Any] | None = None
+        self._scope: dict[str, Any] | None = None
         self._closed = False
 
     @property
@@ -359,8 +374,7 @@ class SimulatorRunner:
         self._closed = True
         self._cleanup_workspace()
 
-    @staticmethod
-    def _validate_response(decoded: Any, request_id: str) -> RunnerResponse:
+    def _validate_response(self, decoded: Any, request_id: str) -> RunnerResponse:
         if not isinstance(decoded, dict):
             raise TypeError("worker returned a non-object response")
         if decoded.get("id") != request_id:
@@ -369,8 +383,22 @@ class SimulatorRunner:
             )
         if type(decoded.get("ok")) is not bool:
             raise ValueError("worker response field 'ok' must be a boolean")
-        if not isinstance(decoded.get("scope"), dict):
+        scope = decoded.get("scope")
+        if not isinstance(scope, dict):
             raise TypeError("worker response field 'scope' must be an object")
+        missing_scope_fields = _REQUIRED_SCOPE_FIELDS - scope.keys()
+        if missing_scope_fields:
+            fields = ", ".join(sorted(missing_scope_fields))
+            raise ValueError(f"worker response scope is missing: {fields}")
+        string_scope_fields = _REQUIRED_SCOPE_FIELDS - {"pid", "session_id"}
+        if any(not isinstance(scope[field], str) for field in string_scope_fields):
+            raise ValueError("worker response scope has invalid string fields")
+        if scope["session_id"] is not None and not isinstance(scope["session_id"], str):
+            raise ValueError("worker response scope has an invalid session id")
+        if type(scope["pid"]) is not int:
+            raise ValueError("worker response scope has an invalid pid")
+        if self._scope is not None and scope != self._scope:
+            raise ValueError("worker response scope changed during a journey")
         if decoded["ok"]:
             if "result" not in decoded or "error" in decoded:
                 raise ValueError("successful worker response has an invalid shape")
@@ -385,7 +413,10 @@ class SimulatorRunner:
                 or not isinstance(error.get("details"), dict)
             ):
                 raise ValueError("worker error response has an invalid shape")
-        return RunnerResponse(decoded)
+        response = RunnerResponse(decoded)
+        if self._scope is None:
+            self._scope = dict(scope)
+        return response
 
     def request(self, operation: str, **arguments: Any) -> RunnerResponse:
         """Send one operation and wait at most ``timeout`` seconds for a response."""
@@ -516,6 +547,7 @@ class SimulatorRunner:
     def terminate(self) -> None:
         process = self._process
         if process is None:
+            self._scope = None
             return
         if process.poll() is None:
             process.terminate()
@@ -532,6 +564,7 @@ class SimulatorRunner:
         if process.stdout is not None:
             process.stdout.close()
         self._process = None
+        self._scope = None
 
     def close(self):
         if self._closed:
