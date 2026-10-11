@@ -18,6 +18,7 @@ from typing import Any
 __all__ = [
     "TRACE_SCHEMA_VERSION",
     "ComparePolicy",
+    "ReplayVerdict",
     "ScreenIdentity",
     "ScreenTrace",
     "TraceComparison",
@@ -28,6 +29,8 @@ __all__ = [
     "TraceMetadata",
     "TracePhaseComparison",
     "append_trace",
+    "assign_identity",
+    "compare_replay_entries",
     "compare_traces",
     "error_identity",
     "is_screen_outcome",
@@ -450,7 +453,7 @@ def _compatible_metadata(expected: TraceMetadata, actual: TraceMetadata) -> None
             )
 
 
-def _assign_identity(
+def assign_identity(
     screen: dict[str, Any] | None,
     error: dict[str, Any] | None,
     entries: tuple[TraceEntry, ...],
@@ -484,6 +487,64 @@ def _assign_identity(
         and entry.phase == phase
     )
     return replace(identity, occurrence=occurrence)
+
+
+# Kept as a package-local alias for the recording adapter and older callers.
+_assign_identity = assign_identity
+
+
+@dataclass(frozen=True)
+class ReplayVerdict:
+    """Pure identity, field-fact, flow, and error verdict for one replay step."""
+
+    identity_match: bool
+    field_facts_match: bool
+    flow_match: bool
+    error_match: bool
+    expected_content: tuple[dict[str, Any], ...]
+    actual_content: tuple[dict[str, Any], ...]
+
+    @property
+    def matched(self) -> bool:
+        return (
+            self.identity_match
+            and self.field_facts_match
+            and self.flow_match
+            and self.error_match
+        )
+
+
+def compare_replay_entries(expected: TraceEntry, actual: TraceEntry) -> ReplayVerdict:
+    """Compare one recorded step with one replayed step without side effects.
+
+    The CLI owns execution and report orchestration; this function is the one
+    comparison policy for replay verdicts, just as :func:`compare_traces` owns
+    sidecar comparison.  Field facts remain distinct from canonical identity.
+    """
+    expected_content = expected.content or (
+        screen_content(expected.screen) if expected.screen is not None else ()
+    )
+    actual_content = actual.content or (
+        screen_content(actual.screen) if actual.screen is not None else ()
+    )
+    identity_match = (
+        expected.identity is not None
+        and actual.identity is not None
+        and expected.identity.key == actual.identity.key
+        and expected.identity.rule == actual.identity.rule
+    )
+    flow_match = expected.ok == actual.ok
+    expected_error_kind = (expected.error or {}).get("kind")
+    actual_error_kind = (actual.error or {}).get("kind")
+    error_match = expected.ok or expected_error_kind == actual_error_kind
+    return ReplayVerdict(
+        identity_match=identity_match,
+        field_facts_match=expected_content == actual_content,
+        flow_match=flow_match,
+        error_match=error_match,
+        expected_content=expected_content,
+        actual_content=actual_content,
+    )
 
 
 def load_trace(path: str | Path) -> ScreenTrace:

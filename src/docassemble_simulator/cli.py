@@ -657,6 +657,10 @@ def _record_execution(args, root, execution, operation, payload):
                 operation=args.command,
                 intent="auto",
                 target=context["target"],
+                # Preserve the seek's activation policy on every automatic
+                # step. Replay also reads it from the trailing post-walk
+                # record so schema-4 traces remain compatible.
+                activate=context["activate"],
                 # A fresh auto-seek has no saved session to answer against.
                 # The replay adapter uses this marker to seed its private
                 # session once, without changing the user's session.
@@ -829,20 +833,87 @@ def _trace_replay_actual(execution, operation):
     return outcome.ok, screen, actual_error
 
 
-def _trace_replay_step(entry, submitted, execution, actual_entries=()):
+def _trace_replay_observation(
+    entry,
+    submitted,
+    actual_ok,
+    actual_screen,
+    actual_error,
+    actual_entries=(),
+):
+    """Build one adapter report from an execution observation."""
     from docassemble_simulator.trace import (
         TraceEntry,
-        _assign_identity,
-        is_screen_outcome,
-        screen_content,
+        assign_identity,
+        compare_replay_entries,
     )
 
     intent = entry.intent or entry.operation
+    actual_identity = assign_identity(
+        actual_screen,
+        actual_error,
+        tuple(actual_entries),
+        entry.phase,
+    )
+    actual_entry = TraceEntry(
+        seq=entry.seq,
+        operation=entry.operation,
+        phase=entry.phase,
+        submitted=submitted,
+        ok=actual_ok,
+        screen=actual_screen,
+        identity=actual_identity,
+        content=(),
+        error=actual_error,
+        intent=intent,
+        target=entry.target,
+        fresh=entry.fresh,
+        activate=entry.activate,
+        post_auto=entry.post_auto,
+    )
+    verdict = compare_replay_entries(entry, actual_entry)
+    return {
+        "_actual_entry": actual_entry,
+        "step": entry.seq,
+        "operation": entry.operation,
+        "intent": intent,
+        "submitted": submitted,
+        "match": verdict.matched,
+        "identity_match": verdict.identity_match,
+        "field_facts_match": verdict.field_facts_match,
+        "flow_match": verdict.flow_match,
+        "error_match": verdict.error_match,
+        "expected": {
+            "identity": _trace_identity_dict(entry.identity),
+            "content": list(verdict.expected_content),
+            "ok": entry.ok,
+            "error": entry.error,
+            "intent": intent,
+            "submitted": entry.submitted,
+        },
+        "actual": {
+            "identity": _trace_identity_dict(actual_identity),
+            "content": list(verdict.actual_content),
+            "ok": actual_ok,
+            "error": actual_error,
+            "intent": intent,
+            "submitted": submitted,
+        },
+    }
+
+
+def _trace_replay_step(entry, submitted, execution, actual_entries=()):
+    """Replay one non-grouped trace entry.
+
+    The legacy automatic branch remains for hand-written schema-4 fixtures
+    without a post-walk marker. Recorder-produced automatic walks use the
+    grouped operation below so their target context and activation policy stay
+    operation-local.
+    """
+    from docassemble_simulator.trace import is_screen_outcome
+
+    intent = entry.intent or entry.operation
     if intent == "auto":
-        # The recorded screen is the screen *before* its automatic submission.
-        # Inspect it first, then apply the operation. This is what prevents an
-        # automatic step from degrading into a seek that merely revisits the
-        # same identity.
         from docassemble_simulator.execution import Seek, Status
 
         status = execution.run(Status())
@@ -858,10 +929,6 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
         actual_ok = outcome.ok
         actual_error = _clean(outcome.error) if not outcome.ok else None
     elif intent == "seek" and entry.post_auto:
-        # The final record after an expanded auto-seek is an observation of the
-        # post-walk outcome. Re-running the target seek would ask a different
-        # question once the target is already resolved, so inspect the private
-        # replay session instead.
         from docassemble_simulator.execution import Status
 
         status = execution.run(Status())
@@ -875,77 +942,88 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
         actual_ok, actual_screen, actual_error = _trace_replay_actual(
             execution, operation
         )
-
-    actual_identity = _assign_identity(
+    return _trace_replay_observation(
+        entry,
+        submitted,
+        actual_ok,
         actual_screen,
         actual_error,
-        tuple(actual_entries),
-        entry.phase,
+        actual_entries,
     )
-    expected_content = entry.content or (
-        screen_content(entry.screen) if entry.screen is not None else ()
+
+
+def _trace_replay_automatic_group(entries, start, overrides, execution, actual_entries):
+    """Replay one recorded automatic walk in one operation-local context."""
+    from docassemble_simulator.execution import ReplayAutomatic
+    from docassemble_simulator.trace import is_screen_outcome
+
+    first = entries[start]
+    end = start
+    while (
+        end < len(entries) and (entries[end].intent or entries[end].operation) == "auto"
+    ):
+        end += 1
+    post = entries[end] if end < len(entries) and entries[end].post_auto else None
+    target = first.target
+    if not isinstance(target, str) or not target:
+        raise InputFailure(f"trace step {first.seq} has no automatic seek target")
+    activate = post.activate if post is not None else first.activate
+    submissions = tuple(
+        tuple(overrides.get(entry.seq, dict(entry.submitted)).items())
+        for entry in entries[start:end]
     )
-    actual_content = screen_content(actual_screen) if actual_screen is not None else ()
-    identity_match = (
-        entry.identity is not None
-        and actual_identity is not None
-        and entry.identity.key == actual_identity.key
-        and entry.identity.rule == actual_identity.rule
+    outcome = execution.run(
+        ReplayAutomatic(
+            target,
+            submissions=submissions,
+            fresh=first.fresh,
+            activate=activate,
+        )
     )
-    flow_match = entry.ok == actual_ok
-    expected_error_kind = (entry.error or {}).get("kind")
-    actual_error_kind = (actual_error or {}).get("kind")
-    error_match = entry.ok or expected_error_kind == actual_error_kind
-    match = (
-        identity_match
-        and expected_content == actual_content
-        and flow_match
-        and error_match
+    result = outcome.result if outcome.ok and isinstance(outcome.result, dict) else {}
+    details = (
+        outcome.error.details if not outcome.ok and outcome.error is not None else {}
     )
-    actual_entry = TraceEntry(
-        seq=entry.seq,
-        operation=entry.operation,
-        phase=entry.phase,
-        submitted=submitted,
-        ok=actual_ok,
-        screen=actual_screen,
-        identity=actual_identity,
-        content=actual_content,
-        error=actual_error,
-        intent=intent,
-        target=entry.target,
-        fresh=entry.fresh,
-        activate=entry.activate,
-        post_auto=entry.post_auto,
+    actual_steps = result.get("auto_trace") or (
+        details.get("auto_trace") if isinstance(details, dict) else []
     )
-    return {
-        "_actual_entry": actual_entry,
-        "step": entry.seq,
-        "operation": entry.operation,
-        "intent": intent,
-        "submitted": submitted,
-        "match": match,
-        "identity_match": identity_match,
-        "field_facts_match": expected_content == actual_content,
-        "flow_match": flow_match,
-        "error_match": error_match,
-        "expected": {
-            "identity": _trace_identity_dict(entry.identity),
-            "content": list(expected_content),
-            "ok": entry.ok,
-            "error": entry.error,
-            "intent": intent,
-            "submitted": entry.submitted,
-        },
-        "actual": {
-            "identity": _trace_identity_dict(actual_identity),
-            "content": list(actual_content),
-            "ok": actual_ok,
-            "error": actual_error,
-            "intent": intent,
-            "submitted": submitted,
-        },
-    }
+    actual_steps = actual_steps if isinstance(actual_steps, list) else []
+    reports = []
+    for offset, entry in enumerate(entries[start:end]):
+        actual = actual_steps[offset] if offset < len(actual_steps) else {}
+        actual_screen = actual.get("screen") if isinstance(actual, dict) else None
+        actual_error = actual.get("error") if isinstance(actual, dict) else None
+        actual_ok = bool(actual.get("ok", False)) if isinstance(actual, dict) else False
+        report = _trace_replay_observation(
+            entry,
+            dict(submissions[offset]),
+            actual_ok,
+            actual_screen,
+            actual_error,
+            actual_entries,
+        )
+        actual_entries.append(report.pop("_actual_entry"))
+        reports.append(report)
+        if not report["match"]:
+            return reports, end + (1 if post is not None else 0)
+    if len(actual_steps) > len(entries[start:end]):
+        # No expected entry can absorb an additional automatic submission.
+        reports[-1]["match"] = False
+        reports[-1]["flow_match"] = False
+    if post is not None:
+        actual_error = _clean(outcome.error) if not outcome.ok else None
+        actual_screen = result if outcome.ok and is_screen_outcome(result) else None
+        report = _trace_replay_observation(
+            post,
+            dict(overrides.get(post.seq, dict(post.submitted))),
+            outcome.ok,
+            actual_screen,
+            actual_error,
+            actual_entries,
+        )
+        actual_entries.append(report.pop("_actual_entry"))
+        reports.append(report)
+    return reports, end + (1 if post is not None else 0)
 
 
 def cmd_trace_replay(args, root):
@@ -1002,12 +1080,29 @@ def cmd_trace_replay(args, root):
         steps = []
         actual_entries = []
         first_divergence = None
-        for entry in golden.entries:
+        index = 0
+        while index < len(golden.entries):
+            entry = golden.entries[index]
+            if (
+                (entry.intent or entry.operation) == "auto"
+                and index + 1 < len(golden.entries)
+                and golden.entries[index + 1].post_auto
+            ):
+                grouped, index = _trace_replay_automatic_group(
+                    golden.entries, index, overrides, execution, actual_entries
+                )
+                steps.extend(grouped)
+                divergence = next((step for step in grouped if not step["match"]), None)
+                if divergence is not None:
+                    first_divergence = divergence
+                    break
+                continue
             submitted = dict(entry.submitted)
             submitted.update(overrides.get(entry.seq, {}))
             step = _trace_replay_step(entry, submitted, execution, actual_entries)
             actual_entries.append(step.pop("_actual_entry"))
             steps.append(step)
+            index += 1
             if not step["match"]:
                 first_divergence = step
                 break

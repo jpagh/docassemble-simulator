@@ -290,11 +290,15 @@ the `trace-mismatch` error details.
 `trace replay GOLDEN` starts a fresh isolated session, applies each recorded
 intent (including browser defaults and automatic submissions), and stops at the
 first identity, field-fact, flow, or rejected-assignment divergence. Automatic
-steps compare the screen before submitting it and then apply the recorded
-transaction; a failed automatic submission is therefore not silently replaced
-by a seek. Use `--override STEP.FIELD=VALUE` to vary one answer without
+steps initialize their recorded seek target in one operation-local namespace,
+compare each pre-submission screen, and then apply the recorded transaction;
+a failed automatic submission is therefore not silently replaced by a seek.
+The recorded activation policy is preserved: a non-activated walk does not
+replace the replay session's Saved screen, while an activated walk commits its
+result once. Use `--override STEP.FIELD=VALUE` to vary one answer without
 changing the golden. Replay validates the interview and configuration
-fingerprint metadata, never writes the golden, and exits non-zero on divergence.
+fingerprint metadata, never writes the golden or the user's Saved session, and
+exits non-zero on divergence.
 
 The identity rules and the evidence behind them are documented in
 [docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).

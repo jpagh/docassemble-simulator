@@ -424,6 +424,70 @@ def test_trace_replay_round_trips_default_auto_failure_and_answer(
     assert after == before
 
 
+def test_trace_replay_preserves_nonactivated_seek_context(
+    family_python,  # noqa: F811
+    tmp_path,
+):
+    """A target walk must not answer the Saved screen it temporarily bypasses."""
+    interpreter = family_python.interpreter
+    root = _write_interview(tmp_path / "nonactivated", REPLAY_INTERVIEW)
+    record = root / "scenario.trace.jsonl"
+
+    code, payload = _command(interpreter, root, "start", "--record", str(record))
+    assert code == 0, payload
+    # The Saved session remains on Intro.  The automatic walk seeks the later
+    # target, accepts its optional predecessors, and rejects at Required.
+    code, payload = _command(
+        interpreter,
+        root,
+        "seek",
+        "target_value",
+        "--auto",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+    code, payload = _command(
+        interpreter,
+        root,
+        "answer",
+        "user_name=Jack",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+    for arguments in (("--defaults",), ("--defaults",), ("target_value=good",)):
+        code, payload = _command(
+            interpreter,
+            root,
+            "answer",
+            *arguments,
+            "--record",
+            str(record),
+        )
+        assert code == 0, payload
+
+    golden = load_trace(record)
+    automatic = [entry for entry in golden.entries if entry.intent == "auto"]
+    assert automatic
+    assert any(not entry.ok for entry in automatic)
+    post_walk = next(entry for entry in golden.entries if entry.post_auto)
+    assert post_walk.activate is False
+
+    before = {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
+    after = {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+    assert after == before
+
+
 def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
     interpreter = family_python.interpreter
 

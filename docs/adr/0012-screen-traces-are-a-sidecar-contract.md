@@ -45,6 +45,19 @@ implementation now enforces them:
   an empty list, never a declaration, so no per-invocation flag can make the
   metadata-mismatch rule fire.
 
+Issue #38 clarifies the replay lifecycle without changing schema 4. The
+`fresh`, `target`, and `activate` values on the automatic walk's trailing
+post-walk record are the seek policy; older schema-4 automatic records that
+left `activate` false on their per-screen entries remain readable because the
+trailing record is authoritative. Replay initializes that target in one
+operation-local namespace, compares each pre-submission screen, and applies the
+recorded default or override in the same namespace. A non-activated walk never
+persists its temporary target or mutations, so later replayed answers observe
+the original Saved screen; an activated walk commits the resulting target only
+once the walk completes. Identity, field-fact, flow, and error verdicts are
+computed by pure functions in this module, while the CLI retains only
+execution and report orchestration.
+
 ## Considered options
 
 1. **Harness-level recording only.** Each test driver wraps the `--json` envelope and writes JSONL itself. Zero simulator changes, but the canonicalizer is duplicated per driver and the identity rule cannot be shared with a server lane.

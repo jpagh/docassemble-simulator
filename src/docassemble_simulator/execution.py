@@ -116,6 +116,22 @@ class Seek:
 
 
 @dataclass(frozen=True)
+class ReplayAutomatic:
+    """Replay one automatic seek in one operation-local namespace.
+
+    Empty assignment tuples retain the recorded browser-default submission;
+    non-empty tuples are explicit per-step replay overrides.  Keeping the
+    seek and all of its submissions in one operation prevents a non-activated
+    walk from being persisted between adapter calls.
+    """
+
+    variable: str
+    submissions: tuple[tuple[tuple[str, str], ...], ...] = ()
+    fresh: bool = False
+    activate: bool = False
+
+
+@dataclass(frozen=True)
 class Evaluate:
     expression: str
 
@@ -184,6 +200,7 @@ Operation = (
     | Refresh
     | Answer
     | Seek
+    | ReplayAutomatic
     | Evaluate
     | Variables
     | ExplainResolution
@@ -518,6 +535,8 @@ class InterviewExecution:
                     outcome = self._mutate(lambda: self._answer(operation))
                 elif isinstance(operation, Seek):
                     outcome = self._seek_operation(operation)
+                elif isinstance(operation, ReplayAutomatic):
+                    outcome = self._replay_automatic_operation(operation)
                 elif isinstance(operation, Evaluate):
                     outcome = self._evaluate(operation)
                 elif isinstance(operation, Variables):
@@ -798,6 +817,80 @@ class InterviewExecution:
             ):
                 raise
             logger.exception("seek failed")
+            return ExecutionOutcome(
+                False,
+                error=ExecutionError(
+                    ErrorKind.SEEK, f"{type(error).__name__}: {error}"
+                ),
+            )
+
+    def _replay_automatic_operation(self, operation: ReplayAutomatic):
+        """Replay an automatic seek without splitting its local state.
+
+        The command adapter may need to verify each pre-submission screen, but
+        a browser-shaped automatic walk is still one execution operation.  In
+        particular, a non-activated walk must not save its temporary target
+        context before the next submission or observation.
+        """
+
+        def work():
+            namespace = (
+                _fresh_namespace()
+                if operation.fresh
+                else self._store.load()["namespace"]
+            )
+            with self._prepared_operation(namespace) as (interview, status):
+                outcome = _seek_auto(
+                    interview,
+                    namespace,
+                    status,
+                    operation.variable,
+                    False,
+                    operation.submissions,
+                )
+            if operation.activate:
+                self._store.save(namespace, outcome, operation.variable)
+            return outcome
+
+        if operation.activate:
+            return self._mutate(work)
+        try:
+            result = work()
+            if isinstance(result, dict) and result.get("kind") == "error":
+                return ExecutionOutcome(
+                    False,
+                    error=ExecutionError(
+                        result.get("failure_kind", ErrorKind.EXECUTION),
+                        result.get("message", "interview assembly failed"),
+                        result,
+                    ),
+                )
+            return ExecutionOutcome(True, result)
+        except ExecutionFailure as error:
+            return ExecutionOutcome(
+                False, error=ExecutionError(error.kind, str(error), error.details)
+            )
+        except Exception as error:
+            if _unresolved_variable(error) is not None:
+                raise
+            if not isinstance(
+                error,
+                (
+                    ValueError,
+                    TypeError,
+                    RuntimeError,
+                    AttributeError,
+                    KeyError,
+                    IndexError,
+                    ImportError,
+                    OSError,
+                    LookupError,
+                    NameError,
+                    SyntaxError,
+                ),
+            ):
+                raise
+            logger.exception("automatic replay failed")
             return ExecutionOutcome(
                 False,
                 error=ExecutionError(
@@ -1303,15 +1396,42 @@ def _restore_namespace(namespace, snapshot):
         pass
 
 
-def _auto_submit_screen(interview, namespace, status, screen):
+def _auto_submit_screen(
+    interview,
+    namespace,
+    status,
+    screen,
+    assignments: tuple[tuple[str, str], ...] = (),
+):
     """Submit one screen exactly as an untouched browser form would.
 
     Defaults, browser blanks, and validation code all run inside a transaction.
     A rejected screen is still returned to the caller, but none of those
-    attempted mutations become the next auto-seek state.
+    attempted mutations become the next auto-seek state.  Replay may provide
+    assignments for one step; ordinary automatic seeking passes none and uses
+    browser defaults.
     """
     snapshot = _snapshot_namespace(namespace)
     try:
+        if assignments:
+            dispositions = []
+            errors = _apply_assignments(
+                namespace,
+                screen,
+                assignments,
+                False,
+                allowed=_answerable_fields(screen),
+                dispositions=dispositions,
+            )
+            if errors:
+                _restore_namespace(namespace, snapshot)
+                return None, {
+                    "reason": "answer failed",
+                    "submitted": False,
+                    "errors": errors,
+                    "assignments": dispositions,
+                    "screen": screen,
+                }
         _submit_screen_fields(namespace, screen)
         violations = _required_violations(namespace, screen, set())
         if violations:
@@ -1378,6 +1498,16 @@ def _auto_trace_error(stop):
     if not stop:
         return None
     reason = stop.get("reason")
+    if reason == "answer failed":
+        return {
+            "kind": "answer-input",
+            "message": "one or more answers could not be applied",
+            "details": {
+                "errors": list(stop.get("errors") or []),
+                "assignments": list(stop.get("assignments") or []),
+                "auto_stop": reason,
+            },
+        }
     if reason == "required fields missing":
         return {
             "kind": "validation",
@@ -1411,12 +1541,19 @@ def _auto_trace_error(stop):
     return None
 
 
-def _seek_auto(interview, namespace, status, variable, trace):
+def _seek_auto(
+    interview,
+    namespace,
+    status,
+    variable,
+    trace,
+    step_submissions: tuple[tuple[tuple[str, str], ...], ...] | None = None,
+):
     result = _seek(interview, namespace, status, variable, trace)
     submitted = []
     auto_trace = []
     stop = None
-    for _ in range(100):
+    for index in range(100):
         if result.get("kind") != "question":
             reason = (
                 "sought variable resolved"
@@ -1429,7 +1566,18 @@ def _seek_auto(interview, namespace, status, variable, trace):
             stop = {"reason": "sought variable resolved"}
             break
         screen = result
-        result, stop = _auto_submit_screen(interview, namespace, status, screen)
+        assignments = (
+            step_submissions[index]
+            if step_submissions is not None and index < len(step_submissions)
+            else ()
+        )
+        result, stop = _auto_submit_screen(
+            interview,
+            namespace,
+            status,
+            screen,
+            assignments,
+        )
         # Automatic records describe the screen that was submitted, rather
         # than only the screen returned after the submission.  A rejected
         # attempt is retained as a failed step so replay cannot silently turn
@@ -1437,7 +1585,7 @@ def _seek_auto(interview, namespace, status, variable, trace):
         auto_trace.append(
             {
                 "screen": screen,
-                "submitted": {},
+                "submitted": dict(assignments),
                 "ok": stop is None,
                 "error": _auto_trace_error(stop),
             }
@@ -2632,6 +2780,7 @@ __all__ = [
     "InterviewExecution",
     "Refresh",
     "RenderSource",
+    "ReplayAutomatic",
     "SavedSessionSource",
     "SeedState",
     "Seek",

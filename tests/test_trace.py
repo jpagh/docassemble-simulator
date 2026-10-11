@@ -16,6 +16,7 @@ from docassemble_simulator.trace import (
     TraceException,
     TraceMetadata,
     append_trace,
+    compare_replay_entries,
     compare_traces,
     error_identity,
     load_exceptions,
@@ -249,6 +250,39 @@ def _screen(**overrides):
     }
     screen.update(overrides)
     return screen
+
+
+def test_replay_verdict_compares_identity_facts_flow_and_error_in_trace_module():
+    expected_screen = _screen(question_name="ID expected")
+    actual_screen = _screen(question_name="ID actual")
+    expected = TraceEntry(
+        1,
+        "answer",
+        None,
+        {"user_name": "Alice"},
+        True,
+        expected_screen,
+        ScreenIdentity("id:expected", "explicit-id"),
+        screen_content(expected_screen),
+    )
+    actual = TraceEntry(
+        1,
+        "answer",
+        None,
+        {"user_name": "Alice"},
+        True,
+        actual_screen,
+        ScreenIdentity("id:actual", "explicit-id"),
+        screen_content(actual_screen),
+    )
+
+    verdict = compare_replay_entries(expected, actual)
+
+    assert verdict.identity_match is False
+    assert verdict.field_facts_match is True
+    assert verdict.flow_match is True
+    assert verdict.error_match is True
+    assert verdict.matched is False
 
 
 def test_trace_replay_is_clean_with_failed_step_and_override(
