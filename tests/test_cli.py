@@ -483,3 +483,6 @@ def test_answer_screen_submission_flags_are_parsed_and_documented():
     assert "--partial" in help_text
     assert "whole screen" in help_text
     assert "field gate" in help_text
+    assert "JSON first" in help_text
+    assert "checkbox groups" in help_text
+    assert "YYYY-MM-" in help_text

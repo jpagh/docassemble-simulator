@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import base64
 import binascii
+import json
 import logging
 import re
 from contextlib import contextmanager
@@ -150,6 +151,45 @@ def field_required(field: Any, user_dict: dict) -> bool:
     return bool(required)
 
 
+def _json_assignment_value(value: Any) -> str:
+    try:
+        return json.dumps(value, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return json.dumps(str(value))
+
+
+def _assignment_example(description: dict) -> str | None:
+    variable = description.get("variable")
+    if not variable:
+        return None
+    datatype = str(description.get("type", "text")).lower()
+    choices = description.get("choices") or []
+    values = [choice.get("value") for choice in choices if "value" in choice]
+    if datatype in {"date", "datetime", "datetime-local", "time"}:
+        value = "2026-01-02" if datatype == "date" else "2026-01-02T15:04:05"
+        return f"{variable}={value}"
+    if datatype in {"checkboxes", "multiselect"}:
+        selected = {str(value): True for value in values[:1]}
+        return f"{variable}={_json_assignment_value(selected)}"
+    if datatype == "object_checkboxes":
+        selected = {str(value): True for value in values[:1]}
+        return f"{variable}={_json_assignment_value(selected)}"
+    if datatype == "object_multiselect":
+        return f"{variable}={_json_assignment_value(values[:1])}"
+    if datatype in {"object", "object_radio"}:
+        value = values[0] if values else None
+        return f"{variable}={_json_assignment_value(value)}"
+    if datatype in {"yesno", "noyes", "boolean"}:
+        return f"{variable}=true"
+    if datatype == "integer":
+        return f"{variable}=0"
+    if datatype in {"number", "float", "currency", "range"}:
+        return f"{variable}=0.0"
+    if datatype in {"threestate", "yesnomaybe", "noyesmaybe"}:
+        return f"{variable}=null"
+    return f"{variable}=example"
+
+
 def describe_field(
     field: Any, user_dict: dict, choices: list[dict] | None = None
 ) -> dict:
@@ -185,6 +225,9 @@ def describe_field(
     default = getattr(field, "default", None)
     if default is not None:
         out["default"] = _text_of(default, user_dict)
+    out["example"] = _assignment_example(out)
+    if out.get("variable") and out.get("required") is False:
+        out["blank_example"] = f"{out['variable']}="
     return out
 
 
@@ -358,6 +401,9 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
                     "visible": visible,
                     "required": field_required(field, user_dict),
                 }
+                entry["example"] = _assignment_example(entry)
+                if entry["required"] is False:
+                    entry["blank_example"] = f"{var}="
                 if note:
                     entry["visibility_note"] = note
                 out["fields"].append(entry)

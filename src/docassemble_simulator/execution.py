@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import difflib
 import hashlib
 import json
 import logging
@@ -498,6 +499,7 @@ class InterviewExecution:
                 ErrorKind.INPUT, "the saved outcome is not an answerable screen"
             )
         blank_submissions = _blank_submissions(operation)
+        dispositions = []
         with self._prepared_operation(namespace) as (interview, status):
             errors = _apply_assignments(
                 namespace,
@@ -505,12 +507,18 @@ class InterviewExecution:
                 operation.assignments,
                 operation.code,
                 allowed=_answerable_fields(screen),
+                dispositions=dispositions,
             )
             if errors:
+                details = {"errors": errors, "assignments": dispositions}
+                if any(
+                    item.get("disposition") == "unknown field" for item in dispositions
+                ):
+                    details.update(_unknown_field_details(screen, dispositions))
                 raise ExecutionFailure(
                     ErrorKind.ANSWER_INPUT,
                     "one or more answers could not be applied",
-                    {"errors": errors},
+                    details,
                 )
             if not operation.partial:
                 # The whole screen is submitted: browser defaults and blanks
@@ -527,6 +535,11 @@ class InterviewExecution:
                             for variable, reason in violations
                         ],
                         "warnings": [],
+                        "assignments": dispositions,
+                        "missing_required": [
+                            variable for variable, _reason in violations
+                        ],
+                        "active_fields": _active_field_names(screen),
                     },
                 )
             validation = (
@@ -543,6 +556,7 @@ class InterviewExecution:
                 validation["errors"].extend(validation["warnings"])
                 validation["warnings"] = []
             if validation["errors"]:
+                validation["assignments"] = dispositions
                 raise ExecutionFailure(
                     ErrorKind.VALIDATION,
                     "screen rejected; all answers were discarded",
@@ -550,6 +564,8 @@ class InterviewExecution:
                 )
             _mark_answered(interview, namespace, screen.get("question_name"))
             outcome = _assemble(interview, namespace, status)
+        if dispositions:
+            outcome["assignments"] = dispositions
         if validation["warnings"]:
             outcome["warnings"] = validation["warnings"]
         self._store.save(namespace, outcome)
@@ -1149,6 +1165,36 @@ def _answerable_fields(screen):
     return allowed
 
 
+def _active_field_names(screen) -> list[str]:
+    names = []
+    for field in screen.get("fields") or []:
+        variable = field.get("variable")
+        if isinstance(variable, str) and variable:
+            names.append(variable)
+    for target in _screen_field_targets(screen).values():
+        if target not in names:
+            names.append(target)
+    return names
+
+
+def _unknown_field_details(screen, dispositions):
+    names = _active_field_names(screen)
+    suggestions = {}
+    for item in dispositions:
+        if item.get("disposition") != "unknown field":
+            continue
+        variable = item["variable"]
+        matches = difflib.get_close_matches(variable, names, n=1, cutoff=0.35)
+        if matches:
+            item["suggestion"] = matches[0]
+            suggestions[variable] = matches[0]
+    return {
+        "active_fields": names,
+        "active_field_details": screen.get("fields") or [],
+        "closest_matches": suggestions,
+    }
+
+
 def _required_message(variable, reason):
     if reason == "unselected":
         return (
@@ -1443,17 +1489,35 @@ def _set_namespace_value(namespace, target, value):
     _exec_in_namespace(namespace, f"{target} = {_CARRIER_VALUE}", _CARRIER_VALUE, value)
 
 
-def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
+def _apply_assignments(
+    namespace,
+    screen,
+    assignments,
+    use_code,
+    allowed=None,
+    dispositions=None,
+):
     errors = []
+    dispositions = dispositions if dispositions is not None else []
     targets = _screen_field_targets(screen)
     field_types = _field_types(screen, targets)
     for variable, raw in assignments:
         if allowed is not None and variable not in allowed:
             errors.append(f"{variable}: not a field on the active screen")
+            dispositions.append(
+                {
+                    "variable": variable,
+                    "input": raw,
+                    "disposition": "unknown field",
+                }
+            )
             continue
         try:
             if use_code:
                 _exec_in_namespace(namespace, f"{variable} = {raw}")
+                dispositions.append(
+                    {"variable": variable, "input": raw, "disposition": "applied"}
+                )
                 continue
             value = parse_value(raw)
             datatype = field_types.get(variable, "")
@@ -1470,6 +1534,13 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
                 elif datatype in {"boolean", "threestate"}:
                     value = None
                 elif datatype in {"object", "object_radio"}:
+                    dispositions.append(
+                        {
+                            "variable": variable,
+                            "input": raw,
+                            "disposition": "applied",
+                        }
+                    )
                     continue
             target = targets.get(variable, variable)
             if datatype in {
@@ -1479,12 +1550,15 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
                 "object_checkboxes",
             }:
                 _apply_object(namespace, variable, target, datatype, value)
-                continue
-            if datatype == "checkboxes" and isinstance(value, dict):
-                from docassemble.base.util import DADict
+            else:
+                if datatype == "checkboxes" and isinstance(value, dict):
+                    from docassemble.base.util import DADict
 
-                value = DADict(elements=value)
-            _set_namespace_value(namespace, target, value)
+                    value = DADict(elements=value)
+                _set_namespace_value(namespace, target, value)
+            dispositions.append(
+                {"variable": variable, "input": raw, "disposition": "applied"}
+            )
         except (
             ValueError,
             TypeError,
@@ -1499,6 +1573,14 @@ def _apply_assignments(namespace, screen, assignments, use_code, allowed=None):
             SyntaxError,
         ) as error:
             errors.append(f"{variable}: {type(error).__name__}: {error}")
+            dispositions.append(
+                {
+                    "variable": variable,
+                    "input": raw,
+                    "disposition": "parse error",
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
     return errors
 
 

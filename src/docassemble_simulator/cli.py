@@ -792,7 +792,21 @@ def build_parser():
         add(
             "answer",
             help="transactionally answer the active screen",
-            epilog=recording_epilog,
+            description=(
+                "Submit assignments to the active screen. Values are parsed in "
+                "JSON, then Python literal, then plain-text order. Blank values "
+                "use browser semantics; checkbox and object groups use the forms "
+                "shown in the active screen description."
+            ),
+            epilog=(
+                recording_epilog + "\n\n"
+                "Value grammar:\n"
+                "  JSON first, then Python literals, then plain text. Use "
+                'field= for a browser blank, field={"choice":true} for '
+                'checkbox groups, field=["choice"] for object multiselects, '
+                'field="choice" for an object choice, and field=YYYY-MM-DD '
+                "for dates."
+            ),
         )
     )
     answer.add_argument("assignments", nargs="+")

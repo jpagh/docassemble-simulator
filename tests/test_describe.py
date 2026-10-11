@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from docassemble_simulator.describe import (
     describe_choices,
+    describe_field,
     describe_question_result,
     field_variable,
     field_visible,
@@ -20,6 +21,43 @@ def safeid(name: str) -> str:
 def test_field_variable_decodes_saveas_once():
     assert field_variable(SimpleNamespace(saveas=safeid("M.value"))) == "M.value"
     assert field_variable(SimpleNamespace(saveas=None)) == ""
+
+
+def test_active_field_examples_cover_groups_dates_and_blanks():
+    checkbox = describe_field(
+        SimpleNamespace(
+            saveas="topics",
+            datatype="checkboxes",
+            choices=[("housing", "Housing")],
+            required=True,
+            extras={},
+        ),
+        {},
+    )
+    object_group = describe_field(
+        SimpleNamespace(
+            saveas="people",
+            datatype="object_multiselect",
+            choices=[("person-1", "Person")],
+            required=True,
+            extras={},
+        ),
+        {},
+    )
+    optional_date = describe_field(
+        SimpleNamespace(
+            saveas="filing_date",
+            datatype="date",
+            required=False,
+            extras={},
+        ),
+        {},
+    )
+
+    assert checkbox["example"] == 'topics={"housing":true}'
+    assert object_group["example"] == 'people=["person-1"]'
+    assert optional_date["example"] == "filing_date=2026-01-02"
+    assert optional_date["blank_example"] == "filing_date="
 
 
 class TestParseValue:

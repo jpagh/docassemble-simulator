@@ -108,7 +108,12 @@ docassemble-simulator seek M.family --activate
 - `exec` assembles and saves by default. `--no-assemble` performs a state-only
   commit after successful Python execution.
 
-`answer` parses JSON, then Python literals, then plain text. Checkbox and object
+`answer` parses JSON, then Python literals, then plain text. Its JSON result
+reports each assignment as `applied`, `unknown field`, or `parse error`, and
+rejections include the active fields, closest-name suggestions, and missing
+required fields. The active screen describes every field with a copy-pasteable
+`example` (including checkbox mappings, object choices/groups, blanks, and
+ISO dates); `answer --help` documents the same grammar. Checkbox and object
 choice fields use the active field metadata. An exact `YYYY-MM-DD` submitted to
 a date field becomes docassemble's timezone-aware `DADateTime`; malformed and
 impossible dates are rejected. The same text submitted to a text field remains
