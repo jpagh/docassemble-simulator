@@ -637,7 +637,7 @@ def test_persistent_worker_and_runner_contract_across_families(
             "--timeout",
             "30",
         ],
-        input="".join(json.dumps(request) + "\\n" for request in requests),
+        input="".join(json.dumps(request) + "\n" for request in requests),
         capture_output=True,
         text=True,
         check=False,
