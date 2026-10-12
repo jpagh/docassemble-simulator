@@ -19,7 +19,7 @@ import pytest
 from docassemble_simulator import catalog as catalog_module
 from docassemble_simulator import cli
 from docassemble_simulator._outcomes import Outcome
-from docassemble_simulator.catalog import CatalogOutcome
+from docassemble_simulator.catalog import CatalogOutcome, CompileFailure
 from docassemble_simulator.execution import ExecutionScope, ExplainResolution
 from docassemble_simulator.worker import Worker, serve
 
@@ -261,25 +261,33 @@ def test_catalog_requests_refresh_the_source_before_compiling(tmp_path, monkeypa
 
     The payload compiles through its own catalog instance, so a warm worker's
     watch must invalidate docassemble's process-global compile first; otherwise
-    a request after an edit inspects the pre-edit program.
+    a request after an edit inspects the pre-edit program. A refresh that could
+    not compile hands its failure to that catalog, which re-raises it instead of
+    compiling the broken source a second time.
     """
     order = []
+    failure = CompileFailure(_INTERVIEW, ValueError("broken interview"))
 
     class FakeCatalog:
         def __init__(self, root, selector=None, **kwargs):
-            order.append(("catalog", selector))
+            order.append(("catalog", selector, kwargs.get("compile_failure")))
 
         def questions(self, contains=None):
             return CatalogOutcome(_INTERVIEW, {"blocks": []})
 
     monkeypatch.setattr(catalog_module, "InterviewCatalog", FakeCatalog)
     execution = _FakeExecution(tmp_path)
-    execution.ensure_current = lambda identity=None: order.append(("refresh", identity))
+    execution.ensure_current = lambda identity=None: (
+        order.append(("refresh", identity)) or failure
+    )
     worker = Worker(tmp_path, execution=execution, handlers=_handlers())
 
     assert worker.handle({"operation": "questions"})["ok"] is True
 
-    assert order == [("refresh", None), ("catalog", _INTERVIEW)]
+    assert order == [
+        ("refresh", None),
+        ("catalog", _INTERVIEW, failure),
+    ]
 
 
 def test_catalog_requests_flow_through_the_worker_protocol(tmp_path, monkeypatch):

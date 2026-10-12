@@ -106,6 +106,22 @@ class CatalogFailure(Exception):
 
 
 @dataclass(frozen=True)
+class CompileFailure:
+    """A failed compile a refresh already paid for.
+
+    ``identity`` is the interview that failed and ``error`` the exception
+    docassemble raised. Handing it to a catalog (or an execution) for the same
+    identity makes that path re-raise the error instead of compiling the same
+    broken source again, so one request pays for one failed compile while the
+    caller still reports its own typed error: a ``check`` row, a catalog
+    failure, or a replay divergence.
+    """
+
+    identity: str
+    error: BaseException
+
+
+@dataclass(frozen=True)
 class CatalogOutcome:
     interview: str | None
     result: Any
@@ -397,6 +413,7 @@ class InterviewCatalog:
         selector: str | None = None,
         *,
         cache_compiled: bool = False,
+        compile_failure: CompileFailure | None = None,
     ):
         self.root = Path(root).resolve()
         self.selector = selector
@@ -411,6 +428,9 @@ class InterviewCatalog:
         # helper files and package directories, and the signatures captured at
         # compile time. Only populated when the compiled cache is on.
         self._watches: dict[str, _WatchRecord] = {}
+        # A compile a caller's refresh already paid for and lost; re-raised for
+        # that identity instead of compiling the same broken source again.
+        self._compile_failure = compile_failure
 
     @property
     def identity(self) -> str:
@@ -424,12 +444,17 @@ class InterviewCatalog:
         would otherwise surface as an authored-looking label error. Authored
         parse errors after a passing probe keep their compile-error behavior.
         """
+        selected = identity or self.identity
+        failure = self._compile_failure
+        if failure is not None and failure.identity == selected:
+            # A refresh already ran this compile and it failed; compiling the
+            # same source again would only pay for the same error twice.
+            raise failure.error
         require_assemblyline_compatibility()
         from docassemble.base.interview_cache import get_interview
 
         from docassemble_simulator._runtime import runtime_context
 
-        selected = identity or self.identity
         if self._cache_compiled:
             cached = self._compiled.get(selected)
             if cached is not None:
@@ -450,14 +475,30 @@ class InterviewCatalog:
             self._record_source(selected, interview)
         return interview
 
-    def _cached_source(self, selected: str):
-        """The docassemble source object for a compiled identity, if any."""
+    def _global_cache_entry(self, selected: str):
+        """docassemble's process-global cache entry for an identity, if any.
+
+        A cache read, never a compile. The reload path uses it to learn what
+        another catalog compiled for this identity, because that entry is the
+        only record of the workspace helpers the compile imported once this
+        catalog has no watch of its own.
+        """
         try:
             from docassemble.base.interview_cache import cache
         except (ImportError, AttributeError):
             return None
         entry = cache.get(selected) if isinstance(cache, dict) else None
-        return entry.get("source") if isinstance(entry, dict) else None
+        return entry if isinstance(entry, dict) else None
+
+    def _cached_source(self, selected: str):
+        """The docassemble source object for a compiled identity, if any."""
+        entry = self._global_cache_entry(selected)
+        return entry.get("source") if entry is not None else None
+
+    def _cached_interview(self, selected: str):
+        """The interview docassemble's cache holds for an identity, if any."""
+        entry = self._global_cache_entry(selected)
+        return entry.get("interview") if entry is not None else None
 
     def _resolved_source_path(self, selected: str) -> str | None:
         """Fall back to the workspace path for a canonical identity."""
@@ -608,7 +649,7 @@ class InterviewCatalog:
             return False
         return self._tree_signatures(record.module_paths) == record.module_signature
 
-    def ensure_current(self, identity: str | None = None) -> None:
+    def ensure_current(self, identity: str | None = None) -> CompileFailure | None:
         """Reload the compiled program a caller is about to inspect.
 
         :meth:`_compile`'s cache-hit path revalidates only an identity this
@@ -624,21 +665,25 @@ class InterviewCatalog:
 
         The recompile records the watch the next caller compares against, so a
         single edit costs one reload rather than one per request. A
-        recompilation failure is not raised here: the caller's own compile
-        path reports it as its typed error, and only a successful compile
-        re-establishes the watch. The seam belongs to the cached path
-        (``cache_compiled=True``); a caller without it keeps no watch and so
-        recompiles on every call.
+        recompilation failure is returned instead of raised: the caller hands
+        the :class:`CompileFailure` to the catalog or execution that would have
+        compiled again, which re-raises it, so one request pays for one compile
+        and still reports its own typed error (a ``check`` row, a
+        ``CatalogFailure``, or a replay divergence). The seam belongs to the
+        cached path (``cache_compiled=True``); a caller without it keeps no
+        watch and so recompiles on every call.
         """
         selected = identity or self.identity
         record = self._watches.get(selected)
         if record is not None and self._source_current(selected):
-            return
+            return None
         self._reload_source(selected)
         try:
             self._compile(selected)
         except Exception as error:  # noqa: BLE001 - the caller reports the typed error
             logger.debug("reload check could not recompile %r: %s", selected, error)
+            return CompileFailure(selected, error)
+        return None
 
     def _declared_module_names(self, interview) -> set[str]:
         """Fully-qualified names declared by the interview's import directives."""
@@ -729,16 +774,28 @@ class InterviewCatalog:
             from docassemble.base.interview_cache import clear_cache
         except (ImportError, AttributeError):
             clear_cache = None
-        if clear_cache is not None:
-            clear_cache(selected)
         record = self._watches.get(selected)
         cached = self._compiled.get(selected)
+        # Read docassemble's entry before clearing it. Without a local watch the
+        # cached interview is the only record of which workspace helpers the
+        # compile imported, so it has to be read while the entry still exists.
+        global_interview = self._cached_interview(selected)
+        if clear_cache is not None:
+            clear_cache(selected)
         if record is not None:
             # Drop cached bytecode for helpers that changed, so a same-size,
             # same-second edit cannot re-import stale bytecode after eviction.
             self._invalidate_bytecode(self._changed_module_paths(record))
         if cached is not None:
             self._evict_modules(cached)
+        elif global_interview is not None:
+            # Never watched (an identity another catalog in this process
+            # compiled): the cached interview declares the helpers that compile
+            # imported, and with no signature saying which of them changed, all
+            # of their bytecode is dropped.
+            declared = self._declared_module_names(global_interview)
+            self._invalidate_bytecode(self._module_paths_for(declared))
+            self._evict_modules(global_interview)
         self._compiled.pop(selected, None)
         self._watches.pop(selected, None)
 
@@ -1077,6 +1134,7 @@ class InterviewCatalog:
 __all__ = [
     "CatalogFailure",
     "CatalogOutcome",
+    "CompileFailure",
     "InterviewCatalog",
     "guess_main_interview",
     "list_interviews",

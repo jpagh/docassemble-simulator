@@ -4,13 +4,20 @@ import json
 import os
 import sys
 import types
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from docassemble_simulator import catalog as catalog_module
 from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
-from docassemble_simulator.catalog import InterviewCatalog
+from docassemble_simulator.catalog import (
+    CatalogFailure,
+    CompileFailure,
+    InterviewCatalog,
+)
 
 
 def _question(
@@ -576,6 +583,96 @@ def test_ensure_current_recompiles_an_unwatched_global_cache(
     assert len(calls) == 1
 
 
+def test_ensure_current_evicts_helpers_of_an_unwatched_global_cache(
+    tmp_path, monkeypatch, da_stubs
+):
+    """A never-watched reload still evicts the helpers the cached compile imported.
+
+    Another catalog (or a share of docassemble's process-global cache) can leave
+    an entry this catalog never watched, and the cached interview is the only
+    record of the workspace helpers that compile imported. Without eviction and
+    bytecode invalidation the recompiled program keeps running the pre-edit
+    helper body: here the helper module is already imported into ``sys.modules``
+    and its bytecode still matches the edited file's size and timestamp.
+    """
+    source, package = _modules_workspace(tmp_path)
+    helper = package / "helpers.py"
+    identity = "docassemble.pkg:data/questions/main.yml"
+    calls = _install_interview_cache(
+        monkeypatch, source, _modules_interview(["docassemble.pkg.helpers"])
+    )
+    module = sys.modules["docassemble.base.interview_cache"]
+    stale = module.get_interview(identity)  # the global compile this catalog missed
+    imported = _execute_workspace_helper(helper)
+    assert imported.greeting("x") == "v1:x"
+
+    # An edit that keeps the file's size and integer timestamp: the stale
+    # bytecode still validates unless the reload drops it.
+    original_mtime = os.stat(helper).st_mtime
+    helper.write_text("def greeting(v):\n    return f'v2:{v}'\n", encoding="utf-8")
+    os.utime(helper, (original_mtime, original_mtime))
+    catalog = InterviewCatalog(tmp_path, identity, cache_compiled=True)
+
+    catalog.ensure_current()
+
+    # The helper module the cached compile imported is gone, so the next import
+    # executes the edited body instead of the stale module or its bytecode.
+    assert "docassemble.pkg.helpers" not in sys.modules
+    assert catalog._compile() is not stale
+    assert len(calls) == 2
+    assert _execute_workspace_helper(helper).greeting("x") == "v2:x"
+
+
+def test_a_failed_refresh_compiles_once_and_surfaces_the_cli_error(
+    tmp_path, monkeypatch, da_stubs
+):
+    """One compile per request, even when the refresh cannot compile.
+
+    The refresh returns its failure instead of swallowing it, and the catalog
+    (or replay execution) the caller compiles through re-raises it, so the
+    failing request pays one compile and still reports the typed error its own
+    path produces: a ``check`` row, a ``CatalogFailure``, or a replay
+    divergence.
+    """
+    source = _reload_workspace(tmp_path)
+    identity = "docassemble.pkg:data/questions/main.yml"
+
+    def broken():
+        raise ValueError("broken interview")
+
+    calls = _install_interview_cache(monkeypatch, source, broken)
+    catalog = InterviewCatalog(tmp_path, identity, cache_compiled=True)
+
+    failure = catalog.ensure_current()
+
+    assert len(calls) == 1
+    assert isinstance(failure, CompileFailure)
+    assert failure.identity == identity
+    assert isinstance(failure.error, ValueError)
+
+    # What the catalog adapter hands its payload catalog: one compile, and the
+    # same per-interview row ``sim check`` reports for this project.
+    payload = InterviewCatalog(tmp_path, identity, compile_failure=failure)
+    check = payload.check().result
+    assert len(calls) == 1
+    assert check["failures"] == 1
+    assert check["results"] == [
+        {
+            "interview": identity,
+            "ok": False,
+            "error_type": "ValueError",
+            "message": "broken interview",
+        }
+    ]
+
+    # The listing verbs keep their own typed mapping, still without compiling.
+    with pytest.raises(CatalogFailure, match="ValueError: broken interview"):
+        payload.questions()
+    with pytest.raises(CatalogFailure, match="ValueError: broken interview"):
+        payload.index()
+    assert len(calls) == 1
+
+
 def test_ensure_current_reloads_a_changed_source(tmp_path, monkeypatch, da_stubs):
     """A watched edit is reloaded before the caller inspects the program."""
     source = _reload_workspace(tmp_path)
@@ -673,6 +770,20 @@ def _modules_workspace(tmp_path):
     (toolbox / "__init__.py").write_text("")
     (toolbox / "sub.py").write_text("VALUE = 1\n")
     return source, package
+
+
+def _execute_workspace_helper(path, name="docassemble.pkg.helpers"):
+    """Run one workspace helper's body and register it under its declared name.
+
+    ``importlib``'s source loader is the loader docassemble's own import uses,
+    so the module body runs from the file (or from its cached bytecode) exactly
+    as an import would.
+    """
+    spec = spec_from_file_location(name, path)
+    module = module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _modules_interview(module_list):

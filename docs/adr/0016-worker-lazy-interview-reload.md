@@ -32,7 +32,15 @@ stale compile after an edit.
   compiled-interview cache is process-global and those callers read it through
   their own catalog instance. A watched-but-changed or never-watched identity is
   invalidated and recompiled there, so the check costs one reload per edit and
-  the next request is still warm.
+  the next request is still warm. A never-watched identity whose compile
+  docassemble already holds is evicted from that cached interview's declared
+  workspace helpers, bytecode included, before the entry is dropped, because
+  this catalog has no signatures of its own to compare. A refresh that cannot
+  compile returns its `CompileFailure` instead of swallowing it; the caller
+  hands it to the catalog or execution that would have compiled again, which
+  re-raises it, so a failing request costs one compile and still reports the
+  typed error its own path produces (a `check` row, a catalog failure, or a
+  replay divergence).
 - On a change the worker calls `interview_cache.clear_cache(selected)`, evicts
   the recompiled interview's declared `modules:`/`imports:` helpers **that
   resolve under the workspace root** from `sys.modules` (an installed module

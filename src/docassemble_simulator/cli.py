@@ -749,12 +749,17 @@ def _worker_catalog_source(worker):
 
     The payload compiles through its own catalog instance, whose compile reads
     docassemble's process-global cache, so the worker's own watch has to run
-    its reload check before the payload can be stale-free.
+    its reload check before the payload can be stale-free. A refresh that could
+    not compile hands its failure to the payload catalog, which re-raises it
+    instead of compiling the same broken source a second time.
     """
     from docassemble_simulator.catalog import InterviewCatalog
 
-    worker.execution.ensure_current()
-    return InterviewCatalog(worker.root, worker.identity)
+    return InterviewCatalog(
+        worker.root,
+        worker.identity,
+        compile_failure=worker.execution.ensure_current(),
+    )
 
 
 def _catalog_worker_request(worker, request, *, command):
@@ -1022,7 +1027,10 @@ def _trace_replay_worker_request(args, worker, request):
     replay seam, so the worker's own Saved session is untouched and the golden
     is only read. That isolated execution compiles through the process-global
     docassemble cache, so the worker's source watch is refreshed first: an edit
-    between two requests must not replay the pre-edit program. The response
+    between two requests must not replay the pre-edit program. A refresh that
+    could not compile is handed to the replay's isolated execution, which
+    re-raises it so the replay reports the divergence the one-shot command
+    reports from the same failure, at the cost of one compile. The response
     ``result`` is the ``sim trace replay --json`` result for a clean replay; a
     divergence is the typed ``trace-mismatch`` error whose ``details`` are the
     same report.
@@ -1037,7 +1045,7 @@ def _trace_replay_worker_request(args, worker, request):
         overrides = _worker_trace_overrides(request)
     except InputFailure as error:
         raise WorkerProtocolError(str(error)) from error
-    worker.execution.ensure_current(interview or worker.identity)
+    compile_failure = worker.execution.ensure_current(interview or worker.identity)
     try:
         report = _trace_replay_report(
             worker.root,
@@ -1045,6 +1053,7 @@ def _trace_replay_worker_request(args, worker, request):
             interview=interview or worker.identity,
             overrides=overrides,
             resolved_configuration=getattr(args, "_resolved_configuration", None),
+            compile_failure=compile_failure,
         )
     except TraceError as error:
         return _outcome_from_trace_input(error)
@@ -1801,6 +1810,7 @@ def _trace_replay_report(
     interview=None,
     overrides=(),
     resolved_configuration=None,
+    compile_failure=None,
 ):
     """Run ``trace replay`` and return its report without emitting or exiting.
 
@@ -1811,9 +1821,13 @@ def _trace_replay_report(
     config mismatch, or a malformed override. ``interview`` is the requested
     interview (``None`` accepts the golden's own) and ``resolved_configuration``
     the caller's already-resolved effective configuration, so neither caller has
-    to fabricate a command namespace. The replay always runs against its own
-    temporary session directory, so it never touches a caller's Saved session
-    and never writes the golden.
+    to fabricate a command namespace. ``compile_failure`` is a compile a
+    worker's refresh already paid for: the replay's isolated execution
+    re-raises it, so a source that no longer compiles still produces the
+    divergence report the one-shot command produces from that failure, at the
+    cost of one compile. The replay always runs against its own temporary
+    session directory, so it never touches a caller's Saved session and never
+    writes the golden.
     """
     from docassemble_simulator.execution import InterviewExecution
     from docassemble_simulator.trace import TraceError, load_trace
@@ -1859,6 +1873,7 @@ def _trace_replay_report(
                 if resolved_configuration is not None
                 else None
             ),
+            compile_failure=compile_failure,
             session_directory=Path(scope) / "sessions",
         )
         steps = []

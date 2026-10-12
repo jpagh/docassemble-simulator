@@ -369,7 +369,11 @@ the replay's short-lived execution reads it rather than recompiling. Before
 each replay, and before every `questions`/`index`/`check` request, the worker
 runs the same lazy source check its execution operations use (#47), so an edit
 between two requests is recompiled rather than served stale; an unchanged
-source stays warm. Development measurements on the `da110` lane (a scratch
+source stays warm. A request whose source no longer compiles pays that compile
+once: the refresh's failure is reused by the request's own path, so the worker
+reports exactly the envelope the one-shot command reports (a compile error for
+`questions`/`index`, `check`'s per-interview rows, or a replay's divergence
+report). Development measurements on the `da110` lane (a scratch
 measurement of one recorded default/auto/validation scenario, not a repository
 benchmark and not part of any gate) put a warm replay around 15 ms against
 about 3 s for a fresh `sim trace replay` process whose cost is dominated by
