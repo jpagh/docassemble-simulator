@@ -11,6 +11,7 @@ from stub_runtime import (
 from docassemble_simulator import cli
 from docassemble_simulator._diagnostics import Diagnostic
 from docassemble_simulator._outcomes import ErrorKind, Failure, PublishedAttachment
+from docassemble_simulator.config import ResolvedConfiguration
 
 
 def _run_cli(*arguments):
@@ -596,6 +597,84 @@ def test_render_human_output_presents_typed_result_fields(
     assert cli.cmd_render(args, tmp_path) == 0
     output = capsys.readouterr().out
     assert output == "template: form.docx\nparagraphs: 4\n"
+
+
+def test_config_report_redacts_effective_and_shadowed_secrets_in_json(tmp_path, capsys):
+    resolved = ResolvedConfiguration(
+        tmp_path,
+        {
+            "api_key": "SYNTHETIC_EFFECTIVE_API",
+            "service": {
+                "api_key": "SYNTHETIC_EFFECTIVE_NESTED_API",
+                "tokens": ["SYNTHETIC_EFFECTIVE_TOKEN"],
+                "label": "visible",
+            },
+            "safe_label": "visible-safe",
+        },
+        (),
+        layers=(
+            (
+                "ancestor",
+                {
+                    "api_key": "SYNTHETIC_SHADOWED_API",
+                    "service": {"api_key": "SYNTHETIC_SHADOWED_NESTED_API"},
+                },
+            ),
+            (
+                "project",
+                {
+                    "api_key": "SYNTHETIC_EFFECTIVE_API",
+                    "service": {
+                        "api_key": "SYNTHETIC_EFFECTIVE_NESTED_API",
+                        "tokens": ["SYNTHETIC_EFFECTIVE_TOKEN"],
+                        "label": "visible",
+                    },
+                },
+            ),
+        ),
+    )
+    args = SimpleNamespace(
+        _resolved_configuration=resolved,
+        _simulator_config=resolved.values,
+        json=True,
+    )
+
+    assert cli.cmd_config(args, tmp_path) == 0
+    payload = json.loads(capsys.readouterr().out)
+    report = payload["result"]
+    assert report["provenance"]["api_key"]["value"] == "<redacted>"
+    assert report["provenance"]["api_key"]["shadowed"][-1]["value"] == "<redacted>"
+    assert report["provenance"]["service"]["value"] == {
+        "api_key": "<redacted>",
+        "tokens": "<redacted>",
+        "label": "visible",
+    }
+    serialized = json.dumps(payload)
+    assert "SYNTHETIC_" not in serialized
+    assert "visible-safe" in serialized
+
+
+def test_config_report_redacts_secrets_in_human_output(tmp_path, capsys):
+    resolved = ResolvedConfiguration(
+        tmp_path,
+        {
+            "password": "SYNTHETIC_EFFECTIVE_PASSWORD",
+            "safe_label": "visible-safe",
+        },
+        (),
+        layers=(("ancestor", {"password": "SYNTHETIC_SHADOWED_PASSWORD"}),),
+    )
+    args = SimpleNamespace(
+        _resolved_configuration=resolved,
+        _simulator_config=resolved.values,
+        json=False,
+    )
+
+    assert cli.cmd_config(args, tmp_path) == 0
+    human = capsys.readouterr().out
+    assert "SYNTHETIC_" not in human
+    assert "<redacted>" in human
+    assert "visible-safe" in human
 
 
 def test_composition_root_skips_runtime_for_info_and_status(monkeypatch, tmp_path):

@@ -165,6 +165,52 @@ class TestConfigDiscovery:
         assert configured.report()["config_fingerprint"] == configured.fingerprint
         assert unset.report()["config_fingerprint"] == ""
 
+    def test_config_report_redacts_effective_and_shadowed_scalar_secrets(
+        self, tmp_path, monkeypatch
+    ):
+        package = tmp_path / "package"
+        package.mkdir()
+        (tmp_path / "simulator.toml").write_text(
+            'api_key = "SYNTHETIC_ANCESTOR_API"\n'
+            'password = "SYNTHETIC_ANCESTOR_PASSWORD"\n'
+            'safe_label = "ancestor-visible"\n'
+            "[service]\n"
+            'api_key = "SYNTHETIC_ANCESTOR_NESTED_API"\n'
+            'tokens = ["SYNTHETIC_ANCESTOR_TOKEN"]\n',
+            encoding="utf-8",
+        )
+        (package / "simulator.toml").write_text(
+            'api_key = "SYNTHETIC_PROJECT_API"\n'
+            'password = "SYNTHETIC_PROJECT_PASSWORD"\n'
+            'safe_label = "project-visible"\n'
+            "[service]\n"
+            'api_key = "SYNTHETIC_PROJECT_NESTED_API"\n'
+            'tokens = ["SYNTHETIC_PROJECT_TOKEN"]\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(
+            "DOCASSEMBLE_SIMULATOR_CONFIG", str(tmp_path / "missing-global.toml")
+        )
+
+        provenance = resolve_configuration(package).report()["provenance"]
+
+        for key in ("api_key", "password"):
+            assert provenance[key]["value"] == "<redacted>"
+            assert provenance[key]["shadowed"][-1]["value"] == "<redacted>"
+            assert all(
+                entry["value"] == "<redacted>"
+                for entry in provenance[key]["layers"]
+                if entry["source"] != "built-in default"
+            )
+        assert provenance["service"]["value"] == {
+            "api_key": "<redacted>",
+            "tokens": "<redacted>",
+        }
+        assert provenance["safe_label"]["value"] == "project-visible"
+        rendered = repr(provenance)
+        assert "SYNTHETIC_" not in rendered
+        assert "project-visible" in rendered
+
     def test_config_report_exposes_layers_and_shadowed_values(
         self, tmp_path, monkeypatch
     ):

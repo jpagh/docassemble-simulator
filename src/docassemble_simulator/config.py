@@ -258,7 +258,10 @@ class ResolvedConfiguration:
         for source, values in all_layers:
             for key, value in values.items():
                 history.setdefault(str(key), []).append(
-                    {"source": source, "value": redact_config(copy.deepcopy(value))}
+                    {
+                        "source": source,
+                        "value": redact_config(copy.deepcopy(value), key=str(key)),
+                    }
                 )
         report = {}
         for key, entries in history.items():
