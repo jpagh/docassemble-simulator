@@ -296,6 +296,36 @@ forwarded. A malformed request or a render failure arrives as a typed
 reads the worker's saved session and never mutates it beyond what the
 `sim render` source policy already does.
 
+A worker also serves the read-only catalog and project inspection commands, so
+a warm journey can list, check, and explain its interview without a fresh
+process:
+
+```sh
+printf '%s\n' \
+  '{"operation":"check"}' \
+  '{"operation":"questions","var":"name"}' \
+  '{"operation":"index"}' \
+  '{"operation":"why","variable":"user_name"}' \
+  '{"operation":"info"}' \
+  '{"operation":"config"}' \
+  '{"operation":"shutdown"}' \
+  | sim --root ./my-project --interview docassemble.my_project:data/questions/main.yml run
+```
+
+`questions`, `index`, `check`, `why`, `info`, and `config` mirror the one-shot
+commands: the response `result` is the `sim <command> --json` result for the
+same project, and a failure is the same typed `error` kind. The listing and
+`check` requests are scoped to the worker's interview (like `--interview`),
+take the listing filter as `var`, and accept `check`'s `--strict` flag as
+`strict`; `why` requires `variable` and also accepts `strict`. None of these
+requests creates or mutates a Saved session: `check`/`questions`/`index` only
+compile, `info`/`config` never touch session state, and `why` reads the
+worker's saved namespace read-only through the existing explanation operation
+— without a session it returns the same static `not saved` report as
+`sim why`. A malformed request, a compile failure through `check`, or a
+missing `why` variable arrives as the typed `input`/`compile` error the
+one-shot command reports.
+
 The Python client uses the same protocol and lifecycle:
 
 ```python
