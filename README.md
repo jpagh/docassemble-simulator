@@ -251,17 +251,24 @@ the worker's `--record`/`--phase` default, and a non-string value is an input
 error. Recorded operations use the canonical one-shot spelling (`start`,
 `status`, `refresh`, `answer`, `seek`, `eval`, `exec`, `vars`, `seed`), so an
 alias request such as `"operation":"evaluate"` records what `eval` records.
+Unlike the one-shot commands, which accept `--record` only on `start`,
+`refresh`, `answer`, `seek`, and `exec`, the worker accepts a record for any
+execution request, so a journey sidecar can also carry `status` responses and
+`eval`/`vars`/`seed` failures recorded against the unchanged active screen.
+Those extra entries, like a one-shot `exec` record, are compare-only: `trace
+replay` reports the first non-walk step as the typed `input` error `trace step
+N uses unsupported operation '<operation>'`.
 Protocol-only requests (`ping`,
 `reset`, `shutdown`, and malformed frames) are never recorded. A recording
 failure is a typed `input` response (and is logged to stderr), never a silent
 `ok`, so a truncated trace cannot pass unnoticed; when the operation itself
 already failed, its response keeps that error and gains a typed
 `recording-failure` diagnostic instead, so the recording failure never erases
-what the operation did. A scenario
-recorded through a journey is equivalent to recording it one process per
-operation, including an automatic seek's expanded `auto` steps, its trailing
-post-walk marker, and a failed answer recorded against the unchanged active
-screen.
+what the operation did. A scenario whose
+journey reaches only the five one-shot-recordable commands is equivalent to
+recording it one process per operation, including an automatic seek's expanded
+`auto` steps, its trailing post-walk marker, and a failed answer recorded
+against the unchanged active screen.
 
 ```sh
 printf '%s\n' \
@@ -488,7 +495,8 @@ trace and is the only write path. A mismatch exits `2` with the full report in
 the `trace-mismatch` error details.
 
 `trace replay GOLDEN` starts a fresh isolated session, applies each recorded
-intent (including browser defaults and automatic submissions), and stops at the
+walk intent (start, refresh, answer and its browser-defaults variant, seek, and
+expanded automatic submissions), and stops at the
 first identity, field-fact, flow, or rejected-assignment divergence. Automatic
 steps initialize their recorded seek target in one operation-local namespace,
 compare each pre-submission screen, and then apply the recorded transaction;
@@ -508,7 +516,14 @@ outcome, and Active seek unchanged. Use
 `--override STEP.FIELD=VALUE` to vary one answer without changing the golden.
 Replay validates the interview and configuration
 fingerprint metadata, never writes the golden or the user's Saved session, and
-exits non-zero on divergence.
+exits non-zero on divergence. A replayable golden is a walk recording (start,
+refresh, answer and its browser-defaults variant, seek, and expanded automatic
+submissions). A sidecar that also records another operation is compare-only:
+the worker accepts a record for any execution request (and `exec` is
+one-shot-recordable), so a sidecar can carry `status`, `eval`, `exec`, `vars`,
+or `seed` entries that replay cannot reproduce. Replay reports the first such
+step as the typed `input` error `trace step N uses unsupported operation
+'<operation>'` instead of silently skipping it.
 
 The identity rules and the evidence behind them are documented in
 [docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).
