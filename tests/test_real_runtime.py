@@ -1043,6 +1043,69 @@ def _assert_helper_output(path):
         assert expected in xml
 
 
+@pytest.mark.parametrize("source_policy", ["copy", "symlink"])
+def test_runner_preserves_ancestor_configuration_for_isolated_policies(
+    family_python, tmp_path, source_policy
+):
+    """The isolated runner resolves the original project's ancestor layers.
+
+    A copied or symlinked workspace must discover the same ancestor/project
+    configuration, and resolve the same effective values and fingerprint, as a
+    one-shot invocation on the original project.
+    """
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    project = tmp_path / "original"
+    package = project / "docassemble" / "regression"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "main.yml").write_text(
+        "---\nmandatory: True\nquestion: Start\nfields:\n  - Start: start\n"
+    )
+    (tmp_path / "simulator.toml").write_text('timezone = "UTC"\n', encoding="utf-8")
+    (project / "simulator.toml").write_text(
+        'timezone = "America/Chicago"\n', encoding="utf-8"
+    )
+
+    expected = _run(interpreter, project, "config", "--offline")
+    assert expected["ok"], (label, expected)
+    assert expected["result"]["effective"]["timezone"] == "America/Chicago", (
+        label,
+        expected,
+    )
+
+    from docassemble_simulator import SimulatorRunner
+
+    with SimulatorRunner(
+        project,
+        interview="docassemble.regression:data/questions/main.yml",
+        python=interpreter,
+        source_policy=source_policy,
+        offline=True,
+        timeout=60,
+    ) as runner:
+        config_response = runner.request("config")
+        ping = runner.request("ping")
+
+    assert config_response.ok, (label, source_policy, config_response)
+    assert ping.ok, (label, source_policy, ping)
+    assert config_response.result["effective"] == expected["result"]["effective"], (
+        label,
+        source_policy,
+        config_response.result["effective"],
+    )
+    assert (
+        config_response.result["config_fingerprint"]
+        == expected["result"]["config_fingerprint"]
+    ), (label, source_policy)
+    assert (
+        ping.result["scope"]["config_fingerprint"]
+        == expected["result"]["config_fingerprint"]
+    ), (label, source_policy)
+
+
 def test_persistent_worker_and_runner_contract_across_families(
     family_python, real_workspace
 ):
