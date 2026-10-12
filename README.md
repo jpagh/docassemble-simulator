@@ -210,8 +210,15 @@ remain in the protocol response.
 --phase NAME` to append every execution response's screen outcome to one trace
 sidecar, using the same adapter and format as the one-shot `--record` commands.
 A request may override either field with its own `"record"` and `"phase"`
-keys, so one journey can tag entries per step. Protocol-only requests (`ping`,
-`reset`, `shutdown`, and malformed frames) are never recorded. A scenario
+keys, so one journey can tag entries per step; an absent or `null` field uses
+the worker's `--record`/`--phase` default, and a non-string value is an input
+error. Recorded operations use the canonical one-shot spelling (`start`,
+`status`, `refresh`, `answer`, `seek`, `eval`, `exec`, `vars`, `seed`), so an
+alias request such as `"operation":"evaluate"` records what `eval` records.
+Protocol-only requests (`ping`,
+`reset`, `shutdown`, and malformed frames) are never recorded. A recording
+failure is a typed `input` response (and is logged to stderr), never a silent
+`ok`, so a truncated trace cannot pass unnoticed. A scenario
 recorded through a journey is equivalent to recording it one process per
 operation, including an automatic seek's expanded `auto` steps, its trailing
 post-walk marker, and a failed answer recorded against the unchanged active
@@ -280,7 +287,14 @@ docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl --update
 `--record PATH` is accepted by `start`, `refresh`, `answer`, `seek`, and
 `exec`, and takes an optional `--phase NAME` used by phased comparison. The
 persistent `worker`/`run`/`journey` commands accept the same flags (or
-per-request `record`/`phase` fields) and record an equivalent sidecar. Each
+per-request `record`/`phase` fields) and record an equivalent sidecar. In a
+journey, an absent or `null` `record`/`phase` field means "use the worker's
+`--record`/`--phase` default", and any other non-string value is an input
+error; the one-shot commands have no default phase, so there `--phase` only
+ever applies to its own invocation. A recording failure (an uncreatable
+destination, a trace from another run) is a typed `input` response, exactly as
+it is an exit-1 `input` failure for the one-shot commands, so a truncated
+journey trace never reports success. Each
 record includes sequence, operation, explicit **intent**, phase, submitted
 assignments, outcome, screen outcome, and canonical **screen identity** with the
 rule that produced it. Intent distinguishes ordinary answers (`answer`),
@@ -585,8 +599,9 @@ isolated `.venv-da110` (docassemble 1.10.x) and `.venv-da19` (1.9.x)
 environments, points `DASIMULATOR_REAL_PYTHON` / `DASIMULATOR_REAL_PYTHON_19`
 at their interpreters, and runs the real-runtime contract tests, including the
 screen-trace acceptance scenario, with the external corpus excluded. By
-default it uses two pytest-xdist workers; set
-`DASIMULATOR_RUNTIME_WORKERS=1` for a serial comparison/debug run. The count
+default it uses `min(4, CPU count)` pytest-xdist workers, falling back to two
+when no CPU probe answers; set `DASIMULATOR_RUNTIME_WORKERS=1` for a serial
+comparison/debug run, or set it to any count in the accepted range. The count
 is bounded to 1–8 rather than using every detected CPU, and every worker
 inherits both explicit family interpreter paths. Each runtime test uses its
 own pytest temporary workspace for sessions, files, traces, and packages, so
