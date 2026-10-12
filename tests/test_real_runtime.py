@@ -619,11 +619,11 @@ _SHUTDOWN_WAIT = 10.0
 
 # The interpreter runtime writes this line just before aborting when CPython
 # finalizes while a locked C++ object (docassemble's native dependencies) is
-# still alive. It happens intermittently on the legacy family and is written
-# after the shutdown response, so it is teardown noise from the runtime rather
-# than authored interview output: a journey whose worker died this way is not
-# held to the empty-stderr guarantee, and the abort is reported as a warning so
-# it stays visible in the gate's summary.
+# still alive. It happens intermittently on both supported families and is
+# written after the shutdown response, so it is teardown noise from the runtime
+# rather than authored interview output: a journey whose worker died this way is
+# not held to the empty-stderr guarantee, and the abort is reported as a warning
+# so it stays visible in the gate's summary.
 _RUNTIME_ABORT = "libc++abi: terminating due to uncaught exception"
 # The rest of the one known teardown abort: libc++abi appends the exception's
 # ``what()``, which is the recursive-mutex failure. Both halves are required,
@@ -668,8 +668,9 @@ class WorkerJourney:
     unless the test declared it with ``allow_stderr()``; a worker that aborted
     at interpreter teardown reports its runtime abort as a warning instead
     (see ``_RUNTIME_ABORT``). The caller declares the runtime family
-    (``family=case.probe``) because that exemption is legacy-only; the harness
-    never guesses the family from the interpreter path.
+    (``family=case.probe``) so a journey that never declared one cannot claim
+    the exemption; the harness never guesses the family from the interpreter
+    path.
 
     ``SimulatorRunner`` (ADR-0015) is not reused here on purpose. It returns
     transport failures (timeout, crash, unusable frame) as typed ``ok: false``
@@ -790,9 +791,9 @@ class WorkerJourney:
     def assert_no_unexpected_stderr(self) -> None:
         """Fail unless every stderr line was declared with ``allow_stderr``.
 
-        A worker that died by the one known legacy teardown abort reports that
-        abort as a warning instead (see ``_is_legacy_teardown_abort``); every
-        other signal death is an unexpected death even when it wrote nothing.
+        A worker that died by the one known teardown abort reports that abort
+        as a warning instead (see ``_is_known_teardown_abort``); every other
+        signal death is an unexpected death even when it wrote nothing.
         """
         if self._aborted_at_exit:
             warnings.warn(
@@ -818,20 +819,22 @@ class WorkerJourney:
             "unexpected worker stderr:\n" + "".join(unexpected)
         )
 
-    def _is_legacy_teardown_abort(self) -> bool:
-        """Whether the worker died by the one known legacy teardown abort.
+    def _is_known_teardown_abort(self) -> bool:
+        """Whether the worker died by the one known interpreter teardown abort.
 
         Every condition is required, because the exemption trades a checked
-        guarantee for a tolerated runtime wart: the journey declared the legacy
-        family, the worker answered ``shutdown`` before it died, its return
-        code is exactly ``-SIGABRT``, and its non-empty stderr consists only of
-        the exact known teardown line (the whole libc++abi abort message
-        carrying the recursive-mutex failure). A modern-family worker, any
-        other signal, an abort before the shutdown answer, empty stderr, a
-        prefixed or suffixed line, or the generic libc++abi prefix without the
-        mutex message is an unexpected death instead.
+        guarantee for a tolerated runtime wart: the journey declared a runtime
+        family (an undeclared journey cannot claim it), the worker answered
+        ``shutdown`` before it died, its return code is exactly ``-SIGABRT``,
+        and its non-empty stderr consists only of the exact known teardown line
+        (the whole libc++abi abort message carrying the recursive-mutex
+        failure). The abort is native to the runtime and has been observed on
+        both supported families, so either declaration qualifies. Any other
+        signal, an abort before the shutdown answer, empty stderr, a prefixed
+        or suffixed line, or the generic libc++abi prefix without the mutex
+        message is an unexpected death instead.
         """
-        if self.family is not LEGACY:
+        if self.family not in (LEGACY, MODERN):
             return False
         if not self._shutdown_acknowledged:
             return False
@@ -965,7 +968,7 @@ class WorkerJourney:
                     stream.close()
                 except OSError:
                     pass
-        self._aborted_at_exit = self._is_legacy_teardown_abort()
+        self._aborted_at_exit = self._is_known_teardown_abort()
         self.assert_no_unexpected_stderr()
 
 
@@ -1170,7 +1173,7 @@ def test_worker_journey_close_flags_unexpected_stderr(family_python, real_worksp
         journey.close()
 
 
-# The one known legacy teardown abort as the runtime writes it, including the
+# The one known teardown abort as the runtime writes it, including the
 # ``what()`` text libc++abi appends to its own prefix.
 def _fake_worker_interpreter(
     tmp_path, *, diagnostics=(), death_signal="ABRT", acknowledge=True
@@ -1209,12 +1212,13 @@ def _fake_worker_interpreter(
     return script
 
 
-def test_worker_journey_exempts_the_known_legacy_teardown_abort(tmp_path):
+@pytest.mark.parametrize("family", [LEGACY, MODERN])
+def test_worker_journey_exempts_the_known_teardown_abort(tmp_path, family):
     """The exact teardown signature after an acknowledged shutdown warns."""
     interpreter = _fake_worker_interpreter(
         tmp_path, diagnostics=(_KNOWN_TEARDOWN_ABORT,)
     )
-    journey = WorkerJourney(interpreter, tmp_path, family=LEGACY)
+    journey = WorkerJourney(interpreter, tmp_path, family=family)
 
     with pytest.warns(RuntimeWarning, match="aborted at exit"):
         journey.close()
@@ -1277,19 +1281,19 @@ def test_worker_journey_exempts_the_known_legacy_teardown_abort(tmp_path):
             id="abort-before-the-shutdown-answer",
         ),
         pytest.param(
-            MODERN,
+            UNKNOWN,
             (_KNOWN_TEARDOWN_ABORT,),
             "ABRT",
             True,
             "SIGABRT",
-            id="modern-family",
+            id="undeclared-family",
         ),
     ],
 )
 def test_worker_journey_fails_a_death_it_cannot_excuse(
     tmp_path, family, diagnostics, death_signal, acknowledge, expected
 ):
-    """Only the exact legacy teardown abort may skip the exit guarantee."""
+    """Only the exact teardown abort may skip the exit guarantee."""
     interpreter = _fake_worker_interpreter(
         tmp_path,
         diagnostics=diagnostics,
@@ -3228,3 +3232,224 @@ def test_worker_timeout_is_typed_for_background_action(family_python, tmp_path):
         assert not timed_out.ok
         assert timed_out.error["kind"] == "timeout"
         assert timed_out.error["details"]["operation"] == "start"
+
+
+def _reload_workspace(tmp_path):
+    """A two-screen interview whose second screen imports a helper module."""
+    package = tmp_path / "docassemble" / "reload"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "helpers.py").write_text(
+        "def greeting(value):\n    return f'v1:{value}'\n", encoding="utf-8"
+    )
+    main = questions / "main.yml"
+    main.write_text(
+        "---\n"
+        "modules:\n"
+        "  - docassemble.reload.helpers\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: First screen\n"
+        "fields:\n"
+        "  - Name: user_name\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Second screen\n"
+        "subquestion: |\n"
+        "  ${ greeting(user_name) }\n"
+        "fields:\n"
+        "  - Color: favorite_color\n",
+        encoding="utf-8",
+    )
+    return main
+
+
+def _reload_session_files(tmp_path):
+    sessions = tmp_path / ".simulator" / "sessions"
+    return sorted(sessions.glob("*.pkl")) if sessions.is_dir() else []
+
+
+def _mark_source_changed(path):
+    """Give the edit an unmistakable timestamp independent of clock resolution."""
+    edited = time.time() + 5
+    os.utime(path, (edited, edited))
+
+
+def test_worker_reloads_edited_interview_and_helper_without_restart(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    main = _reload_workspace(root)
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    try:
+        started = journey.start()
+        assert started["ok"], (label, started)
+        assert started["result"]["question_text"] == "First screen", (label, started)
+
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        assert answered["result"]["question_text"] == "Second screen", (label, answered)
+        assert "v1:Ada" in answered["result"].get("subquestion_text", ""), (
+            label,
+            answered,
+        )
+        assert len(_reload_session_files(root)) == 1, label
+
+        # Edit both the interview (rename the screen) and the helper it imports,
+        # then drive another operation on the same running worker.
+        main.write_text(
+            "---\n"
+            "modules:\n"
+            "  - docassemble.reload.helpers\n"
+            "---\n"
+            "mandatory: True\n"
+            "question: First screen\n"
+            "fields:\n"
+            "  - Name: user_name\n"
+            "---\n"
+            "mandatory: True\n"
+            "question: Renamed second screen\n"
+            "subquestion: |\n"
+            "  ${ greeting(user_name) }\n"
+            "fields:\n"
+            "  - Color: favorite_color\n",
+            encoding="utf-8",
+        )
+        (root / "docassemble" / "reload" / "helpers.py").write_text(
+            "def greeting(value):\n    return f'v2:{value}'\n", encoding="utf-8"
+        )
+        _mark_source_changed(main)
+
+        reloaded = journey.refresh()
+        assert reloaded["ok"], (label, reloaded)
+        assert reloaded["result"]["question_text"] == "Renamed second screen", (
+            label,
+            reloaded,
+        )
+        # The helper module was evicted from sys.modules, so the recompiled
+        # program renders the edited helper.
+        assert "v2:Ada" in reloaded["result"].get("subquestion_text", ""), (
+            label,
+            reloaded,
+        )
+        # The Saved session survived the reload: the answered value is intact.
+        preserved = journey.evaluate("user_name")
+        assert preserved["ok"], (label, preserved)
+        assert preserved["result"]["value"] == "'Ada'", (label, preserved)
+        assert len(_reload_session_files(root)) == 1, label
+
+        # Repeated operations on the (now unchanged) program stay warm and do
+        # not replace the saved session.
+        again = journey.refresh()
+        assert again["ok"], (label, again)
+        assert again["result"]["question_text"] == "Renamed second screen", (
+            label,
+            again,
+        )
+
+        # reset remains the explicit way to clear the Saved session.
+        reset = journey.request("reset")
+        assert reset["ok"], (label, reset)
+        assert _reload_session_files(root) == [], label
+    finally:
+        journey.close()
+
+
+def test_worker_reload_of_invalid_interview_keeps_saved_session(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    main = _reload_workspace(root)
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    # The expected compile failure is reported on stderr by the runtime.
+    journey.allow_stderr("docassemble.reload:data/questions/main.yml")
+    try:
+        assert journey.start()["ok"], label
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        before = _reload_session_files(root)
+        assert len(before) == 1, label
+
+        # An invalid source must surface the typed compile error and leave the
+        # Saved session untouched.
+        main.write_text("---\nquestion: [unterminated\n", encoding="utf-8")
+        _mark_source_changed(main)
+
+        failed = journey.refresh()
+        assert failed["ok"] is False, (label, failed)
+        assert failed["error"]["kind"] == "compile", (label, failed)
+        assert _reload_session_files(root) == before, label
+
+        # status reads the durable outcome without compiling, so it still works.
+        status = journey.status()
+        assert status["ok"], (label, status)
+        assert status["result"]["question_text"] == "Second screen", (label, status)
+    finally:
+        journey.close()
+
+
+def test_worker_reloads_module_only_edit_without_restart(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    _reload_workspace(root)
+    helper = root / "docassemble" / "reload" / "helpers.py"
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    try:
+        started = journey.start()
+        assert started["ok"], (label, started)
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        assert answered["result"]["question_text"] == "Second screen", (label, answered)
+        assert "v1:Ada" in answered["result"].get("subquestion_text", ""), (
+            label,
+            answered,
+        )
+
+        # Edit only the helper module; the interview YAML is unchanged.
+        helper.write_text(
+            "def greeting(value):\n    return f'v2:{value}'\n", encoding="utf-8"
+        )
+        _mark_source_changed(helper)
+
+        reloaded = journey.refresh()
+        assert reloaded["ok"], (label, reloaded)
+        assert reloaded["result"]["question_text"] == "Second screen", (label, reloaded)
+        assert "v2:Ada" in reloaded["result"].get("subquestion_text", ""), (
+            label,
+            reloaded,
+        )
+        # The Saved session still holds the answered value.
+        preserved = journey.evaluate("user_name")
+        assert preserved["ok"], (label, preserved)
+        assert preserved["result"]["value"] == "'Ada'", (label, preserved)
+    finally:
+        journey.close()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -381,6 +383,17 @@ class InterviewCatalog:
         # still scoped to one root/selector/process.
         self._cache_compiled = cache_compiled
         self._compiled: dict[str, Any] = {}
+        # Reload bookkeeping for the persistent worker: the docassemble source
+        # object, its resolved file path, and the source signature captured at
+        # compile time. Only populated when the compiled cache is on.
+        self._sources: dict[str, Any] = {}
+        self._source_paths: dict[str, str] = {}
+        self._source_signatures: dict[str, tuple[Any, int] | None] = {}
+        # The interview's declared ``modules:``/``imports:`` helper files and
+        # package directories, plus their compile-time signatures. A helper edit
+        # with no interview-source edit must still invalidate the compile.
+        self._module_paths: dict[str, tuple[str, ...]] = {}
+        self._module_signatures: dict[str, tuple] = {}
 
     @property
     def identity(self) -> str:
@@ -400,9 +413,14 @@ class InterviewCatalog:
         from docassemble_simulator._runtime import runtime_context
 
         selected = identity or self.identity
-        cached = self._compiled.get(selected) if self._cache_compiled else None
-        if cached is not None:
-            return cached
+        if self._cache_compiled:
+            cached = self._compiled.get(selected)
+            if cached is not None:
+                if self._source_current(selected):
+                    return cached
+                # The source changed under a running worker: drop both
+                # docassemble's compile and ours so get_interview recompiles.
+                self._reload_source(selected, cached)
         saved_argv = list(sys.argv)
         sys.argv[:] = ["docassemble-simulator", selected]
         try:
@@ -412,7 +430,186 @@ class InterviewCatalog:
             sys.argv[:] = saved_argv
         if self._cache_compiled:
             self._compiled[selected] = interview
+            self._record_source(selected, interview)
         return interview
+
+    def _cached_source(self, selected: str):
+        """The docassemble source object for a compiled identity, if any."""
+        try:
+            from docassemble.base.interview_cache import cache
+        except (ImportError, AttributeError):
+            return None
+        entry = cache.get(selected) if isinstance(cache, dict) else None
+        return entry.get("source") if isinstance(entry, dict) else None
+
+    def _resolved_source_path(self, selected: str) -> str | None:
+        """Fall back to the workspace path for a canonical identity."""
+        package, separator, relative = selected.partition(":")
+        if not separator or not package.startswith("docassemble."):
+            return None
+        candidate = self.root / package.replace(".", "/") / relative
+        return str(candidate) if candidate.is_file() else None
+
+    def _record_source(self, selected: str, interview) -> None:
+        """Capture the source and declared-module signatures for later checks."""
+        source = self._cached_source(selected)
+        path = getattr(source, "filepath", None) or self._resolved_source_path(selected)
+        if path:
+            self._sources[selected] = source
+            self._source_paths[selected] = str(path)
+        self._source_signatures[selected] = self._source_signature(selected)
+        module_paths = self._module_paths_for(self._declared_module_names(interview))
+        self._module_paths[selected] = module_paths
+        self._module_signatures[selected] = self._module_signature(module_paths)
+
+    def _source_signature(self, selected: str):
+        """docassemble's own source timestamp plus the file size.
+
+        The simulator's stubbed redis keeps docassemble's interview index at a
+        constant and nothing here calls ``update_index`` (that is the web
+        editor's job), so ``interview_cache.cache_valid`` never notices an
+        edit. ``InterviewSourceFile.get_modtime`` is the per-source timestamp
+        docassemble itself keeps; a missing or unreadable source yields
+        ``None`` so the next check forces a reload and compilation surfaces
+        the typed error.
+        """
+        path = self._source_paths.get(selected)
+        if not path:
+            return None
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        mtime = stat.st_mtime
+        get_modtime = getattr(self._sources.get(selected), "get_modtime", None)
+        if callable(get_modtime):
+            try:
+                mtime = get_modtime()
+            except Exception:  # noqa: BLE001, S110 - runtime-specific source object
+                pass
+        return (mtime, stat.st_size)
+
+    def _source_current(self, selected: str) -> bool:
+        """Whether the cached compile still matches its source and helpers."""
+        if selected not in self._source_paths:
+            # No measurable source (for example an in-memory source); trust the
+            # cache rather than recompiling every operation.
+            return True
+        current = self._source_signature(selected)
+        if current is None or current != self._source_signatures.get(selected):
+            return False
+        return self._module_signature(self._module_paths.get(selected, ())) == (
+            self._module_signatures.get(selected, ())
+        )
+
+    def _declared_module_names(self, interview) -> set[str]:
+        """Fully-qualified names declared by the interview's import directives."""
+        names: set[str] = set()
+        for question in getattr(interview, "questions_list", None) or ():
+            if getattr(question, "question_type", "") not in {"modules", "imports"}:
+                continue
+            package = getattr(question, "package", None)
+            for name in getattr(question, "module_list", None) or ():
+                if not isinstance(name, str):
+                    continue
+                if name.startswith(".") and package:
+                    names.add(str(package) + name)
+                else:
+                    names.add(name)
+        return names
+
+    def _module_paths_for(self, names: set[str]) -> tuple[str, ...]:
+        """Files and package directories for the interview's own helpers.
+
+        Resolution is a workspace-tree lookup rather than
+        ``importlib.util.find_spec``: find_spec imports a dotted module's parent
+        package, which would execute authored package code during compilation
+        and could import a heavy installed dependency. A module that is not a
+        workspace package (stdlib, an installed docassemble package, a
+        mis-declared name) is skipped; those are not the interview's own source
+        and are not edited during interview development.
+        """
+        paths = set()
+        for name in sorted(names):
+            path = self._module_path(name)
+            if path is None:
+                logger.debug("reload watch skips non-workspace module %r", name)
+                continue
+            paths.add(path)
+        return tuple(sorted(paths))
+
+    def _module_path(self, name: str) -> str | None:
+        """Map ``docassemble.<pkg>[.<sub>]`` to a source file or package dir."""
+        parts = name.split(".")
+        if len(parts) < 2 or parts[0] != "docassemble":
+            return None
+        package_dir = self.root.joinpath(*parts)
+        if (package_dir / "__init__.py").is_file():
+            return str(package_dir)
+        module_file = self.root.joinpath(*parts[:-1]) / (parts[-1] + ".py")
+        if module_file.is_file():
+            return str(module_file)
+        if package_dir.is_dir():
+            # A namespace package has no __init__.py; walk it so its modules
+            # are still watched.
+            return str(package_dir)
+        return None
+
+    def _module_signature(self, paths: tuple[str, ...]) -> tuple:
+        """Per-path ``*.py`` timestamp and size for the watched module trees."""
+        return tuple(self._tree_signature(path) for path in paths)
+
+    def _tree_signature(self, path: str):
+        """A sorted file signature for one module file or package directory."""
+        try:
+            if os.path.isdir(path):
+                entries = []
+                for file in sorted(Path(path).rglob("*.py")):
+                    if "__pycache__" in file.parts:
+                        continue
+                    stat = file.stat()
+                    entries.append((str(file), stat.st_mtime, stat.st_size))
+                return tuple(entries)
+            stat = os.stat(path)
+            return ((path, stat.st_mtime, stat.st_size),)
+        except OSError:
+            return None
+
+    def _reload_source(self, selected: str, cached) -> None:
+        """Forget the stale compile and the helper modules it imported."""
+        try:
+            from docassemble.base.interview_cache import clear_cache
+        except (ImportError, AttributeError):
+            clear_cache = None
+        if clear_cache is not None:
+            clear_cache(selected)
+        self._evict_modules(cached)
+        self._compiled.pop(selected, None)
+        self._sources.pop(selected, None)
+        self._source_paths.pop(selected, None)
+        self._source_signatures.pop(selected, None)
+        self._module_paths.pop(selected, None)
+        self._module_signatures.pop(selected, None)
+
+    def _evict_modules(self, interview) -> None:
+        """Forget the interview's declared ``modules:``/``imports:`` helpers.
+
+        docassemble imports those helpers on first assembly and leaves them in
+        ``sys.modules``; without eviction a recompiled interview keeps serving
+        the old helper code for the rest of the worker's life.
+        """
+        names = self._declared_module_names(interview)
+        if not names:
+            return
+        evicted = [
+            name
+            for name in list(sys.modules)
+            if name in names or any(name.startswith(prefix + ".") for prefix in names)
+        ]
+        for name in evicted:
+            sys.modules.pop(name, None)
+        if evicted:
+            importlib.invalidate_caches()
 
     def check(self) -> CatalogOutcome:
         identities = [self.identity] if self.selector else list_interviews(self.root)

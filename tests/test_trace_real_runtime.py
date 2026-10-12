@@ -339,7 +339,7 @@ def _record(journey, operation, record: Path, **fields):
     return journey.request(operation, record=str(record), **fields)
 
 
-def _drive(interpreter, root: Path, record: Path) -> None:
+def _drive(interpreter, root: Path, record: Path, family) -> None:
     """Drive the scenario, keying every answer on the current screen identity.
 
     Recording goes through one persistent worker journey: the worker compiles
@@ -348,7 +348,10 @@ def _drive(interpreter, root: Path, record: Path) -> None:
     """
     consumed: dict[str, int] = defaultdict(int)
     journey = WorkerJourney(
-        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        root,
+        family=family,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
     try:
 
@@ -385,9 +388,9 @@ def _drive(interpreter, root: Path, record: Path) -> None:
         journey.close()
 
 
-def _record_base(interpreter, root: Path, record: Path) -> None:
+def _record_base(interpreter, root: Path, record: Path, family) -> None:
     _write_interview(root)
-    _drive(interpreter, root, record)
+    _drive(interpreter, root, record, family)
 
 
 def _replay_relevant_entries(trace):
@@ -419,7 +422,10 @@ def test_trace_replay_round_trips_default_auto_failure_and_answer(
     root = _write_interview(tmp_path / "replay", REPLAY_INTERVIEW)
     record = root / "scenario.trace.jsonl"
     journey = worker_journey(
-        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
 
     assert _record(journey, "start", record)["ok"]
@@ -474,7 +480,10 @@ def test_worker_journey_recording_matches_the_one_shot_cli(
     worker_root = _write_interview(tmp_path / "worker", REPLAY_INTERVIEW)
     worker_record = worker_root / "scenario.trace.jsonl"
     journey = worker_journey(
-        interpreter, worker_root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        worker_root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
     assert _record(journey, "start", worker_record, phase=phases[0])["ok"]
     assert _record(journey, "answer", worker_record, defaults=True, phase=phases[0])[
@@ -601,7 +610,10 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
     root = _write_interview(tmp_path / "multi-auto", interview)
     record = root / "scenario.trace.jsonl"
     journey = worker_journey(
-        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
 
     assert _record(journey, "start", record)["ok"]
@@ -662,7 +674,10 @@ def test_trace_replay_stops_before_later_automatic_effect_on_first_identity_dive
     root = _write_interview(tmp_path / "first-divergence", interview)
     record = root / "scenario.trace.jsonl"
     journey = worker_journey(
-        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
 
     assert _record(journey, "start", record)["ok"]
@@ -713,7 +728,10 @@ def test_trace_replay_groups_fresh_activated_multi_screen_walk(
     root = _write_interview(tmp_path / "fresh-multi-auto", interview)
     record = root / "fresh.trace.jsonl"
     journey = worker_journey(
-        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
 
     assert _record(
@@ -747,7 +765,10 @@ def test_trace_replay_preserves_nonactivated_seek_context(
     root = _write_interview(tmp_path / "nonactivated", REPLAY_INTERVIEW)
     record = root / "scenario.trace.jsonl"
     journey = worker_journey(
-        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
     )
 
     assert _record(journey, "start", record)["ok"]
@@ -786,8 +807,8 @@ def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
     # 1. Record and replay the base scenario.
     golden = tmp_path / "golden.trace.jsonl"
     replay = tmp_path / "replay.trace.jsonl"
-    _record_base(interpreter, tmp_path / "golden", golden)
-    _record_base(interpreter, tmp_path / "replay", replay)
+    _record_base(interpreter, tmp_path / "golden", golden, family_python.probe)
+    _record_base(interpreter, tmp_path / "replay", replay, family_python.probe)
     expected = load_trace(golden)
     actual = load_trace(replay)
     identities = [entry.identity.key for entry in expected.entries]
@@ -823,7 +844,7 @@ def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
     # 2. Insert an earlier block: generated names shift, identities do not.
     inserted_root = _write_interview(tmp_path / "inserted", INSERTED_INTERVIEW)
     inserted_trace = tmp_path / "inserted.trace.jsonl"
-    _drive(interpreter, inserted_root, inserted_trace)
+    _drive(interpreter, inserted_root, inserted_trace, family_python.probe)
     inserted = load_trace(inserted_trace)
     expected_names = [
         entry.screen.get("question_name")
@@ -841,7 +862,7 @@ def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
     # 3. Reorder two intake questions: ordered fails, phased passes.
     reordered_root = _write_interview(tmp_path / "reordered", REORDERED_INTERVIEW)
     reordered_trace = tmp_path / "reordered.trace.jsonl"
-    _drive(interpreter, reordered_root, reordered_trace)
+    _drive(interpreter, reordered_root, reordered_trace, family_python.probe)
     reordered = load_trace(reordered_trace)
     reordered_ordered = compare_traces(expected, reordered)
     reordered_phased = compare_traces(
@@ -861,7 +882,7 @@ def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
         BASE_INTERVIEW.replace("favorite_color", "chosen_color"),
     )
     renamed_trace = tmp_path / "renamed.trace.jsonl"
-    _drive(interpreter, renamed_root, renamed_trace)
+    _drive(interpreter, renamed_root, renamed_trace, family_python.probe)
     renamed = load_trace(renamed_trace)
     comparison = compare_traces(expected, renamed, ComparePolicy(order="unordered"))
     assert comparison.matched is False
@@ -1008,7 +1029,7 @@ question: |
 _BOUNDED_WALK_GOLDENS: dict[str, bytes] = {}
 
 
-def _bounded_walk_golden(interpreter, tmp_path_factory) -> bytes:
+def _bounded_walk_golden(interpreter, tmp_path_factory, family) -> bytes:
     """Record the shared activated walk: a Saved answer plus two submissions."""
     key = str(interpreter)
     if key not in _BOUNDED_WALK_GOLDENS:
@@ -1017,7 +1038,10 @@ def _bounded_walk_golden(interpreter, tmp_path_factory) -> bytes:
         )
         record = root / "scenario.trace.jsonl"
         journey = WorkerJourney(
-            interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+            interpreter,
+            root,
+            family=family,
+            arguments=("--offline", "--seek-diagnostics", "off"),
         )
         try:
             assert _record(journey, "start", record)["ok"]
@@ -1038,14 +1062,16 @@ def _bounded_walk_golden(interpreter, tmp_path_factory) -> bytes:
     return _BOUNDED_WALK_GOLDENS[key]
 
 
-def _bounded_walk_root(interpreter, tmp_path, tmp_path_factory, name, interview):
+def _bounded_walk_root(
+    interpreter, tmp_path, tmp_path_factory, name, interview, family
+):
     """Hold one replay interview variant beside a copy of the recorded golden."""
     marker = tmp_path / f"{name}.marker"
     root = _write_interview(
         tmp_path / name, interview.replace("__TRACE_REPLAY_MARKER__", str(marker))
     )
     record = root / "scenario.trace.jsonl"
-    record.write_bytes(_bounded_walk_golden(interpreter, tmp_path_factory))
+    record.write_bytes(_bounded_walk_golden(interpreter, tmp_path_factory, family))
     return root, record, marker
 
 
@@ -1069,6 +1095,7 @@ def test_trace_replay_never_submits_an_unrecorded_automatic_screen(
         tmp_path_factory,
         "unrecorded-screen",
         EXTRA_AUTO_SCREEN_INTERVIEW,
+        family_python.probe,
     )
     golden_before = record.read_bytes()
     sessions_before = _saved_session_files(root)
@@ -1123,6 +1150,7 @@ def test_trace_replay_reports_a_trailing_outcome_divergence_without_submitting(
         tmp_path_factory,
         "trailing-outcome",
         LATER_MANDATORY_INTERVIEW,
+        family_python.probe,
     )
     auto_entries = [
         entry for entry in load_trace(record).entries if entry.intent == "auto"
@@ -1161,7 +1189,12 @@ def test_trace_replay_reports_the_earliest_missing_expected_step(
     """A walk that ends early is truncated, not a silent success."""
     interpreter = family_python.interpreter
     root, record, _marker = _bounded_walk_root(
-        interpreter, tmp_path, tmp_path_factory, "early-end", EARLY_END_INTERVIEW
+        interpreter,
+        tmp_path,
+        tmp_path_factory,
+        "early-end",
+        EARLY_END_INTERVIEW,
+        family_python.probe,
     )
     golden = load_trace(record)
     automatic = [entry for entry in golden.entries if entry.intent == "auto"]
@@ -1358,7 +1391,12 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
     )
     for name, interview, phase, submitted, override in cases:
         root, record, _marker = _bounded_walk_root(
-            interpreter, tmp_path, tmp_path_factory, name, interview
+            interpreter,
+            tmp_path,
+            tmp_path_factory,
+            name,
+            interview,
+            family_python.probe,
         )
         golden = load_trace(record)
         post = next(entry for entry in golden.entries if entry.post_auto)
@@ -1405,6 +1443,7 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
         tmp_path_factory,
         "fresh-trailing-outcome",
         LATER_MANDATORY_INTERVIEW,
+        family_python.probe,
     )
     observed = _execution_seam(
         interpreter, root, record, tmp_path / "fresh-sessions", fresh=True
@@ -1422,6 +1461,7 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
         tmp_path_factory,
         "fresh-early-end",
         EARLY_END_INTERVIEW,
+        family_python.probe,
     )
     observed = _execution_seam(
         interpreter, root, record, tmp_path / "fresh-early-end-sessions", fresh=True
