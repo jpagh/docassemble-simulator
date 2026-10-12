@@ -14,10 +14,12 @@ from pathlib import Path
 
 import pytest
 from test_real_runtime import (  # noqa: F401 - fixtures registered by import
+    WorkerJourney,
     _environment,
     family_python,
     real_python,
     real_python_19,
+    worker_journey,
 )
 
 from docassemble_simulator.trace import (
@@ -332,6 +334,11 @@ def _command(interpreter, root, *arguments):
     return completed.returncode, json.loads(completed.stdout)
 
 
+def _record(journey, operation, record: Path, **fields):
+    """Drive one worker operation that records its screen outcome to ``record``."""
+    return journey.request(operation, record=str(record), **fields)
+
+
 def _drive(interpreter, root: Path, record: Path) -> None:
     """Drive the scenario, keying every answer on the current screen identity."""
     consumed: dict[str, int] = defaultdict(int)
@@ -388,58 +395,28 @@ def _record_base(interpreter, root: Path, record: Path) -> None:
 def test_trace_replay_round_trips_default_auto_failure_and_answer(
     family_python,  # noqa: F811
     tmp_path,
+    worker_journey,  # noqa: F811
 ):
     interpreter = family_python.interpreter
     root = _write_interview(tmp_path / "replay", REPLAY_INTERVIEW)
     record = root / "scenario.trace.jsonl"
+    journey = worker_journey(
+        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+    )
 
-    code, payload = _command(interpreter, root, "start", "--record", str(record))
-    assert code == 0, payload
-    code, payload = _command(
-        interpreter, root, "answer", "--defaults", "--record", str(record)
-    )
-    assert code == 0, payload
+    assert _record(journey, "start", record)["ok"]
+    assert _record(journey, "answer", record, defaults=True)["ok"]
     for variable in ("optional_one", "optional_two"):
-        code, payload = _command(
-            interpreter,
-            root,
-            "seek",
-            variable,
-            "--auto",
-            "--activate",
-            "--record",
-            str(record),
-        )
-        assert code == 0, payload
-    code, payload = _command(
-        interpreter,
-        root,
-        "seek",
-        "target_value",
-        "--auto",
-        "--activate",
-        "--record",
-        str(record),
-    )
-    assert code == 0, payload
-    code, payload = _command(
-        interpreter,
-        root,
-        "answer",
-        "target_value=bad",
-        "--record",
-        str(record),
-    )
-    assert code == 2, payload
-    code, payload = _command(
-        interpreter,
-        root,
-        "answer",
-        "target_value=good",
-        "--record",
-        str(record),
-    )
-    assert code == 0, payload
+        assert _record(
+            journey, "seek", record, variable=variable, auto=True, activate=True
+        )["ok"]
+    assert _record(
+        journey, "seek", record, variable="target_value", auto=True, activate=True
+    )["ok"]
+    assert not _record(journey, "answer", record, assignments=["target_value=bad"])[
+        "ok"
+    ]
+    assert _record(journey, "answer", record, assignments=["target_value=good"])["ok"]
 
     golden = load_trace(record)
     assert any(entry.intent == "defaults" for entry in golden.entries)
@@ -461,9 +438,136 @@ def test_trace_replay_round_trips_default_auto_failure_and_answer(
     assert after == before
 
 
+def test_worker_journey_recording_matches_the_one_shot_cli(
+    family_python,  # noqa: F811
+    tmp_path,
+    worker_journey,  # noqa: F811
+):
+    """A worker-recorded scenario equals the same scenario recorded by the CLI.
+
+    The scenario exercises the three recording shapes the trace adapter owns:
+    an expanded automatic walk with its trailing post-walk marker, a failed
+    answer recorded against the unchanged active screen, and ``--phase``
+    tagging.
+    """
+    interpreter = family_python.interpreter
+    phases = ("intake", "close")
+
+    worker_root = _write_interview(tmp_path / "worker", REPLAY_INTERVIEW)
+    worker_record = worker_root / "scenario.trace.jsonl"
+    journey = worker_journey(
+        interpreter, worker_root, arguments=("--offline", "--seek-diagnostics", "off")
+    )
+    assert _record(journey, "start", worker_record, phase=phases[0])["ok"]
+    assert _record(journey, "answer", worker_record, defaults=True, phase=phases[0])[
+        "ok"
+    ]
+    for variable in ("optional_one", "optional_two", "target_value"):
+        assert _record(
+            journey,
+            "seek",
+            worker_record,
+            variable=variable,
+            auto=True,
+            activate=True,
+            phase=phases[1],
+        )["ok"]
+    assert not _record(
+        journey,
+        "answer",
+        worker_record,
+        assignments=["target_value=bad"],
+        phase=phases[1],
+    )["ok"]
+    assert _record(
+        journey,
+        "answer",
+        worker_record,
+        assignments=["target_value=good"],
+        phase=phases[1],
+    )["ok"]
+
+    cli_root = _write_interview(tmp_path / "cli", REPLAY_INTERVIEW)
+    cli_record = cli_root / "scenario.trace.jsonl"
+    steps = (
+        (0, ("start", "--record", str(cli_record), "--phase", phases[0])),
+        (
+            0,
+            ("answer", "--defaults", "--record", str(cli_record), "--phase", phases[0]),
+        ),
+        *(
+            (
+                0,
+                (
+                    "seek",
+                    variable,
+                    "--auto",
+                    "--activate",
+                    "--record",
+                    str(cli_record),
+                    "--phase",
+                    phases[1],
+                ),
+            )
+            for variable in ("optional_one", "optional_two", "target_value")
+        ),
+        (
+            2,
+            (
+                "answer",
+                "target_value=bad",
+                "--record",
+                str(cli_record),
+                "--phase",
+                phases[1],
+            ),
+        ),
+        (
+            0,
+            (
+                "answer",
+                "target_value=good",
+                "--record",
+                str(cli_record),
+                "--phase",
+                phases[1],
+            ),
+        ),
+    )
+    for expected_code, arguments in steps:
+        code, payload = _command(interpreter, cli_root, *arguments)
+        assert code == expected_code, payload
+
+    worker_trace = load_trace(worker_record)
+    cli_trace = load_trace(cli_record)
+
+    # Both recordings expand the automatic walk into one `auto` entry per
+    # attempted screen, keep the trailing post-walk marker, and record the
+    # rejected answer against the unchanged active screen.
+    for trace in (worker_trace, cli_trace):
+        automatic = [entry for entry in trace.entries if entry.intent == "auto"]
+        assert len(automatic) >= 2, trace
+        post_auto = next(entry for entry in trace.entries if entry.post_auto)
+        assert post_auto.fresh is False, trace
+        assert any(entry.ok is False for entry in automatic), trace
+        assert any(entry.intent == "defaults" for entry in trace.entries), trace
+    assert [entry.phase for entry in worker_trace.entries] == [
+        entry.phase for entry in cli_trace.entries
+    ]
+    assert {entry.phase for entry in worker_trace.entries} == set(phases)
+
+    ordered = compare_traces(cli_trace, worker_trace)
+    assert ordered.matched is True, ordered.diffs
+    phased = compare_traces(
+        cli_trace, worker_trace, ComparePolicy(order="phased", phases=phases)
+    )
+    assert phased.matched is True, phased.diffs
+
+
 def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
     family_python,  # noqa: F811
     tmp_path,
+    worker_journey,  # noqa: F811
 ):
     """A recorded auto,auto walk stays isolated from its Saved source screen."""
     interpreter = family_python.interpreter
@@ -473,31 +577,16 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
     )
     root = _write_interview(tmp_path / "multi-auto", interview)
     record = root / "scenario.trace.jsonl"
-
-    code, payload = _command(interpreter, root, "start", "--record", str(record))
-    assert code == 0, payload
-    code, payload = _command(
-        interpreter,
-        root,
-        "seek",
-        "target_value",
-        "--auto",
-        "--record",
-        str(record),
+    journey = worker_journey(
+        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
     )
-    assert code == 0, payload
+
+    assert _record(journey, "start", record)["ok"]
+    assert _record(journey, "seek", record, variable="target_value", auto=True)["ok"]
     marker.unlink()
     # This answer must still target Saved screen A after the non-activated
     # walk temporarily traversed screens B and C.
-    code, payload = _command(
-        interpreter,
-        root,
-        "answer",
-        "saved_value=done",
-        "--record",
-        str(record),
-    )
-    assert code == 0, payload
+    assert _record(journey, "answer", record, assignments=["saved_value=done"])["ok"]
 
     golden = load_trace(record)
     automatic = [entry for entry in golden.entries if entry.intent == "auto"]
@@ -540,6 +629,7 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
 def test_trace_replay_stops_before_later_automatic_effect_on_first_identity_divergence(
     family_python,  # noqa: F811
     tmp_path,
+    worker_journey,  # noqa: F811
 ):
     interpreter = family_python.interpreter
     marker = tmp_path / "later-screen-validation.marker"
@@ -548,20 +638,14 @@ def test_trace_replay_stops_before_later_automatic_effect_on_first_identity_dive
     )
     root = _write_interview(tmp_path / "first-divergence", interview)
     record = root / "scenario.trace.jsonl"
-
-    code, payload = _command(interpreter, root, "start", "--record", str(record))
-    assert code == 0, payload
-    code, payload = _command(
-        interpreter,
-        root,
-        "seek",
-        "target_value",
-        "--auto",
-        "--activate",
-        "--record",
-        str(record),
+    journey = worker_journey(
+        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
     )
-    assert code == 0, payload
+
+    assert _record(journey, "start", record)["ok"]
+    assert _record(
+        journey, "seek", record, variable="target_value", auto=True, activate=True
+    )["ok"]
     assert marker.exists()
     marker.unlink()
     golden_before = record.read_bytes()
@@ -596,6 +680,7 @@ def test_trace_replay_stops_before_later_automatic_effect_on_first_identity_dive
 def test_trace_replay_groups_fresh_activated_multi_screen_walk(
     family_python,  # noqa: F811
     tmp_path,
+    worker_journey,  # noqa: F811
 ):
     interpreter = family_python.interpreter
     marker = tmp_path / "fresh-multi-auto.marker"
@@ -604,19 +689,19 @@ def test_trace_replay_groups_fresh_activated_multi_screen_walk(
     )
     root = _write_interview(tmp_path / "fresh-multi-auto", interview)
     record = root / "fresh.trace.jsonl"
-
-    code, payload = _command(
-        interpreter,
-        root,
-        "seek",
-        "target_value",
-        "--auto",
-        "--fresh",
-        "--activate",
-        "--record",
-        str(record),
+    journey = worker_journey(
+        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
     )
-    assert code == 0, payload
+
+    assert _record(
+        journey,
+        "seek",
+        record,
+        variable="target_value",
+        auto=True,
+        fresh=True,
+        activate=True,
+    )["ok"]
     marker.unlink()
     golden = load_trace(record)
     automatic = [entry for entry in golden.entries if entry.intent == "auto"]
@@ -632,45 +717,24 @@ def test_trace_replay_groups_fresh_activated_multi_screen_walk(
 def test_trace_replay_preserves_nonactivated_seek_context(
     family_python,  # noqa: F811
     tmp_path,
+    worker_journey,  # noqa: F811
 ):
     """A target walk must not answer the Saved screen it temporarily bypasses."""
     interpreter = family_python.interpreter
     root = _write_interview(tmp_path / "nonactivated", REPLAY_INTERVIEW)
     record = root / "scenario.trace.jsonl"
+    journey = worker_journey(
+        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+    )
 
-    code, payload = _command(interpreter, root, "start", "--record", str(record))
-    assert code == 0, payload
+    assert _record(journey, "start", record)["ok"]
     # The Saved session remains on Intro.  The automatic walk seeks the later
     # target, accepts its optional predecessors, and rejects at Required.
-    code, payload = _command(
-        interpreter,
-        root,
-        "seek",
-        "target_value",
-        "--auto",
-        "--record",
-        str(record),
-    )
-    assert code == 0, payload
-    code, payload = _command(
-        interpreter,
-        root,
-        "answer",
-        "user_name=Jack",
-        "--record",
-        str(record),
-    )
-    assert code == 0, payload
-    for arguments in (("--defaults",), ("--defaults",), ("target_value=good",)):
-        code, payload = _command(
-            interpreter,
-            root,
-            "answer",
-            *arguments,
-            "--record",
-            str(record),
-        )
-        assert code == 0, payload
+    assert _record(journey, "seek", record, variable="target_value", auto=True)["ok"]
+    assert _record(journey, "answer", record, assignments=["user_name=Jack"])["ok"]
+    assert _record(journey, "answer", record, defaults=True)["ok"]
+    assert _record(journey, "answer", record, defaults=True)["ok"]
+    assert _record(journey, "answer", record, assignments=["target_value=good"])["ok"]
 
     golden = load_trace(record)
     automatic = [entry for entry in golden.entries if entry.intent == "auto"]
@@ -929,13 +993,24 @@ def _bounded_walk_golden(interpreter, tmp_path_factory) -> bytes:
             tmp_path_factory.mktemp("bounded-walk"), BOUNDED_AUTO_REPLAY_INTERVIEW
         )
         record = root / "scenario.trace.jsonl"
-        for arguments in (
-            ("start", "--record", str(record)),
-            ("answer", "saved_value=done", "--record", str(record)),
-            ("seek", "target_value", "--auto", "--activate", "--record", str(record)),
-        ):
-            code, payload = _command(interpreter, root, *arguments)
-            assert code == 0, payload
+        journey = WorkerJourney(
+            interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
+        )
+        try:
+            assert _record(journey, "start", record)["ok"]
+            assert _record(journey, "answer", record, assignments=["saved_value=done"])[
+                "ok"
+            ]
+            assert _record(
+                journey,
+                "seek",
+                record,
+                variable="target_value",
+                auto=True,
+                activate=True,
+            )["ok"]
+        finally:
+            journey.close()
         _BOUNDED_WALK_GOLDENS[key] = record.read_bytes()
     return _BOUNDED_WALK_GOLDENS[key]
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -600,6 +602,208 @@ def _run_human(real_python, root, *arguments, expected_code):
     return completed.stdout + completed.stderr
 
 
+_WORKER_EXIT = object()
+
+
+class WorkerJourney:
+    """One persistent ``sim worker`` process for a branching runtime drive.
+
+    The process compiles the interview once and serves every later operation in
+    a fraction of a per-command startup, so a multi-operation scenario costs
+    one interpreter start instead of one per command. Requests are written one
+    line at a time and one response is read back, so a drive can branch on the
+    screen it just received instead of committing to a pre-written journey
+    file. Authored output is drained from stderr on a thread so it can neither
+    deadlock the pipe nor be mistaken for a protocol frame.
+    """
+
+    def __init__(
+        self,
+        interpreter,
+        root,
+        *,
+        interview=None,
+        session_root=None,
+        arguments=(),
+        operation_timeout=180.0,
+        response_timeout=180.0,
+    ):
+        self.interpreter = Path(interpreter)
+        self.root = Path(root)
+        self.session_root = (
+            Path(session_root)
+            if session_root is not None
+            else self.root / ".simulator" / "sessions"
+        )
+        self.response_timeout = response_timeout
+        self.operation_timeout = operation_timeout
+        self._responses: queue.Queue = queue.Queue()
+        self._stderr: list[str] = []
+        self._sequence = 0
+        command = [
+            str(self.interpreter),
+            "-m",
+            "docassemble_simulator",
+            "--root",
+            str(self.root),
+            *(["--interview", interview] if interview else []),
+            *arguments,
+            "worker",
+            "--session-root",
+            str(self.session_root),
+            "--timeout",
+            str(operation_timeout),
+        ]
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=_environment(),
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, name="worker-journey-stderr", daemon=True
+        )
+        self._stdout_thread = threading.Thread(
+            target=self._drain_stdout, name="worker-journey-stdout", daemon=True
+        )
+        self._stderr_thread.start()
+        self._stdout_thread.start()
+
+    # -- transport ---------------------------------------------------------
+    def _drain_stderr(self) -> None:
+        assert self.process.stderr is not None
+        for line in self.process.stderr:
+            self._stderr.append(line)
+
+    def _drain_stdout(self) -> None:
+        assert self.process.stdout is not None
+        for line in self.process.stdout:
+            self._responses.put(line)
+        self._responses.put(_WORKER_EXIT)
+
+    def stderr_text(self) -> str:
+        return "".join(self._stderr)
+
+    def failure_message(self, reason: str) -> str:
+        return (
+            f"{reason}\n"
+            f"interpreter: {self.interpreter}\n"
+            f"worker stderr:\n{self.stderr_text()}"
+        )
+
+    def request(self, operation: str, **fields):
+        """Send one operation and wait for its single protocol response."""
+        self._sequence += 1
+        request = {"id": str(self._sequence), "operation": operation, **fields}
+        payload = json.dumps(request) + "\n"
+        try:
+            assert self.process.stdin is not None
+            self.process.stdin.write(payload)
+            self.process.stdin.flush()
+        except (BrokenPipeError, ValueError) as error:
+            raise AssertionError(
+                self.failure_message(
+                    f"worker stdin rejected a {operation} request: {error}"
+                )
+            ) from error
+        try:
+            line = self._responses.get(timeout=self.response_timeout)
+        except queue.Empty:
+            raise AssertionError(
+                self.failure_message(
+                    f"worker did not answer {operation} within "
+                    f"{self.response_timeout:g}s"
+                )
+            )
+        if line is _WORKER_EXIT:
+            raise AssertionError(
+                self.failure_message(f"worker exited before answering {operation}")
+            )
+        response = json.loads(line)
+        assert response["id"] == request["id"], self.failure_message(
+            f"worker answered {response['id']!r} for {request['id']!r}"
+        )
+        return response
+
+    # -- operation helpers -------------------------------------------------
+    def start(self):
+        return self.request("start")
+
+    def status(self):
+        return self.request("status")
+
+    def refresh(self):
+        return self.request("refresh")
+
+    def answer(self, *assignments, **options):
+        if assignments:
+            options["assignments"] = list(assignments)
+        return self.request("answer", **options)
+
+    def seek(self, variable, **options):
+        return self.request("seek", variable=variable, **options)
+
+    def evaluate(self, expression):
+        return self.request("eval", expression=expression)
+
+    def execute(self, code, *, assemble=True):
+        return self.request("exec", code=code, assemble=assemble)
+
+    def seed(self, code, *, assemble=False):
+        return self.request("seed", code=code, assemble=assemble)
+
+    # -- lifecycle ---------------------------------------------------------
+    def _send_shutdown(self) -> None:
+        if self.process.poll() is not None:
+            return
+        try:
+            assert self.process.stdin is not None
+            self.process.stdin.write('{"id":"shutdown","operation":"shutdown"}\n')
+            self.process.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            pass
+
+    def close(self) -> None:
+        self._send_shutdown()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=10)
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        self._stderr_thread.join(timeout=5)
+        self._stdout_thread.join(timeout=5)
+
+
+@pytest.fixture
+def worker_journey():
+    """Start persistent workers and close every one, including after failures."""
+    journeys: list[WorkerJourney] = []
+
+    def start(interpreter, root, **options):
+        journey = WorkerJourney(interpreter, root, **options)
+        journeys.append(journey)
+        return journey
+
+    try:
+        yield start
+    finally:
+        for journey in journeys:
+            journey.close()
+
+
 def _assemblyline_available(interpreter) -> bool:
     completed = subprocess.run(
         [
@@ -997,29 +1201,23 @@ def test_unknown_resolution_overlap_is_conservative_across_families(
     assert session.read_bytes() == before, label
 
 
-def test_seek_contract_across_families(family_python, real_workspace):
+def test_seek_contract_across_families(family_python, real_workspace, worker_journey):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = real_workspace
     _assert_family_interpreter(case)
+    journey = worker_journey(
+        interpreter, root, arguments=("--seek-diagnostics", "capture")
+    )
 
-    assert _run(interpreter, root, "start")["ok"], label
+    assert journey.start()["ok"], label
 
-    sought = _run(interpreter, root, "seek", "filing_date", "--activate")
+    sought = journey.seek("filing_date", activate=True)
     assert sought["ok"], label
     screen = sought["result"]
     _assert_question_screen(screen, case)
 
-    missing = _run(
-        interpreter,
-        root,
-        "seek",
-        "no_such_variable_xyz",
-        "--fresh",
-        "--seek-diagnostics",
-        "capture",
-        expected_code=2,
-    )
+    missing = journey.seek("no_such_variable_xyz", fresh=True)
     assert not missing["ok"], label
     assert missing["error"]["kind"] == "unresolved-variable", label
     assert "no_such_variable_xyz" in missing["error"]["message"], label
@@ -1029,7 +1227,7 @@ def test_seek_contract_across_families(family_python, real_workspace):
 
 
 def test_terminal_choices_failure_names_the_real_referencing_block(
-    family_python, real_workspace
+    family_python, real_workspace, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
@@ -1053,17 +1251,12 @@ def test_terminal_choices_failure_names_the_real_referencing_block(
         "    code: missing_choices\n"
     )
 
-    failed = _run(
+    failed = worker_journey(
         interpreter,
         root,
-        "start",
-        "--interview",
-        "choices-failure.yml",
-        "--seek-diagnostics",
-        "capture",
-        "--full-seek-diagnostics",
-        expected_code=2,
-    )
+        interview="choices-failure.yml",
+        arguments=("--seek-diagnostics", "capture"),
+    ).start()
 
     assert failed["error"]["kind"] == "unresolved-variable", label
     details = failed["error"]["details"]
@@ -1080,7 +1273,7 @@ def test_terminal_choices_failure_names_the_real_referencing_block(
 
 
 def test_tolerated_review_reference_is_not_attributed_to_a_later_failure(
-    family_python, real_workspace
+    family_python, real_workspace, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
@@ -1111,32 +1304,21 @@ def test_tolerated_review_reference_is_not_attributed_to_a_later_failure(
         "  - Choice: choice\n"
         "    code: missing_terminal\n"
     )
-    flags = (
-        "--interview",
-        "tolerated-review.yml",
-        "--seek-diagnostics",
-        "capture",
-        "--full-seek-diagnostics",
-    )
-
-    started = _run(
+    journey = worker_journey(
         interpreter,
         root,
-        "start",
-        *flags,
-        stderr_contains="Exception in review block",
+        interview="tolerated-review.yml",
+        arguments=("--seek-diagnostics", "capture"),
     )
+
+    started = journey.start()
     assert started["ok"], label
     assert started["result"]["question_name"] == "ID tolerated-review", label
+    # The tolerated review reference is reported to stderr rather than
+    # attributed to the later terminal failure.
+    assert "Exception in review block" in journey.stderr_text(), label
 
-    failed = _run(
-        interpreter,
-        root,
-        "answer",
-        "--defaults",
-        *flags,
-        expected_code=2,
-    )
+    failed = journey.answer(defaults=True)
     assert failed["error"]["kind"] == "unresolved-variable", label
     culprit = failed["error"]["details"]["culprit"]
     assert culprit["provenance"]["id"] == "actual-terminal", label
@@ -1150,7 +1332,7 @@ def test_tolerated_review_reference_is_not_attributed_to_a_later_failure(
 
 
 def test_nested_terminal_seek_names_the_last_real_referencing_block(
-    family_python, real_workspace
+    family_python, real_workspace, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
@@ -1178,17 +1360,12 @@ def test_nested_terminal_seek_names_the_last_real_referencing_block(
         "  missing_outer = missing_terminal\n"
     )
 
-    failed = _run(
+    failed = worker_journey(
         interpreter,
         root,
-        "start",
-        "--interview",
-        "nested-failure.yml",
-        "--seek-diagnostics",
-        "capture",
-        "--full-seek-diagnostics",
-        expected_code=2,
-    )
+        interview="nested-failure.yml",
+        arguments=("--seek-diagnostics", "capture"),
+    ).start()
 
     assert failed["error"]["kind"] == "unresolved-variable", label
     details = failed["error"]["details"]
@@ -1198,15 +1375,16 @@ def test_nested_terminal_seek_names_the_last_real_referencing_block(
 
 
 def test_auto_seek_submits_browser_defaults_and_completes_across_families(
-    family_python, real_workspace
+    family_python, real_workspace, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = real_workspace
     _assert_family_interpreter(case)
+    journey = worker_journey(interpreter, root)
 
-    assert _run(interpreter, root, "start")["ok"], label
-    auto = _run(interpreter, root, "seek", "filing_date", "--auto")
+    assert journey.start()["ok"], label
+    auto = journey.seek("filing_date", auto=True)
 
     assert auto["ok"], (label, auto)
     assert auto["result"]["auto_submitted"], (label, auto)
@@ -1218,37 +1396,25 @@ def test_auto_seek_submits_browser_defaults_and_completes_across_families(
 
 
 def test_auto_seek_rejection_is_transactional_and_can_be_answered_after_activation(
-    family_python, tmp_path
+    family_python, tmp_path, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _whole_screen_workspace(tmp_path)
     _assert_family_interpreter(case)
+    journey = worker_journey(interpreter, root)
 
-    assert _run(interpreter, root, "start")["ok"], label
-    rejected = _run(
-        interpreter,
-        root,
-        "seek",
-        "person_name",
-        "--auto",
-        "--activate",
-    )
+    assert journey.start()["ok"], label
+    rejected = journey.seek("person_name", auto=True, activate=True)
     assert rejected["ok"], (label, rejected)
     assert rejected["result"]["auto_submitted"] == [], (label, rejected)
     assert rejected["result"]["auto_stop"]["reason"] == "required fields missing", (
         label,
         rejected,
     )
-    assert (
-        _run(interpreter, root, "eval", "nickname", expected_code=2)["error"]["kind"]
-        == "execution"
-    ), label
+    assert journey.evaluate("nickname")["error"]["kind"] == "execution", label
 
-    answered = _run(
-        interpreter,
-        root,
-        "answer",
+    answered = journey.answer(
         "person_name=Alice",
         'required_topics={"housing": true}',
     )
@@ -1256,7 +1422,9 @@ def test_auto_seek_rejection_is_transactional_and_can_be_answered_after_activati
     assert answered["result"]["question_name"] == "ID summary", label
 
 
-def test_cyclic_namespace_reports_unresolved_variable(family_python, real_workspace):
+def test_cyclic_namespace_reports_unresolved_variable(
+    family_python, real_workspace, worker_journey
+):
     """A dense object graph must not hide the original assembly failure.
 
     docassemble serializes the whole namespace while handling the failed
@@ -1268,15 +1436,9 @@ def test_cyclic_namespace_reports_unresolved_variable(family_python, real_worksp
     root = real_workspace
     _assert_family_interpreter(case)
 
-    failed = _run(
-        interpreter,
-        root,
-        "start",
-        "--interview",
-        "cyclic.yml",
-        expected_code=2,
-        timeout=60,
-    )
+    failed = worker_journey(
+        interpreter, root, interview="cyclic.yml", operation_timeout=60
+    ).start()
     assert not failed["ok"], label
     assert failed["error"]["kind"] == "unresolved-variable", label
     assert failed["error"]["details"]["sought_variable"] == "no_such_variable_xyz", (
@@ -1346,168 +1508,98 @@ def test_sessions_are_isolated_by_effective_config(real_python, real_workspace):
 
 
 def test_generic_object_answers_resolve_through_orig_sought(
-    real_python, real_workspace
+    real_python, real_workspace, worker_journey
 ):
     interpreter = real_python
     root = real_workspace
-    assert _run(interpreter, root, "start", "--interview", "generic.yml")["ok"]
+    journey = worker_journey(interpreter, root, interview="generic.yml")
+    assert journey.start()["ok"]
 
-    screen = _run(
-        interpreter, root, "answer", "--interview", "generic.yml", "start=go"
-    )["result"]
+    screen = journey.answer("start=go")["result"]
     assert screen["kind"] == "question"
     assert screen["sought"].endswith("x.date")
     assert screen["orig_sought"].endswith("rav.date")
     assert screen["fields"][0]["variable"] == "x.date"
     assert screen["fields"][0]["type"] == "date"
 
-    answered = _run(
-        interpreter,
-        root,
-        "answer",
-        "--interview",
-        "generic.yml",
-        "rav.date=2026-10-15",
-    )
+    answered = journey.answer("rav.date=2026-10-15")
     assert answered["ok"]
-    resolved = _run(
-        interpreter,
-        root,
-        "eval",
-        "--interview",
-        "generic.yml",
-        "type(rav.date).__name__",
-    )
+    resolved = journey.evaluate("type(rav.date).__name__")
     assert resolved["result"]["value"] == "'DADateTime'"
 
-    assert _run(interpreter, root, "start", "--interview", "generic.yml")["ok"]
-    assert _run(interpreter, root, "answer", "--interview", "generic.yml", "start=go")[
-        "ok"
-    ]
-    assert _run(
-        interpreter, root, "answer", "--interview", "generic.yml", "x.date=2026-10-16"
-    )["ok"]
-    placeholder = _run(
-        interpreter, root, "eval", "--interview", "generic.yml", "rav.date.day"
-    )
+    assert journey.start()["ok"]
+    assert journey.answer("start=go")["ok"]
+    assert journey.answer("x.date=2026-10-16")["ok"]
+    placeholder = journey.evaluate("rav.date.day")
     assert placeholder["result"]["value"] == "16"
 
 
-def test_seek_defines_missing_roots_without_persisting(real_python, real_workspace):
+def test_seek_defines_missing_roots_without_persisting(
+    real_python, real_workspace, worker_journey
+):
     interpreter = real_python
     root = real_workspace
-    assert _run(interpreter, root, "start", "--interview", "generic.yml")["ok"]
+    journey = worker_journey(interpreter, root, interview="generic.yml")
+    assert journey.start()["ok"]
     session = next((root / ".simulator" / "sessions").glob("*.pkl"))
     before = session.read_bytes()
 
-    sought = _run(interpreter, root, "seek", "--interview", "generic.yml", "rav.date")[
-        "result"
-    ]
+    sought = journey.seek("rav.date")["result"]
     assert sought["kind"] == "question"
     assert sought["sought"].endswith("x.date")
     assert sought["orig_sought"].endswith("rav.date")
     assert session.read_bytes() == before
 
-    fresh = _run(
-        interpreter, root, "seek", "--interview", "generic.yml", "rav.date", "--fresh"
-    )["result"]
+    fresh = journey.seek("rav.date", fresh=True)["result"]
     assert fresh["kind"] == "question"
     assert fresh["orig_sought"].endswith("rav.date")
 
-    assert _run(
-        interpreter,
-        root,
-        "seek",
-        "--interview",
-        "generic.yml",
-        "rav.date",
-        "--activate",
-    )["ok"]
-    persisted = _run(
-        interpreter, root, "eval", "--interview", "generic.yml", "type(rav).__name__"
-    )
+    assert journey.seek("rav.date", activate=True)["ok"]
+    persisted = journey.evaluate("type(rav).__name__")
     assert persisted["result"]["value"] == "'DAObject'"
 
-    assert _run(interpreter, root, "start", "--interview", "generic-nested.yml")["ok"]
-    chained = _run(
-        interpreter,
-        root,
-        "seek",
-        "--interview",
-        "generic-nested.yml",
-        "rav.cos.date",
-    )["result"]
+    nested = worker_journey(interpreter, root, interview="generic-nested.yml")
+    assert nested.start()["ok"]
+    chained = nested.seek("rav.cos.date")["result"]
     assert chained["kind"] == "question"
     assert chained["sought"].endswith("x.date")
     assert chained["orig_sought"].endswith("rav.cos.date")
 
-    assert _run(interpreter, root, "start", "--interview", "generic-code-root.yml")[
-        "ok"
-    ]
-    code_root = _run(
-        interpreter,
-        root,
-        "seek",
-        "--interview",
-        "generic-code-root.yml",
-        "T.miscellaneous.rav.date",
-    )["result"]
+    code_journey = worker_journey(interpreter, root, interview="generic-code-root.yml")
+    assert code_journey.start()["ok"]
+    code_root = code_journey.seek("T.miscellaneous.rav.date")["result"]
     assert code_root["kind"] == "question"
     assert code_root["sought"].endswith("x.date")
     assert code_root["orig_sought"].endswith("T.miscellaneous.rav.date")
 
 
 def test_generic_object_nested_target_resolves_through_seek(
-    real_python, real_workspace
+    real_python, real_workspace, worker_journey
 ):
     interpreter = real_python
     root = real_workspace
-    assert _run(interpreter, root, "start", "--interview", "generic-nested.yml")["ok"]
-    assert _run(
-        interpreter,
-        root,
-        "exec",
-        "--interview",
-        "generic-nested.yml",
-        "--no-assemble",
-        "from docassemble.base.util import DAObject\nrav = DAObject()\nrav.cos = DAObject()",
+    journey = worker_journey(interpreter, root, interview="generic-nested.yml")
+    assert journey.start()["ok"]
+    assert journey.execute(
+        "from docassemble.base.util import DAObject\n"
+        "rav = DAObject()\n"
+        "rav.cos = DAObject()",
+        assemble=False,
     )["ok"]
 
-    screen = _run(
-        interpreter,
-        root,
-        "seek",
-        "--interview",
-        "generic-nested.yml",
-        "rav.cos.date",
-        "--activate",
-    )["result"]
+    screen = journey.seek("rav.cos.date", activate=True)["result"]
     assert screen["kind"] == "question"
     assert screen["sought"].endswith("x.date")
     assert screen["orig_sought"].endswith("rav.cos.date")
 
-    answered = _run(
-        interpreter,
-        root,
-        "answer",
-        "--interview",
-        "generic-nested.yml",
-        "rav.cos.date=2026-10-16",
-    )
+    answered = journey.answer("rav.cos.date=2026-10-16")
     assert answered["ok"]
-    resolved = _run(
-        interpreter,
-        root,
-        "eval",
-        "--interview",
-        "generic-nested.yml",
-        "type(rav.cos.date).__name__",
-    )
+    resolved = journey.evaluate("type(rav.cos.date).__name__")
     assert resolved["result"]["value"] == "'DADateTime'"
 
 
 def test_foreground_background_action_contract_across_families(
-    family_python, real_workspace
+    family_python, real_workspace, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
@@ -1518,24 +1610,16 @@ def test_foreground_background_action_contract_across_families(
     assert checked["ok"], label
     assert checked["result"]["failures"] == 0, label
 
-    started = _run(interpreter, root, "start", "--interview", "background.yml")
+    journey = worker_journey(interpreter, root, interview="background.yml")
+    started = journey.start()
     assert started["ok"], label
     assert started["result"]["kind"] == "question", label
 
-    answered = _run(
-        interpreter,
-        root,
-        "answer",
-        "--interview",
-        "background.yml",
-        "user_name=Ada",
-    )
+    answered = journey.answer("user_name=Ada")
     assert answered["ok"], label
     assert "hi:Ada" in answered["result"].get("subquestion_text", ""), label
 
-    evaluated = _run(
-        interpreter, root, "eval", "--interview", "background.yml", "greeting"
-    )
+    evaluated = journey.evaluate("greeting")
     assert evaluated["ok"], label
     assert evaluated["result"]["value"] == "'hi:Ada'", label
 
@@ -2125,36 +2209,31 @@ def _whole_screen_workspace(tmp_path):
     return tmp_path
 
 
-def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path):
+def test_answer_submits_the_whole_screen_across_families(
+    family_python, tmp_path, worker_journey
+):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _whole_screen_workspace(tmp_path)
+    journey = worker_journey(interpreter, root)
 
-    started = _run(interpreter, root, "start")
+    def value(expression):
+        response = journey.evaluate(expression)
+        assert response["ok"], (label, expression, response)
+        return response["result"]["value"]
+
+    started = journey.start()
     assert started["ok"] and started["result"]["question_name"] == "ID info", label
 
-    missing = _run(
-        interpreter,
-        root,
-        "answer",
-        "extra_date=2026-01-01",
-        expected_code=2,
-    )
+    missing = journey.answer("extra_date=2026-01-01")
     assert missing["error"]["kind"] == "validation", (label, missing)
     assert any(
         "person_name" in item for item in missing["error"]["details"]["errors"]
     ), label
-    still_open = _run(interpreter, root, "status")
+    still_open = journey.status()
     assert still_open["result"]["question_name"] == "ID info", label
 
-    off_screen = _run(
-        interpreter,
-        root,
-        "answer",
-        "person_name=Alice",
-        "off_screen=1",
-        expected_code=2,
-    )
+    off_screen = journey.answer("person_name=Alice", "off_screen=1")
     assert off_screen["error"]["kind"] == "answer-input", (label, off_screen)
     assert any(
         "off_screen" in item for item in off_screen["error"]["details"]["errors"]
@@ -2163,13 +2242,7 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
         label
     )
 
-    parse_failure = _run(
-        interpreter,
-        root,
-        "answer",
-        "extra_date=not-a-date",
-        expected_code=2,
-    )
+    parse_failure = journey.answer("extra_date=not-a-date")
     assert parse_failure["error"]["kind"] == "answer-input", (label, parse_failure)
     assert parse_failure["error"]["details"]["missing_required"] == [
         "person_name",
@@ -2178,13 +2251,9 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
 
     # A required checkbox group with every choice false cannot be submitted;
     # the browser requires at least one checked option.
-    no_selection = _run(
-        interpreter,
-        root,
-        "answer",
+    no_selection = journey.answer(
         "person_name=Alice",
         'required_topics={"housing": false, "benefits": false}',
-        expected_code=2,
     )
     assert no_selection["error"]["kind"] == "validation", (label, no_selection)
     assert any(
@@ -2192,10 +2261,7 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
         for item in no_selection["error"]["details"]["errors"]
     ), label
 
-    accepted = _run(
-        interpreter,
-        root,
-        "answer",
+    accepted = journey.answer(
         "person_name=Alice",
         'required_topics={"housing": true}',
     )
@@ -2205,69 +2271,38 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
     assert accepted["result"]["question_name"] == "ID summary", (label, accepted)
     # Untouched inputs keep the value the browser would post: an empty string
     # for text and dates, and zero for an empty integer.
-    assert _run(interpreter, root, "eval", "nickname")["result"]["value"] == ("''"), (
-        label
-    )
-    assert _run(interpreter, root, "eval", "extra_date")["result"]["value"] == ("''"), (
-        label
-    )
-    assert _run(interpreter, root, "eval", "count")["result"]["value"] == "0", label
-    assert _run(interpreter, root, "eval", "ratio")["result"]["value"] == ("0.0"), label
+    assert value("nickname") == "''", label
+    assert value("extra_date") == "''", label
+    assert value("count") == "0", label
+    assert value("ratio") == "0.0", label
     # Checkbox-style booleans take their unchecked value; noyes is True.
-    assert _run(interpreter, root, "eval", "agree is False")["result"]["value"] == (
-        "True"
-    ), label
-    assert _run(interpreter, root, "eval", "declined is True")["result"]["value"] == (
-        "True"
-    ), label
-    assert _run(interpreter, root, "eval", "refer is None")["result"]["value"] == (
-        "True"
-    ), label
+    assert value("agree is False") == "True", label
+    assert value("declined is True") == "True", label
+    assert value("refer is None") == "True", label
     # An untouched checkbox group is a DADict with every choice false.
-    assert (
-        _run(interpreter, root, "eval", "type(topics).__name__")["result"]["value"]
-        == "'DADict'"
-    ), label
-    assert _run(interpreter, root, "eval", "len(topics)")["result"]["value"] == "2", (
-        label
-    )
-    assert (
-        _run(interpreter, root, "eval", "list(topics.true_values())")["result"]["value"]
-        == "[]"
-    ), label
+    assert value("type(topics).__name__") == "'DADict'", label
+    assert value("len(topics)") == "2", label
+    assert value("list(topics.true_values())") == "[]", label
     # Gatherable objects repr inside the runtime context instead of failing.
-    topics_repr = _run(interpreter, root, "eval", "topics")["result"]["value"]
+    topics_repr = value("topics")
     assert "housing" in topics_repr, label
     assert "unrepr-able" not in topics_repr, label
     # Radio/maybe/threestate selections and empty checkbox lists are None, an
     # untouched file is None, and an unparseable default falls back to the
     # datatype's blank.
     for variable in ("maybe", "three", "empty_topics", "upload"):
-        assert (
-            _run(interpreter, root, "eval", f"{variable} is None")["result"]["value"]
-            == "True"
-        ), (label, variable)
-    assert _run(interpreter, root, "eval", "bad_default")["result"]["value"] == (
-        "''"
-    ), label
+        assert value(f"{variable} is None") == "True", (label, variable)
+    assert value("bad_default") == "''", label
     # Signatures are never required; they become DAEmpty so documents render,
     # and hidden fields are neither assigned nor required.
-    assert (
-        _run(interpreter, root, "eval", "type(signature_value).__name__")["result"][
-            "value"
-        ]
-        == "'DAEmpty'"
-    ), label
-    assert (
-        _run(interpreter, root, "eval", "str(signature_value)")["result"]["value"]
-        == "''"
-    ), label
-    hidden = _run(interpreter, root, "eval", "hidden_value", expected_code=2)
+    assert value("type(signature_value).__name__") == "'DAEmpty'", label
+    assert value("str(signature_value)") == "''", label
+    hidden = journey.evaluate("hidden_value")
     assert hidden["error"]["kind"] == "execution", label
 
     # An explicitly empty submission for a required field is rejected.
-    assert _run(interpreter, root, "start")["ok"], label
-    empty_required = _run(interpreter, root, "answer", "person_name=", expected_code=2)
+    assert journey.start()["ok"], label
+    empty_required = journey.answer("person_name=")
     assert empty_required["error"]["kind"] == "validation", (label, empty_required)
     assert any(
         "person_name" in item and "is empty" in item
@@ -2275,11 +2310,8 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
     ), label
 
     # Explicitly empty submissions follow the same per-datatype conversion.
-    assert _run(interpreter, root, "start")["ok"], label
-    emptied = _run(
-        interpreter,
-        root,
-        "answer",
+    assert journey.start()["ok"], label
+    emptied = journey.answer(
         "person_name=Alice",
         'required_topics={"housing": true}',
         "count=",
@@ -2287,11 +2319,9 @@ def test_answer_submits_the_whole_screen_across_families(family_python, tmp_path
         "agree=",
     )
     assert emptied["ok"], label
-    assert _run(interpreter, root, "eval", "count")["result"]["value"] == "0", label
-    assert _run(interpreter, root, "eval", "ratio")["result"]["value"] == ("0.0"), label
-    assert _run(interpreter, root, "eval", "agree is None")["result"]["value"] == (
-        "True"
-    ), label
+    assert value("count") == "0", label
+    assert value("ratio") == "0.0", label
+    assert value("agree is None") == "True", label
 
 
 OBJECT_NAMESPACE_FIXTURE = (
@@ -2370,38 +2400,33 @@ def _object_namespace_workspace(tmp_path, question_fixture=OBJECT_NAMESPACE_FIXT
 
 
 def test_object_checkboxes_answer_applies_inside_the_interview_namespace(
-    family_python, tmp_path
+    family_python, tmp_path, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _object_namespace_workspace(tmp_path)
+    journey = worker_journey(interpreter, root)
 
-    started = _run(interpreter, root, "start")
+    started = journey.start()
     assert started["ok"], (label, started)
     assert started["result"]["question_name"] == "ID shortlist choice", (label, started)
     choices = started["result"]["fields"][0]["choices"]
     assert len(choices) == 2, (label, started)
     alice = choices[0]["value"]
 
-    accepted = _run(interpreter, root, "answer", f"shortlist={json.dumps([alice])}")
+    accepted = journey.answer(f"shortlist={json.dumps([alice])}")
 
     assert accepted["ok"], (label, accepted)
     assert accepted["result"]["kind"] == "finished", (label, accepted)
     # Bob has no checkbox on the screen, so he survives. Carol is rendered and
     # unticked, so she is removed. Alice is ticked and appended.
     assert (
-        _run(
-            interpreter,
-            root,
-            "eval",
-            "[item.name for item in shortlist.elements]",
-        )["result"]["value"]
+        journey.evaluate("[item.name for item in shortlist.elements]")["result"][
+            "value"
+        ]
         == "['Bob', 'Alice']"
     ), label
-    assert (
-        _run(interpreter, root, "eval", "shortlist.gathered")["result"]["value"]
-        == "True"
-    ), label
+    assert journey.evaluate("shortlist.gathered")["result"]["value"] == "True", label
 
 
 EMPTY_CHOICE_OBJECT_FIXTURE = (
@@ -2458,81 +2483,68 @@ def _plain_question_workspace(tmp_path, fixture):
 
 
 def test_required_empty_choice_object_group_is_cleared_and_gathered(
-    family_python, tmp_path
+    family_python, tmp_path, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _plain_question_workspace(tmp_path, EMPTY_CHOICE_OBJECT_FIXTURE)
+    journey = worker_journey(interpreter, root)
 
-    started = _run(interpreter, root, "start")
+    started = journey.start()
     assert started["ok"], (label, started)
     assert started["result"]["question_name"] == "ID empty shortlist", (label, started)
 
-    accepted = _run(interpreter, root, "answer", "memo=hello")
+    accepted = journey.answer("memo=hello")
 
     assert accepted["ok"], (label, accepted)
     # The group is required (the YAML sets no ``required: False``) and rendered
     # no choices, so the answer path clears and gathers it instead of failing
     # the required gate on a selection it could never receive.
-    assert (
-        _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == "0"
-    ), label
-    assert (
-        _run(interpreter, root, "eval", "shortlist.gathered")["result"]["value"]
-        == "True"
-    ), label
+    assert journey.evaluate("len(shortlist)")["result"]["value"] == "0", label
+    assert journey.evaluate("shortlist.gathered")["result"]["value"] == "True", label
 
 
 def test_empty_choice_object_group_clears_inside_the_interview_namespace(
-    family_python, tmp_path
+    family_python, tmp_path, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _object_namespace_workspace(tmp_path, EMPTY_CHOICE_NAMESPACE_FIXTURE)
+    journey = worker_journey(interpreter, root)
 
-    started = _run(interpreter, root, "start")
+    started = journey.start()
     assert started["ok"], (label, started)
     assert started["result"]["question_name"] == "ID empty namespace shortlist", (
         label,
         started,
     )
 
-    accepted = _run(interpreter, root, "answer", "memo=hello", "shortlist=[]")
+    accepted = journey.answer("memo=hello", "shortlist=[]")
 
     assert accepted["ok"], (label, accepted)
     # The list existed before the screen and refuses mutations from outside the
     # interview namespace, so clearing it proves the exec'd path.
-    assert (
-        _run(interpreter, root, "eval", "len(shortlist)")["result"]["value"] == "0"
-    ), label
-    assert (
-        _run(interpreter, root, "eval", "shortlist.gathered")["result"]["value"]
-        == "True"
-    ), label
+    assert journey.evaluate("len(shortlist)")["result"]["value"] == "0", label
+    assert journey.evaluate("shortlist.gathered")["result"]["value"] == "True", label
 
 
 def test_partial_answer_keeps_the_permissive_mode_across_families(
-    family_python, tmp_path
+    family_python, tmp_path, worker_journey
 ):
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _whole_screen_workspace(tmp_path)
-    assert _run(interpreter, root, "start")["ok"], label
+    journey = worker_journey(interpreter, root)
+    assert journey.start()["ok"], label
 
-    permissive = _run(
-        interpreter,
-        root,
-        "answer",
-        "extra_date=2026-01-01",
-        "--partial",
-    )
+    permissive = journey.answer("extra_date=2026-01-01", partial=True)
 
     assert permissive["ok"], label
     assert permissive["result"]["question_name"] == "ID info", (label, permissive)
     assert any("person_name" in item for item in permissive["result"]["warnings"]), (
         label
     )
-    undefined = _run(interpreter, root, "eval", "nickname", expected_code=2)
+    undefined = journey.evaluate("nickname")
     assert undefined["error"]["kind"] == "execution", label
 
 
