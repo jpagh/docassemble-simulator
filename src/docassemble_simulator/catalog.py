@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import logging
 import os
 import re
@@ -366,6 +367,25 @@ def _duplicate_id_report(interview, interview_identity: str) -> list[dict[str, A
     return reports
 
 
+@dataclass(frozen=True)
+class _WatchRecord:
+    """The compile-time reload state for one cached interview identity.
+
+    ``source`` is docassemble's own source object (its ``get_modtime`` is the
+    timestamp docassemble keeps). ``source_paths`` is the selected YAML followed
+    by every YAML it includes, all resolved to workspace files.
+    ``module_paths`` is the declared workspace helper files and package
+    directories. Each signature is captured at compile time and compared at the
+    next operation boundary.
+    """
+
+    source: Any
+    source_paths: tuple[str, ...]
+    source_signature: tuple | None
+    module_paths: tuple[str, ...]
+    module_signature: tuple
+
+
 class InterviewCatalog:
     """Compile and inspect interview definitions without creating session state."""
 
@@ -383,17 +403,12 @@ class InterviewCatalog:
         # still scoped to one root/selector/process.
         self._cache_compiled = cache_compiled
         self._compiled: dict[str, Any] = {}
-        # Reload bookkeeping for the persistent worker: the docassemble source
-        # object, its resolved file path, and the source signature captured at
+        # Reload bookkeeping for the persistent worker, one record per compiled
+        # identity: the docassemble source object, the watched source files
+        # (the selected YAML plus every included YAML), the declared workspace
+        # helper files and package directories, and the signatures captured at
         # compile time. Only populated when the compiled cache is on.
-        self._sources: dict[str, Any] = {}
-        self._source_paths: dict[str, str] = {}
-        self._source_signatures: dict[str, tuple[Any, int] | None] = {}
-        # The interview's declared ``modules:``/``imports:`` helper files and
-        # package directories, plus their compile-time signatures. A helper edit
-        # with no interview-source edit must still invalidate the compile.
-        self._module_paths: dict[str, tuple[str, ...]] = {}
-        self._module_signatures: dict[str, tuple] = {}
+        self._watches: dict[str, _WatchRecord] = {}
 
     @property
     def identity(self) -> str:
@@ -420,7 +435,7 @@ class InterviewCatalog:
                     return cached
                 # The source changed under a running worker: drop both
                 # docassemble's compile and ours so get_interview recompiles.
-                self._reload_source(selected, cached)
+                self._reload_source(selected)
         saved_argv = list(sys.argv)
         sys.argv[:] = ["docassemble-simulator", selected]
         try:
@@ -453,54 +468,95 @@ class InterviewCatalog:
     def _record_source(self, selected: str, interview) -> None:
         """Capture the source and declared-module signatures for later checks."""
         source = self._cached_source(selected)
-        path = getattr(source, "filepath", None) or self._resolved_source_path(selected)
-        if path:
-            self._sources[selected] = source
-            self._source_paths[selected] = str(path)
-        self._source_signatures[selected] = self._source_signature(selected)
+        main_path = getattr(source, "filepath", None) or self._resolved_source_path(
+            selected
+        )
+        source_paths: list[str] = []
+        if main_path:
+            source_paths.append(str(main_path))
+        for included in self._include_paths(interview, source):
+            if included not in source_paths:
+                source_paths.append(included)
         module_paths = self._module_paths_for(self._declared_module_names(interview))
-        self._module_paths[selected] = module_paths
-        self._module_signatures[selected] = self._module_signature(module_paths)
+        self._watches[selected] = _WatchRecord(
+            source=source,
+            source_paths=tuple(source_paths),
+            source_signature=self._source_signature(source, tuple(source_paths)),
+            module_paths=module_paths,
+            module_signature=self._tree_signatures(module_paths),
+        )
 
-    def _source_signature(self, selected: str):
-        """docassemble's own source timestamp plus the file size.
+    def _include_paths(self, interview, source) -> tuple[str, ...]:
+        """The workspace files the compiled interview included.
+
+        docassemble records ``interview.includes`` as ``source.path`` values:
+        a canonical ``package:relative`` identity for a colon include and the
+        authored relative path for a sibling include. Each is resolved the same
+        way the selected source is; an include outside the workspace source
+        tree (an installed AssemblyLine file) resolves to nothing and is
+        skipped rather than watched.
+        """
+        includes = getattr(interview, "includes", None)
+        if not includes:
+            return ()
+        directory = getattr(source, "directory", None)
+        paths = {
+            path
+            for entry in includes
+            if isinstance(entry, str)
+            for path in (self._include_path(entry, directory),)
+            if path is not None
+        }
+        return tuple(sorted(paths))
+
+    def _include_path(self, entry: str, directory: str | None) -> str | None:
+        if ":" in entry and not entry.startswith("/"):
+            return self._resolved_source_path(entry)
+        if not directory:
+            return None
+        candidate = Path(directory) / entry
+        return str(candidate) if candidate.is_file() else None
+
+    def _source_signature(self, source, paths: tuple[str, ...]):
+        """docassemble's own source timestamp plus each file's size.
 
         The simulator's stubbed redis keeps docassemble's interview index at a
         constant and nothing here calls ``update_index`` (that is the web
         editor's job), so ``interview_cache.cache_valid`` never notices an
         edit. ``InterviewSourceFile.get_modtime`` is the per-source timestamp
-        docassemble itself keeps; a missing or unreadable source yields
+        docassemble itself keeps for the selected source; the rest of the files
+        (includes) use ``os.stat``. A missing or unreadable source yields
         ``None`` so the next check forces a reload and compilation surfaces
         the typed error.
         """
-        path = self._source_paths.get(selected)
-        if not path:
-            return None
-        try:
-            stat = os.stat(path)
-        except OSError:
-            return None
-        mtime = stat.st_mtime
-        get_modtime = getattr(self._sources.get(selected), "get_modtime", None)
-        if callable(get_modtime):
+        entries = []
+        for index, path in enumerate(paths):
             try:
-                mtime = get_modtime()
-            except Exception:  # noqa: BLE001, S110 - runtime-specific source object
-                pass
-        return (mtime, stat.st_size)
+                stat = os.stat(path)
+            except OSError:
+                return None
+            mtime = stat.st_mtime
+            if index == 0:
+                get_modtime = getattr(source, "get_modtime", None)
+                if callable(get_modtime):
+                    try:
+                        mtime = get_modtime()
+                    except Exception:  # noqa: BLE001, S110 - runtime source object
+                        pass
+            entries.append((path, mtime, stat.st_size))
+        return tuple(entries)
 
     def _source_current(self, selected: str) -> bool:
         """Whether the cached compile still matches its source and helpers."""
-        if selected not in self._source_paths:
+        record = self._watches.get(selected)
+        if record is None or not record.source_paths:
             # No measurable source (for example an in-memory source); trust the
             # cache rather than recompiling every operation.
             return True
-        current = self._source_signature(selected)
-        if current is None or current != self._source_signatures.get(selected):
+        current = self._source_signature(record.source, record.source_paths)
+        if current is None or current != record.source_signature:
             return False
-        return self._module_signature(self._module_paths.get(selected, ())) == (
-            self._module_signatures.get(selected, ())
-        )
+        return self._tree_signatures(record.module_paths) == record.module_signature
 
     def _declared_module_names(self, interview) -> set[str]:
         """Fully-qualified names declared by the interview's import directives."""
@@ -555,7 +611,7 @@ class InterviewCatalog:
             return str(package_dir)
         return None
 
-    def _module_signature(self, paths: tuple[str, ...]) -> tuple:
+    def _tree_signatures(self, paths: tuple[str, ...]) -> tuple:
         """Per-path ``*.py`` timestamp and size for the watched module trees."""
         return tuple(self._tree_signature(path) for path in paths)
 
@@ -575,7 +631,7 @@ class InterviewCatalog:
         except OSError:
             return None
 
-    def _reload_source(self, selected: str, cached) -> None:
+    def _reload_source(self, selected: str) -> None:
         """Forget the stale compile and the helper modules it imported."""
         try:
             from docassemble.base.interview_cache import clear_cache
@@ -583,28 +639,74 @@ class InterviewCatalog:
             clear_cache = None
         if clear_cache is not None:
             clear_cache(selected)
-        self._evict_modules(cached)
+        record = self._watches.get(selected)
+        cached = self._compiled.get(selected)
+        if record is not None:
+            # Drop cached bytecode for helpers that changed, so a same-size,
+            # same-second edit cannot re-import stale bytecode after eviction.
+            self._invalidate_bytecode(self._changed_module_paths(record))
+        if cached is not None:
+            self._evict_modules(cached)
         self._compiled.pop(selected, None)
-        self._sources.pop(selected, None)
-        self._source_paths.pop(selected, None)
-        self._source_signatures.pop(selected, None)
-        self._module_paths.pop(selected, None)
-        self._module_signatures.pop(selected, None)
+        self._watches.pop(selected, None)
+
+    def _changed_module_paths(self, record: _WatchRecord) -> tuple[str, ...]:
+        """Watched helper paths whose file signature changed since compile."""
+        changed = []
+        for index, path in enumerate(record.module_paths):
+            previous = (
+                record.module_signature[index]
+                if index < len(record.module_signature)
+                else None
+            )
+            if self._tree_signature(path) != previous:
+                changed.append(path)
+        return tuple(changed)
+
+    def _invalidate_bytecode(self, paths: tuple[str, ...]) -> None:
+        """Unlink cached bytecode for the workspace helpers about to reload.
+
+        CPython validates a timestamp ``.pyc`` against the source's
+        integer-second mtime and size, so a same-size edit within the same
+        second re-imports the stale bytecode. Removing the cache forces a
+        recompile from the edited source.
+        """
+        for path in paths:
+            target = Path(path)
+            files = sorted(target.rglob("*.py")) if target.is_dir() else [target]
+            for file in files:
+                if "__pycache__" in file.parts:
+                    continue
+                try:
+                    cache = importlib.util.cache_from_source(str(file))
+                except (NotImplementedError, ValueError):
+                    continue
+                try:
+                    os.unlink(cache)
+                except OSError:
+                    continue
 
     def _evict_modules(self, interview) -> None:
-        """Forget the interview's declared ``modules:``/``imports:`` helpers.
+        """Forget the interview's declared workspace ``modules:``/``imports:``.
 
         docassemble imports those helpers on first assembly and leaves them in
         ``sys.modules``; without eviction a recompiled interview keeps serving
-        the old helper code for the rest of the worker's life.
+        the old helper code for the rest of the worker's life. Only declared
+        names that resolve under the workspace root are evicted: removing an
+        installed module (``imports: [docassemble.base]``) would split its
+        identity and thread-local state from references the rest of the process
+        still holds.
         """
         names = self._declared_module_names(interview)
-        if not names:
+        prefixes = {name for name in names if self._module_path(name) is not None}
+        if not prefixes:
             return
         evicted = [
             name
             for name in list(sys.modules)
-            if name in names or any(name.startswith(prefix + ".") for prefix in names)
+            if any(
+                name == prefix or name.startswith(prefix + ".") for prefix in prefixes
+            )
         ]
         for name in evicted:
             sys.modules.pop(name, None)

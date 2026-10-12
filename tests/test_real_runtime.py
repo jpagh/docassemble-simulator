@@ -2108,7 +2108,11 @@ def test_persistent_worker_render_matches_the_one_shot_command(
         Writing both runs to the same target makes the reported artifact path
         part of the comparison, so the worker result must equal the
         ``sim render --json`` result exactly, and the second run's document
-        must equal the first's.
+        must equal the first's. ``diagnostics`` and ``attachments`` are
+        compared too, so the forwarded envelope matches the one-shot command.
+        The document comparison is scoped to ``word/document.xml``: the full
+        DOCX archive bytes are not deterministic because the zip members carry
+        per-render timestamps, while the rendered XML is.
         """
         payload = _run(
             interpreter,
@@ -2127,6 +2131,16 @@ def test_persistent_worker_render_matches_the_one_shot_command(
         )
         assert response["ok"], (label, response)
         assert response["result"] == payload["result"], label
+        assert response.get("diagnostics") == payload.get("diagnostics"), (
+            label,
+            response.get("diagnostics"),
+            payload.get("diagnostics"),
+        )
+        assert response.get("attachments") == payload.get("attachments"), (
+            label,
+            response.get("attachments"),
+            payload.get("attachments"),
+        )
         assert _document_xml(target) == document, label
         return response
 
@@ -2137,6 +2151,17 @@ def test_persistent_worker_render_matches_the_one_shot_command(
         {"source": "fresh", "no_assemble": True},
         fresh,
     )
+
+    # An assembling fresh render exercises the non-empty diagnostics shape
+    # (the mandatory question it reaches), so the parity assertion above is
+    # not vacuous.
+    assembled = compare(
+        "helpers.docx",
+        ["--fresh"],
+        {"source": "fresh"},
+        root / "assembled.docx",
+    )
+    assert assembled.get("diagnostics"), label
 
     fixture_source = root / "fixture.py"
     compare(
@@ -2174,6 +2199,63 @@ def test_persistent_worker_render_matches_the_one_shot_command(
         {"no_assemble": True},
         root / "saved.docx",
     )
+
+
+def _write_docx_paragraph(interpreter, path, text):
+    """Rewrite a DOCX template to a single rendered-paragraph body."""
+    code = (
+        "import sys\n"
+        "from docx import Document\n"
+        "document = Document()\n"
+        "document.add_paragraph(sys.argv[2])\n"
+        "document.save(sys.argv[1])\n"
+    )
+    completed = subprocess.run(
+        [str(interpreter), "-c", code, str(path), text],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_worker_render_sees_a_template_edit_between_renders(
+    family_python, real_workspace, worker_journey
+):
+    """A template edit is read at render time, not cached behind the worker."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    template = root / "docassemble" / "regression" / "data" / "templates" / "date.docx"
+
+    journey = worker_journey(interpreter, root, interview="main.yml", family=case.probe)
+    assert journey.start()["ok"], label
+    assert journey.answer("filing_date=2026-08-26", "caption=2026-08-26")["ok"], label
+
+    first = root / "before-edit.docx"
+    before = journey.request(
+        "render", template="date.docx", output=str(first), no_assemble=True
+    )
+    assert before["ok"], (label, before)
+    assert "EDITED" not in _document_xml(first), label
+
+    # Rewrite the template in place; the next render on the same worker must
+    # read the edited file rather than a cached copy.
+    _write_docx_paragraph(
+        interpreter,
+        template,
+        "EDITED {{ filing_date.format('MM/dd/yyyy') }}|{{ caption }}",
+    )
+
+    second = root / "after-edit.docx"
+    after = journey.request(
+        "render", template="date.docx", output=str(second), no_assemble=True
+    )
+    assert after["ok"], (label, after)
+    assert "EDITED" in _document_xml(second), (label, after)
 
 
 def test_worker_journey_file_serves_a_render_request(
@@ -3453,3 +3535,234 @@ def test_worker_reloads_module_only_edit_without_restart(
         assert preserved["result"]["value"] == "'Ada'", (label, preserved)
     finally:
         journey.close()
+
+
+def _included_reload_workspace(tmp_path):
+    """A main interview whose second screen lives in an included YAML."""
+    package = tmp_path / "docassemble" / "reload"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    main = questions / "main.yml"
+    main.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: First screen\n"
+        "fields:\n"
+        "  - Name: user_name\n"
+        "---\n"
+        "include:\n"
+        "  - screens.yml\n",
+        encoding="utf-8",
+    )
+    screens = questions / "screens.yml"
+    screens.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Second screen\n"
+        "fields:\n"
+        "  - Color: favorite_color\n",
+        encoding="utf-8",
+    )
+    return main, screens
+
+
+def test_worker_reloads_edited_included_yaml_without_restart(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    _main, screens = _included_reload_workspace(root)
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    try:
+        assert journey.start()["ok"], label
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        assert answered["result"]["question_text"] == "Second screen", (
+            label,
+            answered,
+        )
+
+        # The edited screen is in an included YAML the selected source never
+        # names; the worker must still invalidate and serve the new program.
+        screens.write_text(
+            "---\n"
+            "mandatory: True\n"
+            "question: Renamed included screen\n"
+            "fields:\n"
+            "  - Color: favorite_color\n",
+            encoding="utf-8",
+        )
+        _mark_source_changed(screens)
+
+        reloaded = journey.refresh()
+        assert reloaded["ok"], (label, reloaded)
+        assert reloaded["result"]["question_text"] == "Renamed included screen", (
+            label,
+            reloaded,
+        )
+    finally:
+        journey.close()
+
+
+def test_worker_reload_of_missing_included_yaml_is_a_compile_error(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    _main, screens = _included_reload_workspace(root)
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    journey.allow_stderr("docassemble.reload:data/questions/main.yml")
+    journey.allow_stderr("screens.yml")
+    try:
+        started = journey.start()
+        assert started["ok"], (label, started)
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        before = _reload_session_files(root)
+        assert len(before) == 1, label
+
+        # A missing included source behaves like a missing main source: the
+        # reload surfaces the typed compile error and leaves the session alone.
+        screens.unlink()
+        failed = journey.refresh()
+        assert failed["ok"] is False, (label, failed)
+        assert failed["error"]["kind"] == "compile", (label, failed)
+        assert _reload_session_files(root) == before, label
+    finally:
+        journey.close()
+
+
+def test_worker_reloads_same_second_helper_edit_from_fresh_bytecode(
+    family_python, tmp_path, worker_journey
+):
+    """A same-size, same-integer-second helper edit must not serve old bytecode."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    _reload_workspace(root)
+    helper = root / "docassemble" / "reload" / "helpers.py"
+
+    # Both edits land in the same integer second; only the fraction differs, so
+    # the reload is detected while CPython's timestamp ``.pyc`` still validates.
+    base = int(time.time()) + 0.2
+    os.utime(helper, (base, base))
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    try:
+        started = journey.start()
+        assert started["ok"], (label, started)
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        assert "v1:Ada" in answered["result"].get("subquestion_text", ""), (
+            label,
+            answered,
+        )
+
+        helper.write_text(
+            "def greeting(value):\n    return f'v2:{value}'\n", encoding="utf-8"
+        )
+        edited = base + 0.4
+        assert int(edited) == int(base), label
+        os.utime(helper, (edited, edited))
+
+        reloaded = journey.refresh()
+        assert reloaded["ok"], (label, reloaded)
+        assert "v2:Ada" in reloaded["result"].get("subquestion_text", ""), (
+            label,
+            reloaded,
+        )
+    finally:
+        journey.close()
+
+
+CATALOG_WARM_HARNESS = """\
+import json
+import sys
+from pathlib import Path
+
+from docassemble_simulator._runtime import SimulatorRuntime
+from docassemble_simulator.bootstrap import bootstrap
+from docassemble_simulator.execution import InterviewExecution, Refresh, Start
+from docassemble_simulator.preflight import ensure_importable
+
+root = Path(sys.argv[1]).resolve()
+identity = sys.argv[2]
+session_directory = Path(sys.argv[3]).resolve()
+with SimulatorRuntime().activate(root):
+    ensure_importable(root, offline=True)
+    bootstrap()
+    execution = InterviewExecution(
+        root,
+        identity,
+        session_directory=session_directory,
+        cache_interview=True,
+    )
+    key = execution._identity
+    started = execution.run(Start())
+    compiled_first = execution._catalog._compiled.get(key)
+    refreshed = execution.run(Refresh())
+    compiled_second = execution._catalog._compiled.get(key)
+    print(json.dumps({
+        "start_ok": started.ok,
+        "refresh_ok": refreshed.ok,
+        "compiled": compiled_first is not None,
+        "same_object": compiled_first is compiled_second,
+    }))
+"""
+
+
+def test_catalog_reuses_the_compiled_interview_across_operations(
+    family_python, tmp_path
+):
+    """Two operations on an unchanged interview reuse the compiled object."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    _reload_workspace(root)
+
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            CATALOG_WARM_HARNESS,
+            str(root),
+            "docassemble.reload:data/questions/main.yml",
+            str(tmp_path / "warm-sessions"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=180,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    assert observed["start_ok"], (label, observed)
+    assert observed["refresh_ok"], (label, observed)
+    assert observed["compiled"] is True, (label, observed)
+    assert observed["same_object"] is True, (label, observed)
