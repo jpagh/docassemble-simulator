@@ -218,7 +218,10 @@ alias request such as `"operation":"evaluate"` records what `eval` records.
 Protocol-only requests (`ping`,
 `reset`, `shutdown`, and malformed frames) are never recorded. A recording
 failure is a typed `input` response (and is logged to stderr), never a silent
-`ok`, so a truncated trace cannot pass unnoticed. A scenario
+`ok`, so a truncated trace cannot pass unnoticed; when the operation itself
+already failed, its response keeps that error and gains a typed
+`recording-failure` diagnostic instead, so the recording failure never erases
+what the operation did. A scenario
 recorded through a journey is equivalent to recording it one process per
 operation, including an automatic seek's expanded `auto` steps, its trailing
 post-walk marker, and a failed answer recorded against the unchanged active
@@ -294,7 +297,8 @@ error; the one-shot commands have no default phase, so there `--phase` only
 ever applies to its own invocation. A recording failure (an uncreatable
 destination, a trace from another run) is a typed `input` response, exactly as
 it is an exit-1 `input` failure for the one-shot commands, so a truncated
-journey trace never reports success. Each
+journey trace never reports success; a failed operation keeps its own error and
+reports the recording failure as a `recording-failure` diagnostic. Each
 record includes sequence, operation, explicit **intent**, phase, submitted
 assignments, outcome, screen outcome, and canonical **screen identity** with the
 rule that produced it. Intent distinguishes ordinary answers (`answer`),

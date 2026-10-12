@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -611,6 +613,10 @@ _WORKER_EXIT = object()
 # generous bound only ever costs time on a genuine failure.
 _STDERR_WAIT = 30.0
 
+# How long ``close()`` waits for the shutdown answer that a teardown abort
+# must follow. It only ever costs time on a worker that died before answering.
+_SHUTDOWN_WAIT = 10.0
+
 # The interpreter runtime writes this line just before aborting when CPython
 # finalizes while a locked C++ object (docassemble's native dependencies) is
 # still alive. It happens intermittently on the legacy family and is written
@@ -619,6 +625,20 @@ _STDERR_WAIT = 30.0
 # held to the empty-stderr guarantee, and the abort is reported as a warning so
 # it stays visible in the gate's summary.
 _RUNTIME_ABORT = "libc++abi: terminating due to uncaught exception"
+# The rest of the one known teardown abort: libc++abi appends the exception's
+# ``what()``, which is the recursive-mutex failure. Both halves are required,
+# so an unrelated native abort that merely carries the libc++abi prefix is
+# still an unexpected death.
+_RUNTIME_ABORT_LOCK = "recursive_mutex lock failed"
+
+
+def _signal_death(returncode) -> str:
+    """Describe a signal return code for a failure message."""
+    number = -int(returncode)
+    try:
+        return f"signal {number} ({signal.Signals(number).name})"
+    except ValueError:
+        return f"signal {number}"
 
 
 class WorkerJourney:
@@ -638,7 +658,9 @@ class WorkerJourney:
     stderr, so a journey that produced output nobody expected fails there
     unless the test declared it with ``allow_stderr()``; a worker that aborted
     at interpreter teardown reports its runtime abort as a warning instead
-    (see ``_RUNTIME_ABORT``).
+    (see ``_RUNTIME_ABORT``). The caller declares the runtime family
+    (``family=case.probe``) because that exemption is legacy-only; the harness
+    never guesses the family from the interpreter path.
 
     ``SimulatorRunner`` (ADR-0015) is not reused here on purpose. It returns
     transport failures (timeout, crash, unusable frame) as typed ``ok: false``
@@ -654,6 +676,7 @@ class WorkerJourney:
         interpreter,
         root,
         *,
+        family=UNKNOWN,
         interview=None,
         session_root=None,
         arguments=(),
@@ -661,6 +684,7 @@ class WorkerJourney:
         response_timeout=120.0,
     ):
         self.interpreter = Path(interpreter)
+        self.family = family
         self.root = Path(root)
         self.session_root = (
             Path(session_root)
@@ -673,6 +697,7 @@ class WorkerJourney:
         self._stderr: list[str] = []
         self._allowed_stderr: list[str] = []
         self._aborted_at_exit = False
+        self._shutdown_acknowledged = False
         self._closed = False
         self._sequence = 0
         command = [
@@ -754,7 +779,12 @@ class WorkerJourney:
         self._allowed_stderr.append(text)
 
     def assert_no_unexpected_stderr(self) -> None:
-        """Fail unless every stderr line was declared with ``allow_stderr``."""
+        """Fail unless every stderr line was declared with ``allow_stderr``.
+
+        A worker that died by the one known legacy teardown abort reports that
+        abort as a warning instead (see ``_is_legacy_teardown_abort``); every
+        other signal death is an unexpected death even when it wrote nothing.
+        """
         if self._aborted_at_exit:
             warnings.warn(
                 self.failure_message("worker journey aborted at exit"),
@@ -762,6 +792,13 @@ class WorkerJourney:
                 stacklevel=2,
             )
             return
+        returncode = self.process.returncode
+        if returncode is not None and returncode < 0:
+            raise AssertionError(
+                self.failure_message(
+                    f"unexpected worker death from {_signal_death(returncode)}"
+                )
+            )
         unexpected = [
             line
             for line in self._stderr
@@ -770,6 +807,31 @@ class WorkerJourney:
         ]
         assert not unexpected, self.failure_message(
             "unexpected worker stderr:\n" + "".join(unexpected)
+        )
+
+    def _is_legacy_teardown_abort(self) -> bool:
+        """Whether the worker died by the one known legacy teardown abort.
+
+        Every condition is required, because the exemption trades a checked
+        guarantee for a tolerated runtime wart: the journey declared the legacy
+        family, the worker answered ``shutdown`` before it died, its return
+        code is exactly ``-SIGABRT``, and its non-empty stderr consists only of
+        the known teardown signature (the libc++abi abort line carrying the
+        recursive-mutex failure). A modern-family worker, any other signal, an
+        abort before the shutdown answer, empty stderr, or the generic libc++abi
+        prefix without the mutex message is an unexpected death instead.
+        """
+        if self.family is not LEGACY:
+            return False
+        if not self._shutdown_acknowledged:
+            return False
+        if self.process.returncode != -signal.SIGABRT:
+            return False
+        lines = [line for line in self._stderr if line.strip()]
+        if not lines:
+            return False
+        return all(
+            _RUNTIME_ABORT in line and _RUNTIME_ABORT_LOCK in line for line in lines
         )
 
     def failure_message(self, reason: str) -> str:
@@ -842,6 +904,14 @@ class WorkerJourney:
 
     # -- lifecycle ---------------------------------------------------------
     def _send_shutdown(self) -> None:
+        """Ask the worker to stop and record its shutdown acknowledgment.
+
+        The teardown-abort exemption requires proof that the abort happened at
+        interpreter teardown rather than mid-operation, and the shutdown answer
+        is that proof. Requests are strictly synchronous, so an outstanding
+        shutdown is answered by the next frame; a worker that died first puts
+        the exit marker there instead and is left unacknowledged.
+        """
         if self.process.poll() is not None:
             return
         try:
@@ -849,7 +919,17 @@ class WorkerJourney:
             self.process.stdin.write('{"id":"shutdown","operation":"shutdown"}\n')
             self.process.stdin.flush()
         except (BrokenPipeError, ValueError):
-            pass
+            return
+        try:
+            line = self._responses.get(timeout=_SHUTDOWN_WAIT)
+        except queue.Empty:
+            return
+        if line is _WORKER_EXIT:
+            return
+        response = json.loads(line)
+        self._shutdown_acknowledged = bool(
+            response.get("ok") and response.get("id") == "shutdown"
+        )
 
     def close(self) -> None:
         """Stop the worker, drain its streams, and check its stderr."""
@@ -877,10 +957,7 @@ class WorkerJourney:
                     stream.close()
                 except OSError:
                     pass
-        self._aborted_at_exit = self.process.returncode is not None and (
-            self.process.returncode < 0
-            and all(_RUNTIME_ABORT in line for line in self._stderr if line.strip())
-        )
+        self._aborted_at_exit = self._is_legacy_teardown_abort()
         self.assert_no_unexpected_stderr()
 
 
@@ -1049,7 +1126,7 @@ def test_worker_journey_stderr_wait_survives_a_deferred_drain(
     label, interpreter = case.label, case.interpreter
     root = real_workspace
     _assert_family_interpreter(case)
-    journey = _DeferredStderrJourney(interpreter, root)
+    journey = _DeferredStderrJourney(interpreter, root, family=case.probe)
     journey.allow_stderr("late worker diagnostic")
     try:
         assert journey.start()["ok"], label
@@ -1071,7 +1148,7 @@ def test_worker_journey_close_flags_unexpected_stderr(family_python, real_worksp
     label, interpreter = case.label, case.interpreter
     root = real_workspace
     _assert_family_interpreter(case)
-    journey = WorkerJourney(interpreter, root)
+    journey = WorkerJourney(interpreter, root, family=case.probe)
     try:
         assert journey.start()["ok"], label
         executed = journey.execute("print('unexpected worker output')", assemble=False)
@@ -1082,6 +1159,112 @@ def test_worker_journey_close_flags_unexpected_stderr(family_python, real_worksp
         # repeat the failure after the test has observed it.
         journey.close()
     finally:
+        journey.close()
+
+
+# The one known legacy teardown abort as the runtime writes it, including the
+# ``what()`` text libc++abi appends to its own prefix.
+_KNOWN_TEARDOWN_ABORT = (
+    "libc++abi: terminating due to uncaught exception of type "
+    "std::__1::system_error: recursive_mutex lock failed: Invalid argument"
+)
+
+
+def _fake_worker_interpreter(
+    tmp_path, *, diagnostics=(), death_signal="ABRT", acknowledge=True
+):
+    """An executable stand-in for the worker interpreter.
+
+    The harness owns the worker command line, so the only way to drive its exit
+    classification without provisioning docassemble is a script that speaks
+    just enough of the protocol: it answers the harness's shutdown request,
+    writes ``diagnostics`` to stderr, and then dies by ``death_signal``. With
+    ``acknowledge=False`` it dies before answering, which is the crash shape
+    the teardown exemption must never excuse.
+    """
+    script = tmp_path / "fake-worker-interpreter"
+    writes = "".join(
+        f"      printf '%s\\n' {shlex.quote(line)} >&2\n" for line in diagnostics
+    )
+    answer = (
+        '      printf \'%s\\n\' \'{"id":"shutdown","ok":true,'
+        '"result":{"kind":"shutdown"}}\'\n'
+        if acknowledge
+        else ""
+    )
+    script.write_text(
+        "#!/bin/sh\n"
+        "while IFS= read -r line; do\n"
+        '  case "$line" in\n'
+        "    *shutdown*)\n"
+        f"{answer}{writes}"
+        f"      kill -{death_signal} $$\n"
+        "      ;;\n"
+        "  esac\n"
+        "done\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_worker_journey_exempts_the_known_legacy_teardown_abort(tmp_path):
+    """The exact teardown signature after an acknowledged shutdown warns."""
+    interpreter = _fake_worker_interpreter(
+        tmp_path, diagnostics=(_KNOWN_TEARDOWN_ABORT,)
+    )
+    journey = WorkerJourney(interpreter, tmp_path, family=LEGACY)
+
+    with pytest.warns(RuntimeWarning, match="aborted at exit"):
+        journey.close()
+    journey.close()  # a closed journey stays closed
+
+
+@pytest.mark.parametrize(
+    ("family", "diagnostics", "death_signal", "acknowledge", "expected"),
+    [
+        pytest.param(
+            LEGACY, (_KNOWN_TEARDOWN_ABORT,), "TERM", True, "SIGTERM", id="other-signal"
+        ),
+        pytest.param(LEGACY, (), "ABRT", True, "SIGABRT", id="empty-stderr"),
+        pytest.param(
+            LEGACY,
+            (_RUNTIME_ABORT,),
+            "ABRT",
+            True,
+            "SIGABRT",
+            id="libcxxabi-line-without-the-mutex-signature",
+        ),
+        pytest.param(
+            LEGACY,
+            (_KNOWN_TEARDOWN_ABORT,),
+            "ABRT",
+            False,
+            "SIGABRT",
+            id="abort-before-the-shutdown-answer",
+        ),
+        pytest.param(
+            MODERN,
+            (_KNOWN_TEARDOWN_ABORT,),
+            "ABRT",
+            True,
+            "SIGABRT",
+            id="modern-family",
+        ),
+    ],
+)
+def test_worker_journey_fails_a_death_it_cannot_excuse(
+    tmp_path, family, diagnostics, death_signal, acknowledge, expected
+):
+    """Only the exact legacy teardown abort may skip the exit guarantee."""
+    interpreter = _fake_worker_interpreter(
+        tmp_path,
+        diagnostics=diagnostics,
+        death_signal=death_signal,
+        acknowledge=acknowledge,
+    )
+    journey = WorkerJourney(interpreter, tmp_path, family=family)
+
+    with pytest.raises(AssertionError, match=expected):
         journey.close()
 
 
@@ -1369,7 +1552,10 @@ def test_seek_contract_across_families(family_python, real_workspace, worker_jou
     root = real_workspace
     _assert_family_interpreter(case)
     journey = worker_journey(
-        interpreter, root, arguments=("--seek-diagnostics", "capture")
+        interpreter,
+        root,
+        family=case.probe,
+        arguments=("--seek-diagnostics", "capture"),
     )
 
     assert journey.start()["ok"], label
@@ -1416,6 +1602,7 @@ def test_terminal_choices_failure_names_the_real_referencing_block(
     failed = worker_journey(
         interpreter,
         root,
+        family=case.probe,
         interview="choices-failure.yml",
         arguments=("--seek-diagnostics", "capture"),
     ).start()
@@ -1469,6 +1656,7 @@ def test_tolerated_review_reference_is_not_attributed_to_a_later_failure(
     journey = worker_journey(
         interpreter,
         root,
+        family=case.probe,
         interview="tolerated-review.yml",
         arguments=("--seek-diagnostics", "capture"),
     )
@@ -1529,6 +1717,7 @@ def test_nested_terminal_seek_names_the_last_real_referencing_block(
     failed = worker_journey(
         interpreter,
         root,
+        family=case.probe,
         interview="nested-failure.yml",
         arguments=("--seek-diagnostics", "capture"),
     ).start()
@@ -1547,7 +1736,7 @@ def test_auto_seek_submits_browser_defaults_and_completes_across_families(
     label, interpreter = case.label, case.interpreter
     root = real_workspace
     _assert_family_interpreter(case)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
 
     assert journey.start()["ok"], label
     auto = journey.seek("filing_date", auto=True)
@@ -1568,7 +1757,7 @@ def test_auto_seek_rejection_is_transactional_and_can_be_answered_after_activati
     label, interpreter = case.label, case.interpreter
     root = _whole_screen_workspace(tmp_path)
     _assert_family_interpreter(case)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
 
     assert journey.start()["ok"], label
     rejected = journey.seek("person_name", auto=True, activate=True)
@@ -1603,7 +1792,11 @@ def test_cyclic_namespace_reports_unresolved_variable(
     _assert_family_interpreter(case)
 
     failed = worker_journey(
-        interpreter, root, interview="cyclic.yml", operation_timeout=60
+        interpreter,
+        root,
+        family=case.probe,
+        interview="cyclic.yml",
+        operation_timeout=60,
     ).start()
     assert not failed["ok"], label
     assert failed["error"]["kind"] == "unresolved-variable", label
@@ -1678,7 +1871,7 @@ def test_generic_object_answers_resolve_through_orig_sought(
 ):
     interpreter = real_python
     root = real_workspace
-    journey = worker_journey(interpreter, root, interview="generic.yml")
+    journey = worker_journey(interpreter, root, interview="generic.yml", family=MODERN)
     assert journey.start()["ok"]
 
     screen = journey.answer("start=go")["result"]
@@ -1705,7 +1898,7 @@ def test_seek_defines_missing_roots_without_persisting(
 ):
     interpreter = real_python
     root = real_workspace
-    journey = worker_journey(interpreter, root, interview="generic.yml")
+    journey = worker_journey(interpreter, root, interview="generic.yml", family=MODERN)
     assert journey.start()["ok"]
     session = next((root / ".simulator" / "sessions").glob("*.pkl"))
     before = session.read_bytes()
@@ -1724,14 +1917,18 @@ def test_seek_defines_missing_roots_without_persisting(
     persisted = journey.evaluate("type(rav).__name__")
     assert persisted["result"]["value"] == "'DAObject'"
 
-    nested = worker_journey(interpreter, root, interview="generic-nested.yml")
+    nested = worker_journey(
+        interpreter, root, interview="generic-nested.yml", family=MODERN
+    )
     assert nested.start()["ok"]
     chained = nested.seek("rav.cos.date")["result"]
     assert chained["kind"] == "question"
     assert chained["sought"].endswith("x.date")
     assert chained["orig_sought"].endswith("rav.cos.date")
 
-    code_journey = worker_journey(interpreter, root, interview="generic-code-root.yml")
+    code_journey = worker_journey(
+        interpreter, root, interview="generic-code-root.yml", family=MODERN
+    )
     assert code_journey.start()["ok"]
     code_root = code_journey.seek("T.miscellaneous.rav.date")["result"]
     assert code_root["kind"] == "question"
@@ -1744,7 +1941,9 @@ def test_generic_object_nested_target_resolves_through_seek(
 ):
     interpreter = real_python
     root = real_workspace
-    journey = worker_journey(interpreter, root, interview="generic-nested.yml")
+    journey = worker_journey(
+        interpreter, root, interview="generic-nested.yml", family=MODERN
+    )
     assert journey.start()["ok"]
     assert journey.execute(
         "from docassemble.base.util import DAObject\n"
@@ -1776,7 +1975,9 @@ def test_foreground_background_action_contract_across_families(
     assert checked["ok"], label
     assert checked["result"]["failures"] == 0, label
 
-    journey = worker_journey(interpreter, root, interview="background.yml")
+    journey = worker_journey(
+        interpreter, root, interview="background.yml", family=case.probe
+    )
     started = journey.start()
     assert started["ok"], label
     assert started["result"]["kind"] == "question", label
@@ -2381,7 +2582,7 @@ def test_answer_submits_the_whole_screen_across_families(
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _whole_screen_workspace(tmp_path)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
 
     def value(expression):
         response = journey.evaluate(expression)
@@ -2571,7 +2772,7 @@ def test_object_checkboxes_answer_applies_inside_the_interview_namespace(
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _object_namespace_workspace(tmp_path)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
 
     started = journey.start()
     assert started["ok"], (label, started)
@@ -2654,7 +2855,7 @@ def test_required_empty_choice_object_group_is_cleared_and_gathered(
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _plain_question_workspace(tmp_path, EMPTY_CHOICE_OBJECT_FIXTURE)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
 
     started = journey.start()
     assert started["ok"], (label, started)
@@ -2676,7 +2877,7 @@ def test_empty_choice_object_group_clears_inside_the_interview_namespace(
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _object_namespace_workspace(tmp_path, EMPTY_CHOICE_NAMESPACE_FIXTURE)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
 
     started = journey.start()
     assert started["ok"], (label, started)
@@ -2700,7 +2901,7 @@ def test_partial_answer_keeps_the_permissive_mode_across_families(
     case = family_python
     label, interpreter = case.label, case.interpreter
     root = _whole_screen_workspace(tmp_path)
-    journey = worker_journey(interpreter, root)
+    journey = worker_journey(interpreter, root, family=case.probe)
     assert journey.start()["ok"], label
 
     permissive = journey.answer("extra_date=2026-01-01", partial=True)

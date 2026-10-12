@@ -134,6 +134,36 @@ def test_operation_names_normalize_to_the_canonical_cli_spelling():
         assert isinstance(decoded, expected), spelling
 
 
+def test_serve_replaces_a_successful_response_when_the_observer_fails(tmp_path, capsys):
+    """Recording is part of the command contract, so an unrecorded success fails."""
+    worker = Worker(tmp_path, execution=FakeExecution(tmp_path))
+
+    def observer(request, response):
+        if request.get("id") == "one":
+            raise RuntimeError("recording is broken")
+
+    incoming = io.StringIO(
+        '{"id":"one","operation":"start"}\n'
+        '{"id":"two","operation":"status"}\n'
+        '{"id":"stop","operation":"shutdown"}\n'
+    )
+    outgoing = io.StringIO()
+
+    assert serve(worker, incoming, outgoing, observer=observer) == 2
+    responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+    assert [response["id"] for response in responses] == ["one", "two", "stop"]
+    assert responses[0]["ok"] is False
+    assert responses[0]["error"]["kind"] == "input"
+    assert responses[0]["error"]["message"] == "recording is broken"
+    # The original success is replaced, not annotated: no result and no
+    # recording diagnostic survives an ok response the observer rejected.
+    assert "result" not in responses[0]
+    assert "diagnostics" not in responses[0]
+    assert responses[1]["ok"] is True
+    assert responses[2]["result"]["kind"] == "shutdown"
+    assert "recording is broken" in capsys.readouterr().err
+
+
 def test_serve_isolates_a_failing_observer_and_keeps_answering(tmp_path, capsys):
     worker = Worker(tmp_path, execution=FakeExecution(tmp_path))
     observed = []
@@ -163,6 +193,67 @@ def test_serve_isolates_a_failing_observer_and_keeps_answering(tmp_path, capsys)
     captured = capsys.readouterr()
     assert "recording is broken" in captured.err
     assert "RuntimeError" in captured.err
+    assert captured.out == ""
+
+
+def test_serve_keeps_an_execution_failure_when_the_observer_also_fails(
+    tmp_path, capsys
+):
+    """A recording failure must not erase the operation's own failure."""
+    from docassemble_simulator._diagnostics import Diagnostic
+
+    class StartFailsExecution(FakeExecution):
+        def run(self, operation):
+            if isinstance(operation, Start):
+                return Outcome(
+                    False,
+                    error=Failure(
+                        ErrorKind.UNRESOLVED_VARIABLE,
+                        "no question defines x",
+                        {"variable": "x"},
+                    ),
+                    diagnostics=(
+                        Diagnostic("variable-seek", "seeking x", {"variable": "x"}),
+                    ),
+                )
+            return super().run(operation)
+
+    worker = Worker(tmp_path, execution=StartFailsExecution(tmp_path), timings=True)
+
+    def observer(request, response):
+        if request.get("id") == "failing":
+            raise RuntimeError("recording destination is unwritable")
+
+    incoming = io.StringIO(
+        '{"id":"failing","operation":"start"}\n'
+        '{"id":"later","operation":"status"}\n'
+        '{"id":"stop","operation":"shutdown"}\n'
+    )
+    outgoing = io.StringIO()
+
+    assert serve(worker, incoming, outgoing, observer=observer) == 2
+    responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+    assert [response["id"] for response in responses] == ["failing", "later", "stop"]
+    failed = responses[0]
+    assert failed["ok"] is False
+    # The operation's own failure survives, with its kind, message, details,
+    # diagnostics, and timing intact.
+    assert failed["error"]["kind"] == "unresolved-variable"
+    assert failed["error"]["message"] == "no question defines x"
+    assert failed["error"]["details"] == {"variable": "x"}
+    assert "operation_ms" in failed["timing"]
+    recording = [
+        event for event in failed["diagnostics"] if event["kind"] == "recording-failure"
+    ]
+    assert len(recording) == 1
+    assert "recording destination is unwritable" in recording[0]["message"]
+    assert recording[0]["details"] == {"error_kind": "input"}
+    # The stream keeps answering and the accumulator still fails the process.
+    assert responses[1]["ok"] is True
+    assert responses[1]["result"]["operation"] == "Status"
+    assert responses[2]["result"]["kind"] == "shutdown"
+    captured = capsys.readouterr()
+    assert "recording destination is unwritable" in captured.err
     assert captured.out == ""
 
 
