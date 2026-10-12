@@ -810,3 +810,496 @@ def test_screen_trace_acceptance(family_python, tmp_path):  # noqa: F811
     # and the validation-re-ask occurrence changed identity.
     assert excepted.missing_count == 2
     assert excepted.extra_count == 2
+
+
+BOUNDED_AUTO_REPLAY_INTERVIEW = """\
+---
+id: saved
+mandatory: True
+question: |
+  Saved screen
+fields:
+  - Value: saved_value
+---
+id: first automatic
+mandatory: True
+question: |
+  First automatic screen
+fields:
+  - Value: first_value
+    default: first
+---
+id: second automatic
+mandatory: True
+question: |
+  Second automatic screen
+fields:
+  - Value: second_value
+    default: second
+---
+mandatory: True
+code: |
+  target_value = first_value + second_value
+---
+mandatory: True
+question: |
+  Done
+"""
+
+_EXTRA_SCREEN_BLOCK = """\
+---
+id: extra automatic
+mandatory: True
+question: |
+  Extra automatic screen
+fields:
+  - Value: third_value
+    default: third
+validation code: |
+  from pathlib import Path
+  Path("__TRACE_REPLAY_MARKER__").write_text("visited")
+---
+mandatory: True
+code: |
+  target_value = first_value + second_value + third_value
+---
+"""
+
+_LATER_SCREEN_BLOCK = """\
+---
+id: later mandatory
+mandatory: True
+question: |
+  Later mandatory screen
+fields:
+  - Value: later_value
+    default: later
+validation code: |
+  from pathlib import Path
+  Path("__TRACE_REPLAY_MARKER__").write_text("visited")
+---
+"""
+
+# An unrecorded automatic screen the changed interview needs before the walk
+# can resolve its target.
+EXTRA_AUTO_SCREEN_INTERVIEW = BOUNDED_AUTO_REPLAY_INTERVIEW.replace(
+    """\
+---
+mandatory: True
+code: |
+  target_value = first_value + second_value
+---
+""",
+    _EXTRA_SCREEN_BLOCK,
+)
+
+# The target resolves after the first recorded attempt, so the walk ends before
+# the second recorded attempt runs.
+EARLY_END_INTERVIEW = BOUNDED_AUTO_REPLAY_INTERVIEW.replace(
+    "target_value = first_value + second_value", "target_value = first_value"
+)
+
+# Every recorded submission still matches, but the interview now reaches a
+# later mandatory screen instead of the recorded trailing outcome.
+LATER_MANDATORY_INTERVIEW = BOUNDED_AUTO_REPLAY_INTERVIEW.replace(
+    """\
+---
+mandatory: True
+question: |
+  Done
+""",
+    _LATER_SCREEN_BLOCK
+    + """\
+---
+mandatory: True
+question: |
+  Done
+""",
+)
+
+#: One recorded activated walk per interpreter, shared by the regressions below.
+_BOUNDED_WALK_GOLDENS: dict[str, bytes] = {}
+
+
+def _bounded_walk_golden(interpreter, tmp_path_factory) -> bytes:
+    """Record the shared activated walk: a Saved answer plus two submissions."""
+    key = str(interpreter)
+    if key not in _BOUNDED_WALK_GOLDENS:
+        root = _write_interview(
+            tmp_path_factory.mktemp("bounded-walk"), BOUNDED_AUTO_REPLAY_INTERVIEW
+        )
+        record = root / "scenario.trace.jsonl"
+        for arguments in (
+            ("start", "--record", str(record)),
+            ("answer", "saved_value=done", "--record", str(record)),
+            ("seek", "target_value", "--auto", "--activate", "--record", str(record)),
+        ):
+            code, payload = _command(interpreter, root, *arguments)
+            assert code == 0, payload
+        _BOUNDED_WALK_GOLDENS[key] = record.read_bytes()
+    return _BOUNDED_WALK_GOLDENS[key]
+
+
+def _bounded_walk_root(interpreter, tmp_path, tmp_path_factory, name, interview):
+    """Hold one replay interview variant beside a copy of the recorded golden."""
+    marker = tmp_path / f"{name}.marker"
+    root = _write_interview(
+        tmp_path / name, interview.replace("__TRACE_REPLAY_MARKER__", str(marker))
+    )
+    record = root / "scenario.trace.jsonl"
+    record.write_bytes(_bounded_walk_golden(interpreter, tmp_path_factory))
+    return root, record, marker
+
+
+def _saved_session_files(root):
+    return {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+
+
+def test_trace_replay_never_submits_an_unrecorded_automatic_screen(
+    family_python,  # noqa: F811
+    tmp_path,
+    tmp_path_factory,
+):
+    """The recorded automatic group is a hard submission boundary."""
+    interpreter = family_python.interpreter
+    root, record, marker = _bounded_walk_root(
+        interpreter,
+        tmp_path,
+        tmp_path_factory,
+        "unrecorded-screen",
+        EXTRA_AUTO_SCREEN_INTERVIEW,
+    )
+    golden_before = record.read_bytes()
+    sessions_before = _saved_session_files(root)
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+
+    assert code == 2, replay
+    details = replay["error"]["details"]
+    # Both recorded attempts matched; the third automatic screen the changed
+    # interview reaches was observed and reported, never submitted.
+    assert [step["match"] for step in details["steps"]] == [
+        True,
+        True,
+        True,
+        True,
+        False,
+    ]
+    divergence = details["first_divergence"]
+    assert divergence["step"] == 5
+    assert divergence["identity_match"] is False
+    assert divergence["actual"]["identity"]["key"] == "id:extra automatic"
+    assert divergence["actual"]["submitted"] == {}
+    assert not marker.exists()
+    assert record.read_bytes() == golden_before
+    assert _saved_session_files(root) == sessions_before
+
+    # A per-step override obeys the same boundary: the walk it produces is
+    # still bounded, and the unrecorded screen is never submitted.
+    code, overridden = _command(
+        interpreter,
+        root,
+        "trace",
+        "replay",
+        str(record),
+        "--override",
+        "3.first_value=changed",
+    )
+    assert code == 2, overridden
+    assert not marker.exists()
+
+
+def test_trace_replay_reports_a_trailing_outcome_divergence_without_submitting(
+    family_python,  # noqa: F811
+    tmp_path,
+    tmp_path_factory,
+):
+    """A trailing-only difference is reported without another submission."""
+    interpreter = family_python.interpreter
+    root, record, marker = _bounded_walk_root(
+        interpreter,
+        tmp_path,
+        tmp_path_factory,
+        "trailing-outcome",
+        LATER_MANDATORY_INTERVIEW,
+    )
+    auto_entries = [
+        entry for entry in load_trace(record).entries if entry.intent == "auto"
+    ]
+    post = next(entry for entry in load_trace(record).entries if entry.post_auto)
+    golden_before = record.read_bytes()
+    sessions_before = _saved_session_files(root)
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+
+    assert code == 2, replay
+    details = replay["error"]["details"]
+    assert [step["match"] for step in details["steps"]] == [
+        True,
+        True,
+        True,
+        True,
+        False,
+    ]
+    divergence = details["first_divergence"]
+    assert divergence["step"] == post.seq
+    assert divergence["expected"]["identity"]["key"] == post.identity.key
+    assert divergence["actual"]["identity"]["key"] == "id:later mandatory"
+    assert divergence["actual"]["submitted"] == {}
+    assert len(details["steps"]) == len(auto_entries) + 3
+    assert not marker.exists()
+    assert record.read_bytes() == golden_before
+    assert _saved_session_files(root) == sessions_before
+
+
+def test_trace_replay_reports_the_earliest_missing_expected_step(
+    family_python,  # noqa: F811
+    tmp_path,
+    tmp_path_factory,
+):
+    """A walk that ends early is truncated, not a silent success."""
+    interpreter = family_python.interpreter
+    root, record, _marker = _bounded_walk_root(
+        interpreter, tmp_path, tmp_path_factory, "early-end", EARLY_END_INTERVIEW
+    )
+    golden = load_trace(record)
+    automatic = [entry for entry in golden.entries if entry.intent == "auto"]
+    golden_before = record.read_bytes()
+    sessions_before = _saved_session_files(root)
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+
+    assert code == 2, replay
+    details = replay["error"]["details"]
+    divergence = details["first_divergence"]
+    assert divergence["step"] == automatic[1].seq
+    assert divergence["identity_match"] is False
+    assert divergence["actual"].get("identity") is None
+    assert divergence["actual"]["submitted"] == {}
+    assert record.read_bytes() == golden_before
+    assert _saved_session_files(root) == sessions_before
+
+
+EXECUTION_SEAM_HARNESS = """\
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+from docassemble_simulator._runtime import SimulatorRuntime
+from docassemble_simulator.bootstrap import bootstrap
+from docassemble_simulator.execution import (
+    Answer,
+    InterviewExecution,
+    Refresh,
+    ReplayAutomatic,
+    Start,
+    Status,
+    Variables,
+)
+from docassemble_simulator.preflight import ensure_importable
+from docassemble_simulator.trace import (
+    load_trace,
+    replay_expectation,
+    replay_identity_context,
+)
+
+
+def screen(outcome):
+    if not outcome.ok:
+        return {"ok": False, "error": str(outcome.error.kind)}
+    result = outcome.result if isinstance(outcome.result, dict) else {}
+    return {
+        "ok": True,
+        "kind": result.get("kind"),
+        "question_name": result.get("question_name"),
+    }
+
+
+root = Path(sys.argv[1]).resolve()
+golden = load_trace(sys.argv[2])
+fresh = sys.argv[3] == "fresh"
+session_directory = Path(sys.argv[4]).resolve()
+# Read the override before bootstrap neutralizes sys.argv for interview code.
+override = sys.argv[5] if len(sys.argv) > 5 else ""
+entries = golden.entries
+group = [entry for entry in entries if (entry.intent or entry.operation) == "auto"]
+post = next(entry for entry in entries if entry.post_auto)
+
+with SimulatorRuntime().activate(root):
+    ensure_importable(root, offline=True)
+    bootstrap()
+    execution = InterviewExecution(
+        root,
+        golden.metadata.interview,
+        config_fingerprint=golden.metadata.config_fingerprint,
+        session_directory=session_directory,
+    )
+    if not fresh:
+        # The recorded prefix: the Saved screen, then its recorded answer.
+        assert execution.run(Start()).ok
+        assert execution.run(Answer((("saved_value", "done"),))).ok
+
+    def observe():
+        session = execution.scope.session
+        status = execution.run(Status())
+        variables = execution.run(Variables(contains="value"))
+        return {
+            "session_exists": session.exists(),
+            "session_digest": (
+                hashlib.sha256(session.read_bytes()).hexdigest()[:12]
+                if session.exists()
+                else None
+            ),
+            "status": screen(status),
+            "variables": {
+                name: value
+                for name, value in (variables.result or {}).items()
+                if name.endswith("_value")
+            },
+        }
+
+    before = observe()
+    recorded = [dict(entry.submitted) for entry in group]
+    if override:
+        sequence, _, assignment = override.partition(".")
+        name, _, value = assignment.partition("=")
+        for entry, submitted in zip(group, recorded):
+            if entry.seq == int(sequence):
+                submitted[name] = value
+    outcome = execution.run(
+        ReplayAutomatic(
+            group[0].target,
+            submissions=tuple(tuple(submitted.items()) for submitted in recorded),
+            fresh=fresh,
+            activate=post.activate,
+            expectations=tuple(replay_expectation(entry) for entry in group),
+            identity_context=replay_identity_context(
+                entries[: entries.index(group[0])]
+            ),
+            trailing=replay_expectation(post),
+        )
+    )
+    observed = outcome.result if isinstance(outcome.result, dict) else {}
+    if not observed and not outcome.ok and isinstance(outcome.error.details, dict):
+        observed = outcome.error.details
+    after = observe()
+    refreshed = execution.run(Refresh()) if after["session_exists"] else None
+    print(
+        json.dumps(
+            {
+                "replay_ok": outcome.ok,
+                "divergence": observed.get("replay_divergence"),
+                "auto_steps": len(observed.get("auto_trace") or []),
+                "before": before,
+                "after": after,
+                "refreshed": screen(refreshed) if refreshed is not None else None,
+            }
+        )
+    )
+"""
+
+
+def _execution_seam(
+    interpreter, root, record, session_directory, *, fresh=False, override=""
+):
+    """Drive one isolated replay operation through the family interpreter."""
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            EXECUTION_SEAM_HARNESS,
+            str(root),
+            str(record),
+            "fresh" if fresh else "existing",
+            str(session_directory),
+            override,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stderr == "", completed.stderr
+    assert completed.stdout.strip(), completed.stdout
+    return json.loads(completed.stdout)
+
+
+def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_session(
+    family_python,  # noqa: F811
+    tmp_path,
+    tmp_path_factory,
+):
+    """Persistence and rollback observed through the isolated replay session."""
+    interpreter = family_python.interpreter
+    cases = (
+        ("matched-walk", BOUNDED_AUTO_REPLAY_INTERVIEW, None, 2, ""),
+        ("unrecorded-screen", EXTRA_AUTO_SCREEN_INTERVIEW, "trailing", 2, ""),
+        ("early-end", EARLY_END_INTERVIEW, "early-end", 1, ""),
+        ("trailing-outcome", LATER_MANDATORY_INTERVIEW, "trailing", 2, ""),
+        (
+            "override-divergence",
+            BOUNDED_AUTO_REPLAY_INTERVIEW,
+            "after-submission",
+            1,
+            "3.not_a_field=changed",
+        ),
+    )
+    for name, interview, phase, submitted, override in cases:
+        root, record, _marker = _bounded_walk_root(
+            interpreter, tmp_path, tmp_path_factory, name, interview
+        )
+        golden = load_trace(record)
+        post = next(entry for entry in golden.entries if entry.post_auto)
+        automatic = [entry for entry in golden.entries if entry.intent == "auto"]
+
+        observed = _execution_seam(
+            interpreter,
+            root,
+            record,
+            tmp_path / f"{name}-sessions",
+            override=override,
+        )
+
+        assert observed["replay_ok"] is True, name
+        assert observed["auto_steps"] == submitted, name
+        if phase is None:
+            # Control: a matching activated walk commits its namespace, Active
+            # seek, and Saved outcome.
+            assert observed["after"] != observed["before"], name
+            assert (
+                observed["after"]["session_digest"]
+                != observed["before"]["session_digest"]
+            )
+            continue
+        if phase == "after-submission":
+            expected_seq = automatic[0].seq
+        else:
+            expected_seq = post.seq if phase == "trailing" else automatic[1].seq
+        assert observed["divergence"] == {"phase": phase, "seq": expected_seq}, name
+        # A divergent walk leaves the previous namespace, Saved outcome, and
+        # Active seek unchanged in the isolated replay session.
+        assert observed["after"] == observed["before"], name
+        assert observed["refreshed"] == observed["before"]["status"], name
+
+    # A divergent fresh walk creates no durable session when none existed.
+    root, record, _marker = _bounded_walk_root(
+        interpreter,
+        tmp_path,
+        tmp_path_factory,
+        "fresh-trailing-outcome",
+        LATER_MANDATORY_INTERVIEW,
+    )
+    observed = _execution_seam(
+        interpreter, root, record, tmp_path / "fresh-sessions", fresh=True
+    )
+
+    assert observed["replay_ok"] is True
+    assert observed["divergence"]["phase"] == "trailing"
+    assert observed["before"]["session_exists"] is False
+    assert observed["after"]["session_exists"] is False

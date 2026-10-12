@@ -61,6 +61,23 @@ operation; an activated replay does not save a partly replayed walk. Identity,
 field-fact, flow, and error verdicts are computed by pure functions in this
 module, while the CLI retains only execution and report orchestration.
 
+Issue #43 completes the boundary issue #38 implied. The recorded automatic
+group is a hard submission bound for replay: exhausting the recorded attempts
+observes the resulting outcome instead of falling back to ordinary unbounded
+automatic submission, so a changed interview cannot authorize a screen the
+recording never submitted. The trailing post-walk record is immutable
+expectation data on the same operation and is validated with the same
+trace-owned verdict logic and accumulated identity context as a per-screen
+expectation, inside the persistence decision: an activated walk is saved only
+when every recorded attempt matched and the trailing outcome matched. A walk
+that ends before its recorded attempts run out reports the earliest missing
+expected step and saves nothing. Reaching the boundary is not itself a
+mismatch, matching rejection/completion/resolution keep their existing meaning,
+and ordinary non-replay automatic seeking keeps its existing unlimited
+behavior. The command adapter reports execution's divergence decision rather
+than inferring one by counting submissions, and a screen that failed a
+pre-submission check is reported as observed, not submitted.
+
 ## Considered options
 
 1. **Harness-level recording only.** Each test driver wraps the `--json` envelope and writes JSONL itself. Zero simulator changes, but the canonicalizer is duplicated per driver and the identity rule cannot be shared with a server lane.

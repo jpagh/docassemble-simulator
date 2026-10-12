@@ -829,8 +829,15 @@ def _trace_replay_observation(
     actual_screen,
     actual_error,
     actual_entries=(),
+    actual_submitted=None,
 ):
-    """Build one adapter report from an execution observation."""
+    """Build one adapter report from an execution observation.
+
+    ``actual_submitted`` is what execution actually submitted for the step; it
+    defaults to the same assignments because a completed observation submits
+    the recorded transaction.  A step that stopped before submission was only
+    observed, so it passes an empty mapping.
+    """
     from docassemble_simulator.trace import (
         TraceEntry,
         assign_identity,
@@ -838,6 +845,9 @@ def _trace_replay_observation(
     )
 
     intent = entry.intent or entry.operation
+    observed_submission = (
+        dict(submitted) if actual_submitted is None else dict(actual_submitted)
+    )
     actual_identity = assign_identity(
         actual_screen,
         actual_error,
@@ -848,7 +858,7 @@ def _trace_replay_observation(
         seq=entry.seq,
         operation=entry.operation,
         phase=entry.phase,
-        submitted=submitted,
+        submitted=observed_submission,
         ok=actual_ok,
         screen=actual_screen,
         identity=actual_identity,
@@ -886,7 +896,7 @@ def _trace_replay_observation(
             "ok": actual_ok,
             "error": actual_error,
             "intent": intent,
-            "submitted": submitted,
+            "submitted": observed_submission,
         },
     }
 
@@ -942,7 +952,11 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
 
 
 def _trace_replay_automatic_group(entries, start, overrides, execution, actual_entries):
-    """Replay one recorded automatic walk in one operation-local context."""
+    """Replay one recorded automatic walk in one operation-local context.
+
+    Execution owns the submission boundary and the trailing verdict; this
+    adapter only turns the resulting observations into step reports.
+    """
     from docassemble_simulator.execution import ReplayAutomatic
     from docassemble_simulator.trace import (
         is_screen_outcome,
@@ -974,6 +988,7 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
             activate=activate,
             expectations=tuple(replay_expectation(entry) for entry in group_entries),
             identity_context=replay_identity_context(actual_entries),
+            trailing=replay_expectation(post) if post is not None else None,
         )
     )
     result = outcome.result if outcome.ok and isinstance(outcome.result, dict) else {}
@@ -985,27 +1000,22 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
     )
     actual_steps = actual_steps if isinstance(actual_steps, list) else []
     reports = []
-    for offset, entry in enumerate(entries[start:end]):
+    for offset, entry in enumerate(group_entries):
         actual = actual_steps[offset] if offset < len(actual_steps) else {}
-        actual_screen = actual.get("screen") if isinstance(actual, dict) else None
-        actual_error = actual.get("error") if isinstance(actual, dict) else None
-        actual_ok = bool(actual.get("ok", False)) if isinstance(actual, dict) else False
+        actual = actual if isinstance(actual, dict) else {}
         report = _trace_replay_observation(
             entry,
             dict(submissions[offset]),
-            actual_ok,
-            actual_screen,
-            actual_error,
+            bool(actual.get("ok", False)),
+            actual.get("screen"),
+            actual.get("error"),
             actual_entries,
+            actual.get("submitted") or {},
         )
         actual_entries.append(report.pop("_actual_entry"))
         reports.append(report)
         if not report["match"]:
             return reports, end + (1 if post is not None else 0)
-    if len(actual_steps) > len(entries[start:end]):
-        # No expected entry can absorb an additional automatic submission.
-        reports[-1]["match"] = False
-        reports[-1]["flow_match"] = False
     if post is not None:
         actual_error = _clean(outcome.error) if not outcome.ok else None
         actual_screen = result if outcome.ok and is_screen_outcome(result) else None
@@ -1019,6 +1029,21 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
         )
         actual_entries.append(report.pop("_actual_entry"))
         reports.append(report)
+    observed = result or details
+    divergence = (
+        observed.get("replay_divergence") if isinstance(observed, dict) else None
+    )
+    if isinstance(divergence, dict) and not any(
+        not report["match"] for report in reports
+    ):
+        # Execution owns the persistence decision, so its boundary, early-end,
+        # and trailing verdicts must surface even when a report would match.
+        seq = divergence.get("seq")
+        for report in reports:
+            if report["step"] == seq:
+                report["match"] = False
+                report["flow_match"] = False
+                break
     return reports, end + (1 if post is not None else 0)
 
 
