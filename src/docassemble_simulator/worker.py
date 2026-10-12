@@ -370,28 +370,23 @@ class Worker:
                     timing=self._timing(started, timing_enabled),
                 )
             if normalized == "reset":
-                timeout = self._request_timeout(request)
-                with self._lock:
-                    self._run_deadline(self.execution.reset, timeout)
+                deadline_action = self.execution.reset
+            else:
+                handler = self.handlers.get(normalized)
+                if handler is not None:
+                    deadline_action = lambda: handler(self, request)
+                else:
+                    operation = operation_from_request(request)
+                    deadline_action = lambda: self.execution.run(operation)
+            timeout = self._request_timeout(request)
+            with self._lock:
+                outcome = self._run_deadline(deadline_action, timeout)
+            if normalized == "reset":
                 return self._response(
                     request_id,
                     result={"kind": "reset", "scope": self.scope},
                     timing=self._timing(started, timing_enabled),
                 )
-            handler = self.handlers.get(normalized)
-            if handler is not None:
-                timeout = self._request_timeout(request)
-                with self._lock:
-                    outcome = self._run_deadline(
-                        lambda: handler(self, request), timeout
-                    )
-            else:
-                operation = operation_from_request(request)
-                timeout = self._request_timeout(request)
-                with self._lock:
-                    outcome = self._run_deadline(
-                        lambda: self.execution.run(operation), timeout
-                    )
             if outcome.ok:
                 return self._response(
                     request_id,

@@ -482,6 +482,7 @@ def _install_interview_cache(monkeypatch, source, interview_factory=None):
             "index": 1,
             "source": SimpleNamespace(
                 filepath=str(source),
+                directory=str(source.parent),
                 get_modtime=lambda: source.stat().st_mtime,
             ),
             "interview": interview,
@@ -550,6 +551,11 @@ def test_reload_evicts_declared_helper_modules(tmp_path, monkeypatch, da_stubs):
         )
 
     calls = _install_interview_cache(monkeypatch, source, modules_interview)
+    package = tmp_path / "docassemble" / "pkg"
+    # A declared helper is watched (and evicted) only when it resolves to a
+    # workspace file, so the declared names need real workspace sources.
+    (package / "helpers.py").write_text("VALUE = 1\n")
+    (package / "relative.py").write_text("VALUE = 1\n")
     for name in (
         "docassemble.pkg.helpers",
         "docassemble.pkg.helpers.sub",
@@ -665,6 +671,96 @@ def test_new_file_under_watched_package_triggers_reload(
 
     catalog._compile()
     assert len(calls) == 2
+
+
+def _included_interview(includes):
+    def factory():
+        return SimpleNamespace(
+            questions_list=[],
+            questions={},
+            default_language="en",
+            includes=set(includes),
+        )
+
+    return factory
+
+
+def test_included_yaml_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    included = source.parent / "included.yml"
+    included.write_text("---\nquestion: Included\nfields:\n  - Name: user_name\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _included_interview(["included.yml"])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+    included.write_text("---\nquestion: Changed\nfields:\n  - Name: user_name\n")
+    os.utime(included, (0, 0))
+
+    # An edit to a YAML the interview includes invalidates the compile even
+    # though the selected source is untouched.
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+    assert catalog._compile() is second
+    assert len(calls) == 2
+
+
+def test_missing_included_yaml_forces_reload(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    included = source.parent / "included.yml"
+    included.write_text("---\nquestion: Included\nfields:\n  - Name: user_name\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _included_interview(["included.yml"])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    included.unlink()
+
+    # A missing included source is treated as changed, like a missing main
+    # source, so recompilation can surface the typed compile error.
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+
+
+def test_reload_keeps_installed_module_identity(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    (tmp_path / "docassemble" / "pkg" / "helpers.py").write_text("VALUE = 1\n")
+    calls = _install_interview_cache(
+        monkeypatch,
+        source,
+        _modules_interview(["docassemble.pkg.helpers", "docassemble.base.functions"]),
+    )
+    installed = sys.modules["docassemble.base.functions"]
+    monkeypatch.setitem(
+        sys.modules,
+        "docassemble.pkg.helpers",
+        types.ModuleType("docassemble.pkg.helpers"),
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    catalog._compile()
+    source.write_text("---\nquestion: Second\nfields:\n  - Name: user_name\n")
+    os.utime(source, (0, 0))
+    catalog._compile()
+
+    # Eviction is bounded to workspace-owned helpers: an installed/runtime
+    # module keeps its identity while the workspace helper is dropped.
+    assert len(calls) == 2
+    assert sys.modules.get("docassemble.base.functions") is installed
+    assert "docassemble.pkg.helpers" not in sys.modules
 
 
 def test_unresolvable_declared_module_is_skipped(tmp_path, monkeypatch, da_stubs):

@@ -265,6 +265,48 @@ def test_render_failure_reaches_the_envelope_with_diagnostics(tmp_path, monkeypa
     ]
 
 
+def test_render_attachments_forward_through_the_envelope(tmp_path, monkeypatch):
+    from docassemble_simulator._outcomes import PublishedAttachment
+
+    artifact = tmp_path / "artifact.docx"
+    local_file = tmp_path / "local_document.docx"
+    attachment = PublishedAttachment(
+        filename="local_document.docx",
+        extension="docx",
+        mimetype=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        path=local_file,
+        uri=local_file.resolve().as_uri(),
+    )
+    _capture_render(
+        monkeypatch,
+        RenderOutcome(
+            True,
+            RenderResult("form.docx", 4, artifact),
+            attachments=(attachment,),
+        ),
+    )
+    worker = _worker(tmp_path, _render_handlers(_args()))
+
+    response = worker.handle({"operation": "render", "template": "form.docx"})
+
+    assert response["ok"] is True
+    assert response["attachments"] == [
+        {
+            "filename": "local_document.docx",
+            "extension": "docx",
+            "mimetype": (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            "path": str(local_file),
+            "uri": local_file.resolve().as_uri(),
+            "diagnostics": [],
+            "structure": None,
+        }
+    ]
+
+
 def test_worker_command_registers_the_render_handler(tmp_path, monkeypatch):
     import docassemble_simulator.worker as worker_module
 

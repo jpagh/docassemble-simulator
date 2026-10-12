@@ -593,7 +593,7 @@ def _render_worker_request(args, worker, request):
     normalized through the CLI's public payload cleaning, so a response's
     ``result`` is the ``sim render --json`` result for the same inputs.
     """
-    from docassemble_simulator.render import InterviewRenderer, RenderRequest
+    from docassemble_simulator.render import InterviewRenderer
     from docassemble_simulator.worker import WorkerProtocolError
 
     try:
@@ -602,14 +602,14 @@ def _render_worker_request(args, worker, request):
         )
     except InputFailure as error:
         raise WorkerProtocolError(str(error)) from error
-    render_request = RenderRequest(
+    render_request = _render_request(
         template,
         source,
-        assemble,
-        save_snapshot,
-        output,
-        expect_missing,
-        _configured_bindings(
+        assemble=assemble,
+        save_snapshot=save_snapshot,
+        output=output,
+        expect_missing=expect_missing,
+        bindings=_configured_bindings(
             getattr(args, "_simulator_config", {}), template, bindings
         ),
     )
@@ -650,18 +650,13 @@ def _worker_render_fields(request):
         )
     else:
         raise InputFailure(f"unknown render source: {normalized}")
-    assemble = (
-        False
-        if isinstance(source, FixtureSource)
-        else not _worker_flag(request, "no-assemble", "no_assemble")
-    )
     return (
         template,
         source,
-        assemble,
+        not _worker_flag(request, "no_assemble", "no-assemble"),
         _worker_optional_path(request, "save_snapshot", "save-snapshot"),
         _worker_optional_path(request, "output"),
-        _worker_optional_string(request, "expect-missing", "expect_missing"),
+        _worker_optional_string(request, "expect_missing", "expect-missing"),
         _parse_bindings(_worker_binding_pairs(request.get("bindings"))),
     )
 
@@ -702,7 +697,11 @@ def _worker_optional_path(request, *names):
 
 
 def _worker_binding_pairs(raw):
-    """Normalize a request's `bindings` into NAME=EXPRESSION spellings."""
+    """Normalize a request's `bindings` into NAME=EXPRESSION spellings.
+
+    Only the two shapes the README documents are accepted: an object of
+    ``NAME: EXPRESSION``, or an array of ``NAME=EXPRESSION`` strings.
+    """
     if raw is None:
         return ()
     if isinstance(raw, dict):
@@ -711,21 +710,9 @@ def _worker_binding_pairs(raw):
         raise InputFailure("render bindings must be an object or array")
     pairs: list[str] = []
     for item in raw:
-        if isinstance(item, str):
-            pairs.append(item)
-        elif isinstance(item, dict):
-            name = item.get("name", item.get("variable"))
-            expression = item.get("expression", item.get("value"))
-            if name is None or expression is None:
-                raise InputFailure("render binding objects require name and expression")
-            pairs.append(f"{name}={expression}")
-        elif isinstance(item, (list, tuple)) and len(item) == 2:
-            pairs.append(f"{item[0]}={item[1]}")
-        else:
-            raise InputFailure(
-                "each render binding must be NAME=EXPRESSION, [NAME, EXPRESSION], "
-                "or an object"
-            )
+        if not isinstance(item, str):
+            raise InputFailure("each render binding must be a NAME=EXPRESSION string")
+        pairs.append(item)
     return tuple(pairs)
 
 
@@ -1545,12 +1532,39 @@ def cmd_trace(args, root):
     return 2
 
 
+def _render_request(
+    template,
+    source,
+    *,
+    assemble,
+    save_snapshot=None,
+    output=None,
+    expect_missing=None,
+    bindings=(),
+):
+    """Build one render request; a fixture source never assembles.
+
+    Shared by ``sim render`` and the worker's ``render`` handler so the two
+    cannot drift on the seven request fields or the fixture rule.
+    """
+    from docassemble_simulator.render import FixtureSource, RenderRequest
+
+    return RenderRequest(
+        template,
+        source,
+        False if isinstance(source, FixtureSource) else assemble,
+        save_snapshot,
+        output,
+        expect_missing,
+        tuple(bindings),
+    )
+
+
 def cmd_render(args, root):
     from docassemble_simulator.render import (
         FixtureSource,
         FreshSource,
         InterviewRenderer,
-        RenderRequest,
         SavedSessionSource,
         SnapshotSource,
     )
@@ -1563,14 +1577,16 @@ def cmd_render(args, root):
         source = FreshSource()
     else:
         source = SavedSessionSource()
-    request = RenderRequest(
+    request = _render_request(
         args.template,
         source,
-        False if isinstance(source, FixtureSource) else not args.no_assemble,
-        Path(args.save_snapshot).expanduser().resolve() if args.save_snapshot else None,
-        Path(args.output).expanduser().resolve() if args.output else None,
-        args.expect_missing,
-        _configured_bindings(
+        assemble=not args.no_assemble,
+        save_snapshot=Path(args.save_snapshot).expanduser().resolve()
+        if args.save_snapshot
+        else None,
+        output=Path(args.output).expanduser().resolve() if args.output else None,
+        expect_missing=args.expect_missing,
+        bindings=_configured_bindings(
             getattr(args, "_simulator_config", {}),
             args.template,
             _parse_bindings(args.bind),

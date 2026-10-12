@@ -53,3 +53,14 @@ controls.
   shared or symlinked source policy must opt into it explicitly.
 - Existing one-shot commands are unchanged and remain the compatibility path
   for simple shell invocations.
+
+## Amendment
+
+Issues #45, #46, and #47 added two adapter seams without widening the operation
+interface, so the enumerated operations above stay "the same typed operations".
+The screen-trace observer is a generic callable passed to `serve`, and the
+worker's `render` handler is a generic callable passed through the `Worker`
+constructor (`handlers`). Both are adapter concerns: `worker.py` imports
+neither the trace module nor the render pipeline, the render request is mapped
+to the same `InterviewRenderer`/`RenderRequest` path as `sim render` by the
+command adapter, and neither seam adds a typed execution operation.

@@ -207,16 +207,20 @@ redirected to stderr so stdout remains protocol-only. Timings are optional and
 remain in the protocol response.
 
 While a worker is running, editing the interview's source takes effect on the
-next operation. The worker checks the interview source file's timestamp and
-size, and the declared `modules:`/`imports:` helper files, once per operation
-and, when they changed, drops the compiled program, evicts the recompiled
-interview's declared helpers from `sys.modules`, and recompiles — so renaming a
-screen or editing a helper (with or without an interview-source edit) is served
-without restarting the worker. A declared helper is watched when it resolves to
-a file or package under the workspace source tree; helper edits to a declared
-package directory are watched recursively, so an edited or newly added
-submodule counts. A declared module outside the workspace (stdlib or an
-installed docassemble package) is not watched. An unchanged interview stays
+next operation. The worker checks the timestamp and size of the interview
+source file, every included YAML, and the declared `modules:`/`imports:` helper
+files, once per operation and, when they changed, drops the compiled program,
+evicts the recompiled interview's declared helpers from `sys.modules`,
+invalidates their cached bytecode, and recompiles — so renaming a screen,
+editing an included YAML, or editing a helper (with or without an
+interview-source edit) is served without restarting the worker. A declared
+helper is watched when it resolves to a file or package under the workspace
+source tree; helper edits to a declared package directory are watched
+recursively, so an edited or newly added submodule counts. Only workspace
+declared helpers are evicted, so an installed module named in `imports:` keeps
+its identity. A declared module outside the workspace (stdlib or an installed
+docassemble package) is not watched, and neither is a workspace module the
+interview does not declare. An unchanged interview stays
 warm and is not recompiled. A reload never touches the Saved session; `reset`
 remains the explicit way to clear it, and a reload that makes the interview
 invalid reports the usual typed `compile` error with the session intact.
