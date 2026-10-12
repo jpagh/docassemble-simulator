@@ -3260,3 +3260,51 @@ def test_worker_reload_of_invalid_interview_keeps_saved_session(
         assert status["result"]["question_text"] == "Second screen", (label, status)
     finally:
         journey.close()
+
+
+def test_worker_reloads_module_only_edit_without_restart(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    _reload_workspace(root)
+    helper = root / "docassemble" / "reload" / "helpers.py"
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    try:
+        started = journey.start()
+        assert started["ok"], (label, started)
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        assert answered["result"]["question_text"] == "Second screen", (label, answered)
+        assert "v1:Ada" in answered["result"].get("subquestion_text", ""), (
+            label,
+            answered,
+        )
+
+        # Edit only the helper module; the interview YAML is unchanged.
+        helper.write_text(
+            "def greeting(value):\n    return f'v2:{value}'\n", encoding="utf-8"
+        )
+        _mark_source_changed(helper)
+
+        reloaded = journey.refresh()
+        assert reloaded["ok"], (label, reloaded)
+        assert reloaded["result"]["question_text"] == "Second screen", (label, reloaded)
+        assert "v2:Ada" in reloaded["result"].get("subquestion_text", ""), (
+            label,
+            reloaded,
+        )
+        # The Saved session still holds the answered value.
+        preserved = journey.evaluate("user_name")
+        assert preserved["ok"], (label, preserved)
+        assert preserved["result"]["value"] == "'Ada'", (label, preserved)
+    finally:
+        journey.close()

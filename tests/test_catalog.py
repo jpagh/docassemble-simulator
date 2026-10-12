@@ -576,3 +576,118 @@ def test_reload_evicts_declared_helper_modules(tmp_path, monkeypatch, da_stubs):
     assert "docassemble.pkg.relative" not in sys.modules
     assert "docassemble.other.helpers" in sys.modules
     assert invalidated == [True]
+
+
+def _modules_workspace(tmp_path):
+    """A workspace with a helper module and a helper package."""
+    source = _reload_workspace(tmp_path)
+    package = tmp_path / "docassemble" / "pkg"
+    (package / "helpers.py").write_text("def greeting(v):\n    return f'v1:{v}'\n")
+    toolbox = package / "toolbox"
+    toolbox.mkdir()
+    (toolbox / "__init__.py").write_text("")
+    (toolbox / "sub.py").write_text("VALUE = 1\n")
+    return source, package
+
+
+def _modules_interview(module_list):
+    def factory():
+        question = SimpleNamespace(
+            question_type="modules",
+            package="docassemble.pkg",
+            module_list=list(module_list),
+        )
+        return SimpleNamespace(
+            questions_list=[question], questions={}, default_language="en"
+        )
+
+    return factory
+
+
+def test_helper_module_edit_triggers_reload_without_source_change(
+    tmp_path, monkeypatch, da_stubs
+):
+    source, package = _modules_workspace(tmp_path)
+    calls = _install_interview_cache(
+        monkeypatch, source, _modules_interview(["docassemble.pkg.helpers"])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+    helper = package / "helpers.py"
+    helper.write_text("def greeting(v):\n    return f'v2:{v}'\n")
+    os.utime(helper, (0, 0))
+
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+    assert catalog._compile() is second
+    assert len(calls) == 2
+
+
+def test_package_submodule_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
+    source, package = _modules_workspace(tmp_path)
+    calls = _install_interview_cache(
+        monkeypatch, source, _modules_interview(["docassemble.pkg.toolbox"])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    assert catalog._compile()
+    submodule = package / "toolbox" / "sub.py"
+    submodule.write_text("VALUE = 2\n")
+    os.utime(submodule, (0, 0))
+
+    assert len(calls) == 1
+    catalog._compile()
+    assert len(calls) == 2
+
+
+def test_new_file_under_watched_package_triggers_reload(
+    tmp_path, monkeypatch, da_stubs
+):
+    source, package = _modules_workspace(tmp_path)
+    calls = _install_interview_cache(
+        monkeypatch, source, _modules_interview(["docassemble.pkg.toolbox"])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    assert catalog._compile()
+    (package / "toolbox" / "extra.py").write_text("EXTRA = 1\n")
+
+    catalog._compile()
+    assert len(calls) == 2
+
+
+def test_unresolvable_declared_module_is_skipped(tmp_path, monkeypatch, da_stubs):
+    source, package = _modules_workspace(tmp_path)
+    calls = _install_interview_cache(
+        monkeypatch,
+        source,
+        _modules_interview(
+            ["docassemble.pkg.helpers", "docassemble.pkg.missing", "json"]
+        ),
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+    # The resolvable helper is still watched even though other declared names
+    # do not resolve to a workspace file.
+    helper = package / "helpers.py"
+    helper.write_text("def greeting(v):\n    return f'v3:{v}'\n")
+    os.utime(helper, (0, 0))
+    assert catalog._compile() is not first
+    assert len(calls) == 2

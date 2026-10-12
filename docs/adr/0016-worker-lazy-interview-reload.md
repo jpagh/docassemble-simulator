@@ -33,11 +33,17 @@ stale compile after an edit.
 - A reload changes compilation only. The Saved session is never cleared by a
   reload; `reset` remains the explicit clear. A reload that fails to compile
   reports the typed `compile` error and leaves the session intact.
-- Detection covers the interview's own source file. A helper-module edit is
-  picked up when the interview source also changes in the same reload; a
-  module-only edit with no interview-source change is not detected and still
-  needs a reload trigger (an interview-source edit or a restart). Watcher-free
-  module-only reload is a follow-up.
+- Detection covers the interview's own source file and the source files of
+  its declared `modules:`/`imports:` helpers. A helper that resolves to a file
+  under the workspace source tree is stamped directly; a helper that resolves
+  to a package directory is stamped by walking its `*.py` files, so an edited
+  or newly added submodule counts. A declared module that does not resolve to a
+  workspace file (stdlib, an installed docassemble package, a mis-declared
+  name) is skipped and logged at debug; those are not the interview's own
+  source. Module paths are resolved by workspace-tree lookup, not
+  `importlib.util.find_spec`: find_spec imports a dotted module's parent
+  package, which would execute authored package code during compilation and
+  could import a heavy installed dependency.
 - Configuration is resolved once at worker startup and is not reloaded; a
   configuration change still requires a restart. Templates are read at render
   time (`prepare_docx_template` loads the file per render, with no cache), so a
@@ -47,9 +53,12 @@ stale compile after an edit.
 
 ## Consequences
 
-- Unchanged interviews pay one `stat` per operation, not a ~3s compile, so
-  repeated operations stay in the warm range.
+- Unchanged interviews pay one `stat` per operation per watched interview file
+  and helper file, plus a `*.py` walk per watched helper package directory, not
+  a ~3s compile, so repeated operations stay in the warm range.
 - The reload signal is a file timestamp, so tests set it explicitly
   (`os.utime`) rather than depending on clock resolution.
-- A module edit that is not accompanied by an interview-source edit remains a
-  known boundary rather than a silent success.
+- A helper edit under a declared workspace module now reloads the worker with
+  no restart. The remaining boundary is a module that lives outside the
+  workspace source tree (a third-party or installed package), which is not
+  watched.
