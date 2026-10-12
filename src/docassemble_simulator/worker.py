@@ -14,6 +14,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -37,6 +38,38 @@ from docassemble_simulator.execution import (
 
 class WorkerProtocolError(ValueError):
     """A malformed worker request."""
+
+
+# Alias spellings the worker accepts, mapped to the one-shot CLI command name.
+# The recorder writes this canonical name to the trace, so a journey spelled
+# ``evaluate`` records the same operation (and replays the same way) as the
+# one-shot ``eval`` command.
+_OPERATION_ALIASES = {
+    "evaluate": "eval",
+    "execute": "exec",
+    "variables": "vars",
+    "state-seed": "seed",
+    "seed-state": "seed",
+}
+
+
+def operation_name(request: Any) -> str:
+    """The canonical CLI spelling of a decoded request's operation.
+
+    ``operation``, ``op``, and ``command`` are the accepted keys, in that
+    order; case and underscore variants normalize to hyphenated lower case,
+    and the aliases above collapse to the one-shot command name. Request-key
+    fallback, normalization, and alias mapping live here alone so the worker's
+    dispatch and the trace recorder cannot disagree about what an operation is
+    called. A request that names no operation returns ``""``.
+    """
+    if not isinstance(request, dict):
+        return ""
+    name = request.get("operation", request.get("op", request.get("command")))
+    if not isinstance(name, str):
+        return ""
+    normalized = name.strip().lower().replace("_", "-")
+    return _OPERATION_ALIASES.get(normalized, normalized)
 
 
 def _jsonable(value: Any):
@@ -103,10 +136,9 @@ def _assignment_pairs(raw: Any) -> tuple[tuple[str, str], ...]:
 
 def operation_from_request(request: dict[str, Any]):
     """Decode one protocol request into an execution operation."""
-    name = request.get("operation", request.get("op", request.get("command")))
-    if not isinstance(name, str) or not name.strip():
+    name = operation_name(request)
+    if not name:
         raise WorkerProtocolError("request requires an operation")
-    name = name.strip().lower().replace("_", "-")
     if name == "start":
         return Start()
     if name == "status":
@@ -133,17 +165,17 @@ def operation_from_request(request: dict[str, Any]):
             bool(request.get("trace", False)),
             bool(request.get("auto", False)),
         )
-    if name in {"eval", "evaluate"}:
+    if name == "eval":
         expression = request.get("expression")
         if not isinstance(expression, str) or not expression.strip():
             raise WorkerProtocolError("eval requires an expression")
         return Evaluate(expression)
-    if name in {"vars", "variables"}:
+    if name == "vars":
         contains = request.get("contains", request.get("filter"))
         if contains is not None and not isinstance(contains, str):
             raise WorkerProtocolError("vars filter must be a string")
         return Variables(contains)
-    if name in {"exec", "execute"}:
+    if name == "exec":
         code = request.get("code")
         if not isinstance(code, str):
             raise WorkerProtocolError("exec requires code")
@@ -152,7 +184,7 @@ def operation_from_request(request: dict[str, Any]):
             not bool(request.get("no-assemble", request.get("no_assemble", False))),
         )
         return Execute(code, bool(assemble))
-    if name in {"seed", "state-seed", "seed-state"}:
+    if name == "seed":
         code = request.get("code")
         if not isinstance(code, str):
             raise WorkerProtocolError("state-seed requires code")
@@ -306,10 +338,7 @@ class Worker:
             if not isinstance(request, dict):
                 raise WorkerProtocolError("request must be a JSON object")
             timing_enabled = bool(request.get("timings", self.timings))
-            name = request.get("operation", request.get("op", request.get("command")))
-            normalized = (
-                name.strip().lower().replace("_", "-") if isinstance(name, str) else ""
-            )
+            normalized = operation_name(request)
             if normalized in {"shutdown", "close", "stop"}:
                 self.closed = True
                 return self._response(
@@ -394,7 +423,7 @@ def serve(
     worker: Worker,
     input_stream: TextIO = sys.stdin,
     output_stream: TextIO = sys.stdout,
-    observer=None,
+    observer: Callable[[Any, dict[str, Any]], None] | None = None,
 ) -> int:
     """Serve newline-delimited requests until EOF or graceful shutdown.
 
@@ -402,6 +431,11 @@ def serve(
     response envelope after the operation runs.  It exists so a command
     adapter can record execution responses without teaching this module about
     traces; malformed requests never reach it.
+
+    An observer failure is isolated, never fatal: it is logged to stderr and
+    the response for that request becomes a typed ``input`` failure, the same
+    kind the one-shot CLI reports for a recording failure.  The stream keeps
+    its request/response pairing and keeps answering afterwards.
     """
     failed = False
     # Interview code is allowed to print.  Keep those diagnostics visible on
@@ -413,7 +447,6 @@ def serve(
             try:
                 request = json.loads(line)
             except json.JSONDecodeError as error:
-                failed = True
                 response = worker._response(
                     None,
                     error=_failure(
@@ -422,9 +455,19 @@ def serve(
                 )
             else:
                 response = worker.handle(request)
-                failed = failed or not response.get("ok", False)
                 if observer is not None:
-                    observer(request, response)
+                    try:
+                        observer(request, response)
+                    except Exception as error:  # noqa: BLE001 - see docstring
+                        print(
+                            f"worker observer failed: {type(error).__name__}: {error}",
+                            file=sys.stderr,
+                        )
+                        response = worker._response(
+                            request.get("id") if isinstance(request, dict) else None,
+                            error=_failure(ErrorKind.INPUT, str(error)),
+                        )
+            failed = failed or not response.get("ok", False)
             output_stream.write(
                 json.dumps(response, separators=(",", ":"), default=str) + "\n"
             )
@@ -439,5 +482,6 @@ __all__ = [
     "Worker",
     "WorkerProtocolError",
     "operation_from_request",
+    "operation_name",
     "serve",
 ]

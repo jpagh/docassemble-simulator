@@ -5,8 +5,21 @@ import json
 import time
 
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
-from docassemble_simulator.execution import Answer, ExecutionScope, Start
-from docassemble_simulator.worker import Worker, operation_from_request, serve
+from docassemble_simulator.execution import (
+    Answer,
+    Evaluate,
+    Execute,
+    ExecutionScope,
+    SeedState,
+    Start,
+    Variables,
+)
+from docassemble_simulator.worker import (
+    Worker,
+    operation_from_request,
+    operation_name,
+    serve,
+)
 
 
 class FakeExecution:
@@ -92,6 +105,107 @@ def test_serve_continues_after_malformed_and_operation_requests(tmp_path):
     assert responses[0]["error"]["kind"] == "input"
     assert responses[1]["result"]["operation"] == "Start"
     assert responses[2]["result"]["kind"] == "shutdown"
+
+
+def test_operation_names_normalize_to_the_canonical_cli_spelling():
+    assert operation_name({"operation": "evaluate"}) == "eval"
+    assert operation_name({"op": "execute"}) == "exec"
+    assert operation_name({"command": "variables"}) == "vars"
+    assert operation_name({"operation": "state_seed"}) == "seed"
+    assert operation_name({"operation": "State-Seed"}) == "seed"
+    assert operation_name({"operation": "start"}) == "start"
+    assert operation_name({"operation": "shutdown"}) == "shutdown"
+    assert operation_name({}) == ""
+    assert operation_name("evaluate") == ""
+    assert operation_name({"operation": 7}) == ""
+
+    spellings = {
+        "eval": (Evaluate, {"expression": "1 + 1"}),
+        "evaluate": (Evaluate, {"expression": "1 + 1"}),
+        "exec": (Execute, {"code": "x = 1"}),
+        "execute": (Execute, {"code": "x = 1"}),
+        "vars": (Variables, {}),
+        "variables": (Variables, {}),
+        "seed": (SeedState, {"code": "x = 1"}),
+        "state-seed": (SeedState, {"code": "x = 1"}),
+    }
+    for spelling, (expected, fields) in spellings.items():
+        decoded = operation_from_request({"operation": spelling, **fields})
+        assert isinstance(decoded, expected), spelling
+
+
+def test_serve_isolates_a_failing_observer_and_keeps_answering(tmp_path, capsys):
+    worker = Worker(tmp_path, execution=FakeExecution(tmp_path))
+    observed = []
+
+    def observer(request, response):
+        observed.append(request.get("id"))
+        if request.get("id") == "one":
+            raise RuntimeError("recording is broken")
+
+    incoming = io.StringIO(
+        '{"id":"one","operation":"start"}\n'
+        '{"id":"two","operation":"status"}\n'
+        '{"id":"stop","operation":"shutdown"}\n'
+    )
+    outgoing = io.StringIO()
+
+    assert serve(worker, incoming, outgoing, observer=observer) == 2
+    responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+    assert [response["id"] for response in responses] == ["one", "two", "stop"]
+    assert observed == ["one", "two", "stop"]
+    assert responses[0]["ok"] is False
+    assert responses[0]["error"]["kind"] == "input"
+    assert responses[0]["error"]["message"] == "recording is broken"
+    assert "result" not in responses[0]
+    assert responses[1]["result"]["operation"] == "Status"
+    assert responses[2]["result"]["kind"] == "shutdown"
+    captured = capsys.readouterr()
+    assert "recording is broken" in captured.err
+    assert "RuntimeError" in captured.err
+    assert captured.out == ""
+
+
+def test_serve_keeps_response_pairing_for_non_object_requests(tmp_path):
+    worker = Worker(tmp_path, execution=FakeExecution(tmp_path))
+    observed = []
+
+    def observer(request, response):
+        observed.append(request)
+
+    incoming = io.StringIO(
+        "null\n"
+        "[]\n"
+        '"a string request"\n'
+        '{"id":"one","operation":"start"}\n'
+        '{"id":"stop","operation":"shutdown"}\n'
+    )
+    outgoing = io.StringIO()
+
+    assert serve(worker, incoming, outgoing, observer=observer) == 2
+    responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+    assert [response["id"] for response in responses] == [
+        None,
+        None,
+        None,
+        "one",
+        "stop",
+    ]
+    assert [response["ok"] for response in responses] == [
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert all(response["error"]["kind"] == "input" for response in responses[:3])
+    assert observed == [
+        None,
+        [],
+        "a string request",
+        {"id": "one", "operation": "start"},
+        {"id": "stop", "operation": "shutdown"},
+    ]
 
 
 def test_serve_keeps_authored_stdout_out_of_protocol(tmp_path, capsys):

@@ -39,11 +39,12 @@ mise run test:all-da  # aggregate lane: whole suite with both families wired
 `mise run test:runtime` is the compatibility gate. It provisions both lanes,
 exports `DASIMULATOR_REAL_PYTHON` and `DASIMULATOR_REAL_PYTHON_19`, and selects
 the `real_runtime` contract tests, including screen-trace acceptance, with the
-external corpus excluded. The gate uses two bounded pytest-xdist workers by
-default; set `DASIMULATOR_RUNTIME_WORKERS=1` for serial debugging or comparison
-(the accepted range is 1–8). Every worker inherits both explicit interpreter
-paths, and the contract's per-test temporary workspaces keep sessions, files,
-traces, and packages isolated. `scripts/test-runtime` performs that selection
+external corpus excluded. The gate uses `min(4, CPU count)` bounded
+pytest-xdist workers by default, falling back to two when neither CPU probe
+answers; set `DASIMULATOR_RUNTIME_WORKERS` to 1 for serial debugging or
+comparison, or to any count in the accepted range (1–8). Every worker inherits
+both explicit interpreter paths, and the contract's per-test temporary
+workspaces keep sessions, files, traces, and packages isolated. `scripts/test-runtime` performs that selection
 and preflights both lanes; it fails before pytest when a lane interpreter is
 missing, cannot import the runtime, or reports the wrong family, and prints the
 `mise run sync:*` command that provisions it. `tests/_runtime_gate.py` then

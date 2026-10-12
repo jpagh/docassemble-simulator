@@ -464,3 +464,219 @@ def test_worker_journey_records_execution_responses_and_skips_protocol(
     trace = load_trace(record)
     assert [entry.operation for entry in trace.entries] == ["start", "answer"]
     assert [entry.phase for entry in trace.entries] == ["intake", "second"]
+
+
+def test_worker_journey_recorder_keeps_pairing_for_non_object_requests(
+    tmp_path, monkeypatch
+):
+    """A JSON null, array, or string must not abort the recorder."""
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "journey.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
+    execution = _ScopedFakeExecution(tmp_path, _outcome(True, _screen("ID first")))
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        "null\n"
+        "[]\n"
+        '"a string request"\n'
+        '{"id":"start","operation":"start"}\n'
+        '{"id":"stop","operation":"shutdown"}\n',
+    )
+
+    assert code == 2
+    assert [response["id"] for response in responses] == [
+        None,
+        None,
+        None,
+        "start",
+        "stop",
+    ]
+    assert [response["ok"] for response in responses] == [
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert all(response["error"]["kind"] == "input" for response in responses[:3])
+    trace = load_trace(record)
+    assert [entry.operation for entry in trace.entries] == ["start"]
+
+
+def test_worker_journey_recorder_rejects_a_non_string_record_or_phase(
+    tmp_path, monkeypatch
+):
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "journey.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--json")
+    execution = _ScopedFakeExecution(
+        tmp_path,
+        _outcome(True, _screen("ID first")),
+        _outcome(True, _screen("ID second")),
+        _outcome(True, _screen("ID third")),
+        _outcome(True, _screen("ID fourth")),
+    )
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        '{"id":"record","operation":"start","record":123}\n'
+        '{"id":"empty","operation":"start","record":""}\n'
+        '{"id":"phase","operation":"start","phase":7}\n'
+        '{"id":"start","operation":"start"}\n'
+        '{"id":"stop","operation":"shutdown"}\n',
+    )
+
+    assert code == 2
+    assert [response["id"] for response in responses] == [
+        "record",
+        "empty",
+        "phase",
+        "start",
+        "stop",
+    ]
+    for response in responses[:3]:
+        assert response["ok"] is False
+        assert response["error"]["kind"] == "input"
+    assert "record" in responses[0]["error"]["message"]
+    assert "record" in responses[1]["error"]["message"]
+    assert "phase" in responses[2]["error"]["message"]
+    assert responses[3]["ok"] is True
+    assert responses[4]["result"]["kind"] == "shutdown"
+    trace = load_trace(record)
+    assert [entry.operation for entry in trace.entries] == ["start"]
+
+
+def test_worker_journey_surfaces_a_recording_failure_as_a_typed_response(
+    tmp_path, monkeypatch
+):
+    """A truncated journey trace must not report success (issue #45).
+
+    The failing request is recorded against a destination that cannot be
+    created; the worker's own ``--record`` default stays usable, so the next
+    execution request still answers and records.
+    """
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "journey.trace.jsonl"
+    missing = tmp_path / "missing" / "journey.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
+    execution = _ScopedFakeExecution(
+        tmp_path,
+        _outcome(True, _screen("ID first")),
+        _outcome(True, _screen("ID second")),
+    )
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        json.dumps({"id": "start", "operation": "start", "record": str(missing)}) + "\n"
+        '{"id":"status","operation":"status"}\n'
+        '{"id":"stop","operation":"shutdown"}\n',
+    )
+
+    assert code == 2
+    assert responses[0]["ok"] is False
+    assert responses[0]["error"]["kind"] == "input"
+    assert str(missing) in responses[0]["error"]["message"]
+    assert not missing.exists()
+    assert responses[1]["ok"] is True
+    assert responses[2]["result"]["kind"] == "shutdown"
+    # The failed operation is not recorded as a success anywhere.
+    assert [entry.operation for entry in load_trace(record).entries] == ["status"]
+
+
+def test_worker_journey_phase_null_falls_back_to_the_worker_default(
+    tmp_path, monkeypatch
+):
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "journey.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
+    execution = _ScopedFakeExecution(
+        tmp_path,
+        _outcome(True, _screen("ID first")),
+        _outcome(True, _screen("ID second")),
+        _outcome(True, _screen("ID third")),
+    )
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        '{"id":"absent","operation":"start"}\n'
+        '{"id":"null","operation":"start","phase":null}\n'
+        '{"id":"explicit","operation":"start","phase":"close"}\n'
+        '{"id":"stop","operation":"shutdown"}\n',
+    )
+
+    assert code == 0, responses
+    assert all(response["ok"] for response in responses)
+    trace = load_trace(record)
+    assert [entry.phase for entry in trace.entries] == ["intake", "intake", "close"]
+
+
+def test_worker_journey_records_an_alias_operation_under_the_canonical_name(
+    tmp_path, monkeypatch
+):
+    """``evaluate`` must record what the one-shot ``eval`` spelling records."""
+    from docassemble_simulator.execution import Evaluate
+    from docassemble_simulator.worker import Worker, operation_name
+
+    assert operation_name({"operation": "evaluate"}) == "eval"
+    assert _parse("eval", "x").command == "eval"
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+
+    alias_record = tmp_path / "alias.trace.jsonl"
+    canonical_record = tmp_path / "canonical.trace.jsonl"
+    args = _parse("start", "--record", str(canonical_record), "--json")
+
+    for path, spelling in ((alias_record, "evaluate"), (canonical_record, "eval")):
+        execution = _ScopedFakeExecution(
+            tmp_path,
+            _outcome(False, error=Failure(ErrorKind.EXECUTION, "no such variable")),
+            _outcome(True, _screen("ID main")),
+        )
+        worker = Worker(tmp_path, execution=execution)
+        observer = cli._worker_journey_recorder(args, tmp_path, worker)
+        code, responses = _serve_worker(
+            worker,
+            observer,
+            json.dumps(
+                {
+                    "id": "one",
+                    "operation": spelling,
+                    "expression": "missing_value",
+                    "record": str(path),
+                }
+            )
+            + "\n"
+            '{"id":"stop","operation":"shutdown"}\n',
+        )
+        assert code == 2
+        assert responses[0]["ok"] is False
+
+    alias_entry = load_trace(alias_record).entries[0]
+    canonical_entry = load_trace(canonical_record).entries[0]
+    assert alias_entry.operation == "eval"
+    assert alias_entry.intent == "eval"
+    assert (
+        alias_entry.intent
+        == cli._trace_operation_context(Evaluate("x"), "eval")["intent"]
+    )
+    assert alias_entry.as_dict() == canonical_entry.as_dict()

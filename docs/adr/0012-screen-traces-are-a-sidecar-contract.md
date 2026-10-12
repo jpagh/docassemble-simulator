@@ -61,6 +61,8 @@ operation; an activated replay does not save a partly replayed walk. Identity,
 field-fact, flow, and error verdicts are computed by pure functions in this
 module, while the CLI retains only execution and report orchestration.
 
+Issue #45 gives the persistent worker the same capture contract, without changing the sidecar or its schema. `worker` (and its `run`/`journey` aliases) accepts `--record PATH [--phase NAME]` as a journey-wide default, and each request may override either field with its own `record`/`phase`; an absent or `null` field means "use the worker default", and a non-string value is an input error. The recorded `operation` is the canonical one-shot command spelling, so an alias request (`evaluate`, `execute`, `variables`, `state-seed`) records what `eval`, `exec`, `vars`, and `seed` record. Capture stays an adapter concern: the observer is a generic callable passed to the worker's `serve`, `worker.py` imports nothing from the trace module, and protocol-only requests (`ping`, `reset`, `shutdown`, malformed frames, and non-object frames) are never recorded. A recording failure is a typed `input` response and a stderr diagnostic, exactly as the one-shot path turns the same failure into a typed `input` failure and exit 1, so a truncated journey trace cannot report success. The capture commands are therefore the one-shot `start`, `refresh`, `answer`, `seek`, and `exec` invocations plus the persistent `worker`/`run`/`journey` journeys; the persistent transport adds a capture command, not new record semantics.
+
 Issue #43 completes the boundary issue #38 implied. The recorded automatic
 group is a hard submission bound for replay: exhausting the recorded attempts
 observes the resulting outcome instead of falling back to ordinary unbounded

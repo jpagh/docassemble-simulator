@@ -221,9 +221,9 @@ def test_runtime_gate_falls_back_to_a_bounded_default_without_a_cpu_probe(tmp_pa
         env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "4 worker(s)" in result.stdout
+    assert "2 worker(s)" in result.stdout
     argv = args_log.read_text().splitlines()
-    assert argv[argv.index("-n") + 1] == "4"
+    assert argv[argv.index("-n") + 1] == "2"
 
 
 def test_runtime_gate_uses_sysctl_when_getconf_is_unavailable(tmp_path):

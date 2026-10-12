@@ -12,7 +12,9 @@
 # Runtime tests are safe to distribute because every test uses pytest's
 # per-test temporary workspace. The default follows the machine but stays
 # bounded at four workers, which measured well ahead of the old fixed default
-# of two; set DASIMULATOR_RUNTIME_WORKERS=1 for serial debugging.
+# of two; when neither CPU probe answers, it falls back to the old conservative
+# two instead of assuming a large machine. Set DASIMULATOR_RUNTIME_WORKERS=1
+# for serial debugging.
 #
 # usage: scripts/test-runtime [--modern PATH] [--legacy PATH] [pytest args...]
 set -euo pipefail
@@ -37,7 +39,11 @@ if [[ -n "${DASIMULATOR_RUNTIME_WORKERS:-}" ]]; then
   workers="$DASIMULATOR_RUNTIME_WORKERS"
 else
   cpu_count="$(detect_cpu_count)"
-  if [[ -n "$cpu_count" ]] && (( cpu_count < 4 )); then
+  if [[ -z "$cpu_count" ]]; then
+    # Neither getconf nor sysctl answered: stay conservative rather than
+    # assuming a large machine.
+    workers=2
+  elif (( cpu_count < 4 )); then
     workers="$cpu_count"
   else
     workers=4
@@ -46,7 +52,7 @@ fi
 
 if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]] || (( workers > 8 )); then
   echo "error: DASIMULATOR_RUNTIME_WORKERS must be an integer from 1 to 8 (got '$workers')" >&2
-  echo "       use 1 for serial execution; the default is min(4, CPU count)" >&2
+  echo "       use 1 for serial execution; the default is min(4, CPU count), or 2 when no CPU probe answers" >&2
   exit 2
 fi
 
