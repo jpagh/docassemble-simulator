@@ -608,6 +608,38 @@ class InterviewCatalog:
             return False
         return self._tree_signatures(record.module_paths) == record.module_signature
 
+    def ensure_current(self, identity: str | None = None) -> None:
+        """Reload the compiled program a caller is about to inspect.
+
+        :meth:`_compile`'s cache-hit path revalidates only an identity this
+        catalog compiled itself, but docassemble's compiled-interview cache is
+        process-global: a caller that compiles through its own fresh catalog
+        (the worker's ``check``/``questions``/``index`` requests, or a trace
+        replay's short-lived execution) can read an entry another catalog in
+        the same process recorded before the source changed. This seam runs
+        the same check for that caller. A watched identity that is still
+        current is left alone; a changed or never-watched one drops
+        docassemble's compile and the interview's workspace helper modules and
+        recompiles through this catalog.
+
+        The recompile records the watch the next caller compares against, so a
+        single edit costs one reload rather than one per request. A
+        recompilation failure is not raised here: the caller's own compile
+        path reports it as its typed error, and only a successful compile
+        re-establishes the watch. The seam belongs to the cached path
+        (``cache_compiled=True``); a caller without it keeps no watch and so
+        recompiles on every call.
+        """
+        selected = identity or self.identity
+        record = self._watches.get(selected)
+        if record is not None and self._source_current(selected):
+            return
+        self._reload_source(selected)
+        try:
+            self._compile(selected)
+        except Exception as error:  # noqa: BLE001 - the caller reports the typed error
+            logger.debug("reload check could not recompile %r: %s", selected, error)
+
     def _declared_module_names(self, interview) -> set[str]:
         """Fully-qualified names declared by the interview's import directives."""
         names: set[str] = set()

@@ -649,6 +649,18 @@ class InterviewExecution:
         with self._store.lock():
             self._store.reset()
 
+    def ensure_current(self, identity: str | None = None) -> None:
+        """Refresh the compiled interview a non-operation caller is about to read.
+
+        The worker's catalog and trace adapter requests compile outside an
+        execution operation, through their own catalog instances, so they ask
+        this execution to run the source reload check
+        (:meth:`InterviewCatalog.ensure_current`) before they compile. That
+        keeps this execution's catalog, which owns the worker's watches, the
+        process's record of what was compiled from which source.
+        """
+        self._catalog.ensure_current(identity)
+
     def _start(self):
         namespace = _fresh_namespace()
         with self._prepared_operation(namespace) as (interview, status):

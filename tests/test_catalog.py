@@ -538,6 +538,84 @@ def test_compiled_cache_reloads_when_source_disappears(tmp_path, monkeypatch, da
     assert len(calls) == 2
 
 
+def test_ensure_current_recompiles_an_unwatched_global_cache(
+    tmp_path, monkeypatch, da_stubs
+):
+    """An inspection must not read a compile this catalog never watched.
+
+    docassemble's compiled-interview cache is process-global, so a request that
+    compiles through a fresh catalog (a catalog inspection, or a trace replay's
+    short-lived execution) can find an entry recorded by another catalog in the
+    same process. Without a watch of its own this catalog cannot tell whether
+    that entry predates an edit.
+    """
+    source = _reload_workspace(tmp_path)
+    calls = _install_interview_cache(monkeypatch, source)
+    identity = "docassemble.pkg:data/questions/main.yml"
+    module = sys.modules["docassemble.base.interview_cache"]
+    stale = SimpleNamespace(questions_list=[], questions={}, default_language="en")
+    module.cache[identity] = {
+        "index": 1,
+        "source": SimpleNamespace(
+            filepath=str(source),
+            directory=str(source.parent),
+            get_modtime=lambda: source.stat().st_mtime,
+        ),
+        "interview": stale,
+    }
+    catalog = InterviewCatalog(tmp_path, identity, cache_compiled=True)
+
+    catalog.ensure_current()
+
+    # The unwatched global compile is dropped and replaced by a fresh compile.
+    assert len(calls) == 1
+    assert catalog._compile() is not stale
+    assert len(calls) == 1
+    # With a watch established, an unchanged source then stays warm.
+    catalog.ensure_current()
+    assert len(calls) == 1
+
+
+def test_ensure_current_reloads_a_changed_source(tmp_path, monkeypatch, da_stubs):
+    """A watched edit is reloaded before the caller inspects the program."""
+    source = _reload_workspace(tmp_path)
+    calls = _install_interview_cache(monkeypatch, source)
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+    first = catalog._compile()
+
+    source.write_text("---\nquestion: Second\nfields:\n  - Name: user_name\n")
+    os.utime(source, (0, 0))
+    catalog.ensure_current()
+
+    assert len(calls) == 2
+    assert catalog._compile() is not first
+    assert len(calls) == 2
+
+
+def test_execution_ensure_current_delegates_to_its_catalog(tmp_path, monkeypatch):
+    """The worker's execution exposes the refresh for its adapter requests."""
+    from docassemble_simulator import execution as execution_module
+    from docassemble_simulator.execution import InterviewExecution
+
+    calls = []
+
+    class FakeCatalog:
+        def __init__(self, root, selector=None, **kwargs):
+            self.identity = "docassemble.pkg:data/questions/main.yml"
+
+        def ensure_current(self, identity=None):
+            calls.append(identity)
+
+    monkeypatch.setattr(execution_module, "InterviewCatalog", FakeCatalog)
+    execution = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/main.yml")
+
+    execution.ensure_current("docassemble.other:data/questions/main.yml")
+
+    assert calls == ["docassemble.other:data/questions/main.yml"]
+
+
 def test_reload_evicts_declared_helper_modules(tmp_path, monkeypatch, da_stubs):
     source = _reload_workspace(tmp_path)
 
