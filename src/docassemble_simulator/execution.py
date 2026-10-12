@@ -39,6 +39,7 @@ from docassemble_simulator._files import (
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator.catalog import (
     CatalogFailure,
+    CompileFailure,
     InterviewCatalog,
     _provenance,
 )
@@ -494,12 +495,14 @@ class InterviewExecution:
         config_context: dict[str, Any] | None = None,
         session_directory: Path | None = None,
         cache_interview: bool = False,
+        compile_failure: CompileFailure | None = None,
     ):
         self.root = Path(root).resolve()
         self._catalog = InterviewCatalog(
             self.root,
             selector,
             cache_compiled=cache_interview,
+            compile_failure=compile_failure,
         )
         self._identity = self._catalog.identity
         self._store = StateStore(
@@ -649,7 +652,7 @@ class InterviewExecution:
         with self._store.lock():
             self._store.reset()
 
-    def ensure_current(self, identity: str | None = None) -> None:
+    def ensure_current(self, identity: str | None = None) -> CompileFailure | None:
         """Refresh the compiled interview a non-operation caller is about to read.
 
         The worker's catalog and trace adapter requests compile outside an
@@ -657,9 +660,12 @@ class InterviewExecution:
         this execution to run the source reload check
         (:meth:`InterviewCatalog.ensure_current`) before they compile. That
         keeps this execution's catalog, which owns the worker's watches, the
-        process's record of what was compiled from which source.
+        process's record of what was compiled from which source. A refresh that
+        could not compile returns its :class:`CompileFailure` for the caller to
+        hand to the catalog or execution that would otherwise compile the same
+        broken source again.
         """
-        self._catalog.ensure_current(identity)
+        return self._catalog.ensure_current(identity)
 
     def _start(self):
         namespace = _fresh_namespace()

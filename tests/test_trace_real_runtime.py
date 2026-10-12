@@ -1645,7 +1645,9 @@ def test_worker_trace_replay_sees_an_edit_between_requests(
     compiled-interview cache, which the recording operation left warm. The
     worker's own source watch is the only thing that can invalidate that entry,
     so without the refresh the replay re-runs the pre-edit program and reports
-    ``clean`` for a scenario the current source no longer produces.
+    ``clean`` for a scenario the current source no longer produces. A source
+    that no longer compiles at all must still produce the one-shot command's
+    divergence report, from the refresh's single failing compile.
     """
     label = family_python.label
     interpreter = family_python.interpreter
@@ -1674,5 +1676,20 @@ def test_worker_trace_replay_sees_an_edit_between_requests(
         assert replay["ok"] is False, (label, replay)
         assert replay["error"]["kind"] == "trace-mismatch", (label, replay)
         assert replay["error"]["details"]["clean"] is False, (label, replay)
+
+        # A source that no longer compiles is the same divergence the one-shot
+        # command reports: the failure surfaces through the replay comparison,
+        # not as a compile error of its own.
+        main.write_text("---\nquestion: [unterminated\n", encoding="utf-8")
+        _mark_source_changed(main)
+        code, cli_broken = _command(interpreter, root, "trace", "replay", str(record))
+        assert code == 2, (label, cli_broken)
+        broken = journey.request("trace-replay", golden=str(record))
+        assert broken["ok"] is False, (label, broken)
+        assert broken["error"]["kind"] == "trace-mismatch", (label, broken)
+        assert broken["error"]["details"] == cli_broken["error"]["details"], (
+            label,
+            broken,
+        )
     finally:
         journey.close()

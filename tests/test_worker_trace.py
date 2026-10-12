@@ -18,6 +18,7 @@ from worker_adapter_fakes import AdapterFakeExecution
 
 from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
+from docassemble_simulator.catalog import CompileFailure
 from docassemble_simulator.trace import (
     ComparePolicy,
     ScreenIdentity,
@@ -350,16 +351,21 @@ def test_trace_replay_worker_refreshes_the_source_before_replaying(
     A replay compiles through its own short-lived execution, which reads
     docassemble's process-global compiled-interview cache; the worker's own
     watch is the only thing that can invalidate that entry when the source
-    changed between two requests.
+    changed between two requests. A refresh that could not compile is handed to
+    that execution so the failing request pays one compile.
     """
     order = []
-    monkeypatch.setattr(
-        cli,
-        "_trace_replay_report",
-        lambda *args, **kwargs: order.append("replay") or _replay_report(True),
-    )
+    failure = CompileFailure(INTERVIEW, ValueError("broken interview"))
+
+    def replay(root, golden, **kwargs):
+        order.append(("replay", kwargs.get("compile_failure")))
+        return _replay_report(True)
+
+    monkeypatch.setattr(cli, "_trace_replay_report", replay)
     execution = SimpleNamespace(
-        ensure_current=lambda identity=None: order.append(("refresh", identity))
+        ensure_current=lambda identity=None: (
+            order.append(("refresh", identity)) or failure
+        )
     )
     worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW, execution=execution)
 
@@ -368,7 +374,7 @@ def test_trace_replay_worker_refreshes_the_source_before_replaying(
     )
 
     assert outcome.ok is True
-    assert order == [("refresh", INTERVIEW), "replay"]
+    assert order == [("refresh", INTERVIEW), ("replay", failure)]
 
 
 def test_trace_replay_worker_refreshes_the_requested_interview(monkeypatch, tmp_path):
@@ -555,12 +561,14 @@ def test_trace_replay_report_runs_in_a_temporary_session_directory(
     write_trace(golden, trace)
     original = golden.read_bytes()
     captured = {}
+    failure = CompileFailure(INTERVIEW, ValueError("broken interview"))
 
     class FakeExecution:
         def __init__(self, root, interview, **kwargs):
             captured["root"] = root
             captured["interview"] = interview
             captured["session_directory"] = kwargs["session_directory"]
+            captured["compile_failure"] = kwargs["compile_failure"]
 
         def run(self, operation):
             return SimpleNamespace(ok=True, result=trace.entries[0].screen, error=None)
@@ -572,11 +580,13 @@ def test_trace_replay_report_runs_in_a_temporary_session_directory(
         lambda root, interview, resolved_configuration=None: trace.metadata,
     )
 
-    report = cli._trace_replay_report(tmp_path, str(golden))
+    report = cli._trace_replay_report(tmp_path, str(golden), compile_failure=failure)
 
     assert report["clean"] is True
     assert captured["root"] == tmp_path
     assert captured["interview"] == INTERVIEW
+    # A worker refresh that already failed is handed to the replay execution.
+    assert captured["compile_failure"] is failure
     scope = captured["session_directory"]
     assert scope.parent.parent == tmp_path / ".simulator"
     assert scope.parent.name.startswith("trace-replay-")

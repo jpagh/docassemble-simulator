@@ -1673,7 +1673,8 @@ def test_worker_catalog_inspection_sees_an_edit_between_requests(
     The catalog requests compile through their own fresh catalog, so without the
     worker's source refresh they read the program the worker compiled before the
     edit: a stale listing, and a stale success where the current source no
-    longer compiles.
+    longer compiles. The broken-source envelope must still equal the one-shot
+    command's, so the refresh's failed compile is reused rather than replaced.
     """
     case = family_python
     label, interpreter = case.label, case.interpreter
@@ -1706,12 +1707,23 @@ def test_worker_catalog_inspection_sees_an_edit_between_requests(
         ], (label, after)
 
         # An edit that breaks compilation is the typed compile error, not a
-        # stale success against the program compiled before the edit.
+        # stale success against the program compiled before the edit. The
+        # worker's envelope is the one-shot command's, even though the refresh
+        # already paid for the failing compile.
         main.write_text("---\nquestion: [unterminated\n", encoding="utf-8")
         _mark_source_changed(main)
         check = journey.request("check")
         assert check["ok"] is False, (label, check)
         assert check["error"]["kind"] == "compile", (label, check)
+        cli_check = _run(
+            interpreter,
+            root,
+            "check",
+            "--interview",
+            interview,
+            expected_code=2,
+        )
+        assert check["error"] == cli_check["error"], (label, check)
     finally:
         journey.close()
 
