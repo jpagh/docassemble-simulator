@@ -206,6 +206,24 @@ the command uses a temporary isolated session. Interview/bootstrap output is
 redirected to stderr so stdout remains protocol-only. Timings are optional and
 remain in the protocol response.
 
+While a worker is running, editing the interview's source takes effect on the
+next operation. The worker checks the interview source file's timestamp and
+size once per operation and, when they changed, drops the compiled program,
+evicts the recompiled interview's declared `modules:`/`imports:` helpers from
+`sys.modules`, and recompiles — so renaming a screen or changing a helper is
+served without restarting the worker. An unchanged interview stays warm and is
+not recompiled. A reload never touches the Saved session; `reset` remains the
+explicit way to clear it, and a reload that makes the interview invalid reports
+the usual typed `compile` error with the session intact. Configuration is
+resolved once at worker startup and is **not** reloaded, so a configuration
+change still requires a restart. Templates are read at render time, so a
+template edit is visible to the next render without a reload. Helper-module
+edits are picked up when the interview source also changes; a module edit with
+no interview-source change is not detected and needs a reload trigger (an
+interview-source edit or a restart) — see ADR-0016. One-shot commands and any
+`cache_interview=False` caller compile fresh on every operation and are
+unchanged.
+
 `worker` (and its `run`/`journey` aliases) also accepts `--record PATH
 --phase NAME` to append every execution response's screen outcome to one trace
 sidecar, using the same adapter and format as the one-shot `--record` commands.

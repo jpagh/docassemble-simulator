@@ -1,8 +1,12 @@
 """Catalog provenance stays useful without exposing runtime code objects."""
 
 import json
+import os
+import sys
+import types
 from types import SimpleNamespace
 
+from docassemble_simulator import catalog as catalog_module
 from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
 from docassemble_simulator.catalog import InterviewCatalog
@@ -450,3 +454,125 @@ def test_public_catalog_reports_authored_provenance_without_runtime_block_text(
     for value in ("user.kind == 'a'", "user.kind == 'b'", "guard: none"):
         assert value in human
     assert "<code object" not in human
+
+
+def _reload_workspace(tmp_path):
+    questions = tmp_path / "docassemble" / "pkg" / "data" / "questions"
+    questions.mkdir(parents=True)
+    (tmp_path / "docassemble" / "pkg" / "__init__.py").write_text("")
+    source = questions / "main.yml"
+    source.write_text("---\nquestion: First\nfields:\n  - Name: user_name\n")
+    return source
+
+
+def _install_interview_cache(monkeypatch, source, interview_factory=None):
+    """A stand-in docassemble cache the reload seam can invalidate."""
+    module = types.ModuleType("docassemble.base.interview_cache")
+    module.cache = {}
+    calls = []
+
+    def get_interview(identity):
+        calls.append(identity)
+        interview = (
+            interview_factory()
+            if interview_factory is not None
+            else SimpleNamespace(questions_list=[], questions={}, default_language="en")
+        )
+        module.cache[identity] = {
+            "index": 1,
+            "source": SimpleNamespace(
+                filepath=str(source),
+                get_modtime=lambda: source.stat().st_mtime,
+            ),
+            "interview": interview,
+        }
+        return interview
+
+    module.get_interview = get_interview
+    module.clear_cache = lambda identity: module.cache.pop(identity, None)
+    monkeypatch.setitem(sys.modules, "docassemble.base.interview_cache", module)
+    return calls
+
+
+def test_compiled_cache_reuses_and_reloads_once_on_source_change(
+    tmp_path, monkeypatch, da_stubs
+):
+    source = _reload_workspace(tmp_path)
+    calls = _install_interview_cache(monkeypatch, source)
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+    source.write_text("---\nquestion: Second\nfields:\n  - Name: user_name\n")
+    # Make the change explicit; the check must not depend on wall-clock
+    # timestamp resolution to observe a rewrite.
+    os.utime(source, (0, 0))
+
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+    assert catalog._compile() is second
+    assert len(calls) == 2
+
+
+def test_compiled_cache_reloads_when_source_disappears(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    calls = _install_interview_cache(monkeypatch, source)
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    source.unlink()
+
+    # A missing source is treated as changed so recompilation can surface the
+    # typed error in the worker instead of serving the stale program.
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+
+
+def test_reload_evicts_declared_helper_modules(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+
+    def modules_interview():
+        question = SimpleNamespace(
+            question_type="modules",
+            package="docassemble.pkg",
+            module_list=["docassemble.pkg.helpers", ".relative"],
+        )
+        return SimpleNamespace(
+            questions_list=[question], questions={}, default_language="en"
+        )
+
+    calls = _install_interview_cache(monkeypatch, source, modules_interview)
+    for name in (
+        "docassemble.pkg.helpers",
+        "docassemble.pkg.helpers.sub",
+        "docassemble.pkg.relative",
+        "docassemble.other.helpers",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    invalidated = []
+    monkeypatch.setattr(
+        catalog_module.importlib, "invalidate_caches", lambda: invalidated.append(True)
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    catalog._compile()
+    source.write_text("---\nquestion: Second\nfields:\n  - Name: user_name\n")
+    os.utime(source, (0, 0))
+    catalog._compile()
+
+    assert len(calls) == 2
+    assert "docassemble.pkg.helpers" not in sys.modules
+    assert "docassemble.pkg.helpers.sub" not in sys.modules
+    assert "docassemble.pkg.relative" not in sys.modules
+    assert "docassemble.other.helpers" in sys.modules
+    assert invalidated == [True]
