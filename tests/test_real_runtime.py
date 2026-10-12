@@ -630,6 +630,15 @@ _RUNTIME_ABORT = "libc++abi: terminating due to uncaught exception"
 # so an unrelated native abort that merely carries the libc++abi prefix is
 # still an unexpected death.
 _RUNTIME_ABORT_LOCK = "recursive_mutex lock failed"
+# The complete known teardown line. It is matched as a whole so a prefixed,
+# suffixed, or otherwise contaminated line cannot qualify as the tolerated
+# wart; a new variant fails the test loudly with the stderr attached.
+_KNOWN_TEARDOWN_ABORT = (
+    _RUNTIME_ABORT
+    + " of type std::__1::system_error: "
+    + _RUNTIME_ABORT_LOCK
+    + ": Invalid argument"
+)
 
 
 def _signal_death(returncode) -> str:
@@ -816,10 +825,11 @@ class WorkerJourney:
         guarantee for a tolerated runtime wart: the journey declared the legacy
         family, the worker answered ``shutdown`` before it died, its return
         code is exactly ``-SIGABRT``, and its non-empty stderr consists only of
-        the known teardown signature (the libc++abi abort line carrying the
-        recursive-mutex failure). A modern-family worker, any other signal, an
-        abort before the shutdown answer, empty stderr, or the generic libc++abi
-        prefix without the mutex message is an unexpected death instead.
+        the exact known teardown line (the whole libc++abi abort message
+        carrying the recursive-mutex failure). A modern-family worker, any
+        other signal, an abort before the shutdown answer, empty stderr, a
+        prefixed or suffixed line, or the generic libc++abi prefix without the
+        mutex message is an unexpected death instead.
         """
         if self.family is not LEGACY:
             return False
@@ -830,9 +840,7 @@ class WorkerJourney:
         lines = [line for line in self._stderr if line.strip()]
         if not lines:
             return False
-        return all(
-            _RUNTIME_ABORT in line and _RUNTIME_ABORT_LOCK in line for line in lines
-        )
+        return all(line.strip() == _KNOWN_TEARDOWN_ABORT for line in lines)
 
     def failure_message(self, reason: str) -> str:
         return (
@@ -1164,12 +1172,6 @@ def test_worker_journey_close_flags_unexpected_stderr(family_python, real_worksp
 
 # The one known legacy teardown abort as the runtime writes it, including the
 # ``what()`` text libc++abi appends to its own prefix.
-_KNOWN_TEARDOWN_ABORT = (
-    "libc++abi: terminating due to uncaught exception of type "
-    "std::__1::system_error: recursive_mutex lock failed: Invalid argument"
-)
-
-
 def _fake_worker_interpreter(
     tmp_path, *, diagnostics=(), death_signal="ABRT", acknowledge=True
 ):
@@ -1233,6 +1235,38 @@ def test_worker_journey_exempts_the_known_legacy_teardown_abort(tmp_path):
             True,
             "SIGABRT",
             id="libcxxabi-line-without-the-mutex-signature",
+        ),
+        pytest.param(
+            LEGACY,
+            ("UNEXPECTED FAILURE " + _KNOWN_TEARDOWN_ABORT,),
+            "ABRT",
+            True,
+            "SIGABRT",
+            id="contaminated-prefix",
+        ),
+        pytest.param(
+            LEGACY,
+            (_KNOWN_TEARDOWN_ABORT + " unrelated trailing text",),
+            "ABRT",
+            True,
+            "SIGABRT",
+            id="contaminated-suffix",
+        ),
+        pytest.param(
+            LEGACY,
+            ("unexpected " + _RUNTIME_ABORT + " noise " + _RUNTIME_ABORT_LOCK,),
+            "ABRT",
+            True,
+            "SIGABRT",
+            id="unrelated-line-with-both-substrings",
+        ),
+        pytest.param(
+            LEGACY,
+            (_KNOWN_TEARDOWN_ABORT, "unexpected extra diagnostic"),
+            "ABRT",
+            True,
+            "SIGABRT",
+            id="exact-signature-plus-unrelated-line",
         ),
         pytest.param(
             LEGACY,
