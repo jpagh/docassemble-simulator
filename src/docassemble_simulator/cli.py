@@ -733,7 +733,8 @@ def _worker_journey_recorder(
     The destination comes from the request's optional ``record``/``phase``
     fields, falling back to the worker command's ``--record PATH --phase
     NAME`` defaults; an absent or ``null`` field means "use the worker
-    default", and any other non-string value is an input failure. Protocol-only
+    default", and any other non-string value is an input failure even when the
+    journey records nothing. Protocol-only
     requests are skipped, and the worker execution is only touched once a
     request actually asks to record. Recording failures are not caught here:
     ``serve`` isolates them into a typed non-ok response so a truncated trace
@@ -759,15 +760,18 @@ def _worker_journey_recorder(
         record = request.get("record") if "record" in request else None
         if record is None:
             record = getattr(args, "record", None)
-        if record is None:
-            return
-        if not isinstance(record, str) or not record.strip():
-            raise InputFailure("a journey record destination must be a path string")
+        # Both request fields are validated before the no-destination return: a
+        # non-string ``phase`` is an input error even in a journey that records
+        # nothing, exactly as the request/report documentation promises.
         phase = request.get("phase") if "phase" in request else None
         if phase is None:
             phase = getattr(args, "phase", None)
         if phase is not None and not isinstance(phase, str):
             raise InputFailure("a journey phase must be a string or null")
+        if record is None:
+            return
+        if not isinstance(record, str) or not record.strip():
+            raise InputFailure("a journey record destination must be a path string")
         # The recorded operation is the canonical one-shot command spelling, so
         # an alias request (``evaluate``) records what ``eval`` records.
         _record_execution(

@@ -557,6 +557,39 @@ def test_worker_journey_recorder_rejects_a_non_string_record_or_phase(
     assert [entry.operation for entry in trace.entries] == ["start"]
 
 
+def test_worker_journey_rejects_a_non_string_phase_without_a_destination(
+    tmp_path, monkeypatch
+):
+    """The phase contract holds even when the journey records nothing (#44)."""
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    args = _parse("start", "--json")
+    assert getattr(args, "record", None) is None
+    execution = _ScopedFakeExecution(
+        tmp_path,
+        _outcome(True, _screen("ID first")),
+        _outcome(True, _screen("ID second")),
+    )
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        '{"id":"phase","operation":"start","phase":7}\n'
+        '{"id":"start","operation":"start"}\n'
+        '{"id":"stop","operation":"shutdown"}\n',
+    )
+
+    assert code == 2
+    assert responses[0]["ok"] is False
+    assert responses[0]["error"]["kind"] == "input"
+    assert "phase" in responses[0]["error"]["message"]
+    assert responses[1]["ok"] is True
+    assert responses[2]["result"]["kind"] == "shutdown"
+
+
 def test_worker_journey_surfaces_a_recording_failure_as_a_typed_response(
     tmp_path, monkeypatch
 ):
@@ -596,6 +629,58 @@ def test_worker_journey_surfaces_a_recording_failure_as_a_typed_response(
     assert responses[1]["ok"] is True
     assert responses[2]["result"]["kind"] == "shutdown"
     # The failed operation is not recorded as a success anywhere.
+    assert [entry.operation for entry in load_trace(record).entries] == ["status"]
+
+
+def test_worker_journey_keeps_a_failed_operation_when_recording_also_fails(
+    tmp_path, monkeypatch
+):
+    """A recording failure must not hide the operation's own failure (#44).
+
+    The failing start cannot be recorded, but the client still sees the
+    operation's ``execution`` error rather than only the recording error; the
+    recording failure rides along as a typed diagnostic.
+    """
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "journey.trace.jsonl"
+    missing = tmp_path / "missing" / "journey.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
+    execution = _ScopedFakeExecution(
+        tmp_path,
+        _outcome(False, error=Failure(ErrorKind.EXECUTION, "no such variable")),
+        # The failed operation's recording probes the unchanged active screen
+        # before it appends and then fails on the uncreatable destination.
+        _outcome(True, _screen("ID unchanged")),
+        _outcome(True, _screen("ID second")),
+    )
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        json.dumps({"id": "start", "operation": "start", "record": str(missing)}) + "\n"
+        '{"id":"status","operation":"status"}\n'
+        '{"id":"stop","operation":"shutdown"}\n',
+    )
+
+    assert code == 2
+    assert responses[0]["ok"] is False
+    assert responses[0]["error"]["kind"] == "execution"
+    assert responses[0]["error"]["message"] == "no such variable"
+    recording = [
+        event
+        for event in responses[0].get("diagnostics", ())
+        if event["kind"] == "recording-failure"
+    ]
+    assert len(recording) == 1
+    assert str(missing) in recording[0]["message"]
+    assert not missing.exists()
+    assert responses[1]["ok"] is True
+    assert responses[2]["result"]["kind"] == "shutdown"
+    # The failed operation is still not recorded as a success anywhere.
     assert [entry.operation for entry in load_trace(record).entries] == ["status"]
 
 

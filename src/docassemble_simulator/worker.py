@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TextIO
 
+from docassemble_simulator._diagnostics import Diagnostic
 from docassemble_simulator._outcomes import ErrorKind
 from docassemble_simulator._timeouts import OperationTimeout
 from docassemble_simulator.execution import (
@@ -419,6 +420,38 @@ class Worker:
             )
 
 
+def _recording_failure(
+    worker: Worker, request: Any, response: dict[str, Any], error: Exception
+) -> dict[str, Any]:
+    """The envelope to answer with when the observer could not record.
+
+    Recording is part of the command contract, so an otherwise ``ok``
+    response becomes the typed ``input`` failure the one-shot CLI reports. A
+    response that already failed keeps its error kind, message, details,
+    diagnostics, and timing; its recording failure is attached as a
+    ``recording-failure`` diagnostic (whose ``details`` carry
+    ``error_kind: input``) because replacing the envelope would erase what the
+    operation actually did.
+    """
+    if not response.get("ok", False):
+        diagnostics = list(response.get("diagnostics") or ())
+        diagnostics.append(
+            _jsonable(
+                Diagnostic(
+                    "recording-failure",
+                    str(error),
+                    {"error_kind": str(ErrorKind.INPUT)},
+                )
+            )
+        )
+        response["diagnostics"] = diagnostics
+        return response
+    return worker._response(
+        request.get("id") if isinstance(request, dict) else None,
+        error=_failure(ErrorKind.INPUT, str(error)),
+    )
+
+
 def serve(
     worker: Worker,
     input_stream: TextIO = sys.stdin,
@@ -433,8 +466,11 @@ def serve(
     traces; malformed requests never reach it.
 
     An observer failure is isolated, never fatal: it is logged to stderr and
-    the response for that request becomes a typed ``input`` failure, the same
-    kind the one-shot CLI reports for a recording failure.  The stream keeps
+    the response for that request reflects it. A response that was ``ok``
+    becomes the typed ``input`` failure the one-shot CLI reports, because
+    recording is part of the command contract. A response that already failed
+    keeps its own error and gains a typed ``recording-failure`` diagnostic, so
+    a recording failure never erases the operation's result. The stream keeps
     its request/response pairing and keeps answering afterwards.
     """
     failed = False
@@ -463,10 +499,7 @@ def serve(
                             f"worker observer failed: {type(error).__name__}: {error}",
                             file=sys.stderr,
                         )
-                        response = worker._response(
-                            request.get("id") if isinstance(request, dict) else None,
-                            error=_failure(ErrorKind.INPUT, str(error)),
-                        )
+                        response = _recording_failure(worker, request, response, error)
             failed = failed or not response.get("ok", False)
             output_stream.write(
                 json.dumps(response, separators=(",", ":"), default=str) + "\n"
