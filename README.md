@@ -326,6 +326,49 @@ worker's saved namespace read-only through the existing explanation operation
 missing `why` variable arrives as the typed `input`/`compile` error the
 one-shot command reports.
 
+A worker also serves `trace compare` and `trace replay`, so an agent can hold
+one warm worker for a record → change → replay loop:
+
+```sh
+printf '%s\n' \
+  '{"operation":"trace-compare","expected":"golden.trace.jsonl","actual":"run.trace.jsonl"}' \
+  '{"operation":"trace-compare","expected":"golden.trace.jsonl","actual":"run.trace.jsonl","order":"phased","phases":["intake","close"],"exceptions":"exceptions.toml"}' \
+  '{"operation":"trace-replay","golden":"golden.trace.jsonl"}' \
+  '{"operation":"trace-replay","golden":"golden.trace.jsonl","overrides":["2.user_name=Bob"]}' \
+  '{"operation":"shutdown"}' \
+  | sim --root ./my-project run
+```
+
+The `trace-compare` request mirrors `sim trace compare`: `expected` and
+`actual` (required sidecar paths), `order` (`ordered` by default, or
+`unordered`/`phased`), `missing`/`extra` (`strict` by default, or `allow`),
+`full_text`, `phases` (an array or comma-separated string), and an optional
+`exceptions` TOML path. It is read-only — the worker has no `--update` path and
+never writes a golden. For the same sidecars and policy the response `result`
+is the `sim trace compare --json` result, and a mismatch is the typed
+`trace-mismatch` error whose `details` are that same report.
+
+The `trace-replay` request mirrors `sim trace replay`: `golden` (required),
+`overrides` (a `STEP.FIELD=VALUE` array, or a single `override` string), and an
+optional `interview` (it defaults to the worker's own interview, so a golden
+for another interview is rejected). The replay runs against its own temporary
+session directory, so it never reads or writes the worker's Saved session and
+never writes the golden; a divergent activated walk leaves no durable session
+behind. The response `result` is the `sim trace replay --json` result
+(`clean`, `steps`, `first_divergence`, `counts`), and a divergence is the typed
+`trace-mismatch` error whose `details` are that same report.
+
+Replaying through a warm worker reuses the interview the journey already
+compiled, because docassemble's compiled-interview cache is process-global and
+the replay's short-lived execution reads it rather than recompiling. On the
+`da110` lane a measured replay of a recorded default/auto/validation scenario
+takes ~15 ms once the worker is warm, against ~3 s for a fresh
+`sim trace replay` process whose cost is dominated by interpreter startup and
+bootstrap. The first trace request into a worker that has not compiled the
+interview yet pays that one-time compile inside the replay (~0.1 s for the
+same scenario). Replay is still one execution per request: it does not reuse a
+previous replay's working state.
+
 The Python client uses the same protocol and lifecycle:
 
 ```python

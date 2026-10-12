@@ -1471,3 +1471,129 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
     assert observed["divergence"]["phase"] == "early-end"
     assert observed["before"]["session_exists"] is False
     assert observed["after"]["session_exists"] is False
+
+
+def _record_replay_scenario(journey, record):
+    """Record the linear default/auto/validation scenario both transports replay."""
+    assert _record(journey, "start", record)["ok"]
+    assert _record(journey, "answer", record, defaults=True)["ok"]
+    for variable in ("optional_one", "optional_two"):
+        assert _record(
+            journey, "seek", record, variable=variable, auto=True, activate=True
+        )["ok"]
+    assert _record(
+        journey, "seek", record, variable="target_value", auto=True, activate=True
+    )["ok"]
+    assert not _record(journey, "answer", record, assignments=["target_value=bad"])[
+        "ok"
+    ]
+    assert _record(journey, "answer", record, assignments=["target_value=good"])["ok"]
+
+
+def test_worker_trace_compare_and_replay_match_the_cli(
+    family_python,  # noqa: F811
+    tmp_path,
+    worker_journey,  # noqa: F811
+):
+    """A warm worker returns the ``sim trace compare``/``replay --json`` report.
+
+    Both reports are produced by the same seams as the one-shot CLI, so the
+    parity assertion is exact JSON equality: a matching and a mismatching
+    compare, a clean replay, an override divergence, and a metadata mismatch
+    that stays a typed input error. The replay and its ``trace-replay`` request
+    never touch the worker's Saved session or write the golden.
+    """
+    interpreter = family_python.interpreter
+    root = _write_interview(tmp_path / "parity", REPLAY_INTERVIEW)
+    record = root / "scenario.trace.jsonl"
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
+    )
+    _record_replay_scenario(journey, record)
+    golden = load_trace(record)
+    lines = record.read_text(encoding="utf-8").splitlines()
+    golden_before = record.read_bytes()
+    sessions_before = _saved_session_files(root)
+
+    # A matching compare is byte-for-byte the CLI's report.
+    code, cli_compare = _command(
+        interpreter, root, "trace", "compare", str(record), str(record)
+    )
+    assert code == 0, cli_compare
+    worker_compare = journey.request(
+        "trace-compare", expected=str(record), actual=str(record)
+    )
+    assert worker_compare["ok"] is True, worker_compare
+    assert worker_compare["result"] == cli_compare["result"]
+
+    # A truncated trace is the same typed mismatch through the worker.
+    truncated = root / "truncated.trace.jsonl"
+    truncated.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")
+    code, cli_compare_mismatch = _command(
+        interpreter, root, "trace", "compare", str(record), str(truncated)
+    )
+    assert code == 2, cli_compare_mismatch
+    worker_compare_mismatch = journey.request(
+        "trace-compare", expected=str(record), actual=str(truncated)
+    )
+    assert worker_compare_mismatch["ok"] is False, worker_compare_mismatch
+    assert worker_compare_mismatch["error"]["kind"] == "trace-mismatch"
+    assert (
+        worker_compare_mismatch["error"]["details"]
+        == cli_compare_mismatch["error"]["details"]
+    )
+
+    # A clean replay through the warm worker is the CLI's report.
+    code, cli_replay = _command(interpreter, root, "trace", "replay", str(record))
+    assert code == 0, cli_replay
+    worker_replay = journey.request("trace-replay", golden=str(record))
+    assert worker_replay["ok"] is True, worker_replay
+    assert worker_replay["result"] == cli_replay["result"]
+
+    # An override divergence is the same typed replay report.
+    good = next(
+        entry
+        for entry in golden.entries
+        if entry.operation == "answer" and entry.submitted.get("target_value") == "good"
+    )
+    override = f"{good.seq}.target_value=bad"
+    code, cli_divergence = _command(
+        interpreter,
+        root,
+        "trace",
+        "replay",
+        str(record),
+        "--override",
+        override,
+    )
+    assert code == 2, cli_divergence
+    worker_divergence = journey.request(
+        "trace-replay", golden=str(record), overrides=[override]
+    )
+    assert worker_divergence["ok"] is False, worker_divergence
+    assert worker_divergence["error"]["kind"] == "trace-mismatch"
+    assert worker_divergence["error"]["details"] == cli_divergence["error"]["details"]
+
+    # A metadata mismatch stays the same typed input error.
+    mismatch = root / "mismatch.trace.jsonl"
+    metadata = json.loads(lines[0])
+    metadata["config_fingerprint"] = "not-the-recorded-config"
+    mismatch.write_text(
+        "\n".join([json.dumps(metadata, sort_keys=True), *lines[1:]]) + "\n",
+        encoding="utf-8",
+    )
+    code, cli_input = _command(interpreter, root, "trace", "replay", str(mismatch))
+    assert code == 1, cli_input
+    worker_input = journey.request("trace-replay", golden=str(mismatch))
+    assert worker_input["ok"] is False, worker_input
+    assert worker_input["error"]["kind"] == "input"
+    assert worker_input["error"]["message"] == cli_input["error"]["message"]
+
+    # Neither the golden nor the worker's Saved session changed, and the
+    # replay's own temporary session directory is gone afterwards.
+    assert record.read_bytes() == golden_before
+    assert _saved_session_files(root) == sessions_before
+    assert list((root / ".simulator").glob("trace-replay-*")) == []
