@@ -54,6 +54,17 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
     return bin_dir, args_log, env_log
 
 
+def _fake_cpu_probe(
+    bin_dir: Path, name: str, output: str = "", *, status: int = 0
+) -> None:
+    """Write a controlled ``getconf``/``sysctl`` substitute."""
+    body = "#!/usr/bin/env bash\n"
+    if output:
+        body += f"printf '%s\\n' \"{output}\"\n"
+    body += f"exit {status}\n"
+    write_executable(bin_dir / name, body)
+
+
 def _run_gate(
     tmp_path: Path,
     *,
@@ -61,7 +72,14 @@ def _run_gate(
     legacy: Path,
     extra_args: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
+    workers: str | None = "2",
 ) -> subprocess.CompletedProcess:
+    environment = {**os.environ}
+    if workers is None:
+        environment.pop("DASIMULATOR_RUNTIME_WORKERS", None)
+    else:
+        environment["DASIMULATOR_RUNTIME_WORKERS"] = workers
+    environment.update(env or {})
     return subprocess.run(
         [
             "bash",
@@ -73,11 +91,7 @@ def _run_gate(
             *extra_args,
         ],
         cwd=PROJECT,
-        env={
-            **os.environ,
-            "DASIMULATOR_RUNTIME_WORKERS": "2",
-            **(env or {}),
-        },
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -142,6 +156,7 @@ def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, versi
     argv = args_log.read_text().splitlines()
     assert argv[0] == "run"
     assert argv[1] == "pytest"
+    assert "--durations=15" in argv
     assert "-m" in argv
     selection = argv[argv.index("-m") + 1]
     assert selection == "real_runtime and not corpus"
@@ -154,6 +169,80 @@ def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, versi
     assert recorded["modern"] == str(modern)
     assert recorded["legacy"] == str(legacy)
     assert recorded["gate"] == "1"
+
+
+def test_runtime_gate_sizes_workers_to_the_machine(tmp_path):
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    _fake_cpu_probe(bin_dir, "getconf", "16")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        workers=None,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "4 worker(s)" in result.stdout
+    argv = args_log.read_text().splitlines()
+    assert argv[argv.index("-n") + 1] == "4"
+
+
+def test_runtime_gate_scales_down_with_a_small_machine(tmp_path):
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    _fake_cpu_probe(bin_dir, "getconf", "2")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        workers=None,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 worker(s)" in result.stdout
+    argv = args_log.read_text().splitlines()
+    assert argv[argv.index("-n") + 1] == "2"
+
+
+def test_runtime_gate_falls_back_to_a_bounded_default_without_a_cpu_probe(tmp_path):
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    _fake_cpu_probe(bin_dir, "getconf", status=1)
+    _fake_cpu_probe(bin_dir, "sysctl", status=1)
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        workers=None,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "4 worker(s)" in result.stdout
+    argv = args_log.read_text().splitlines()
+    assert argv[argv.index("-n") + 1] == "4"
+
+
+def test_runtime_gate_uses_sysctl_when_getconf_is_unavailable(tmp_path):
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    _fake_cpu_probe(bin_dir, "getconf", status=1)
+    _fake_cpu_probe(bin_dir, "sysctl", "3")
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        workers=None,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "3 worker(s)" in result.stdout
+    argv = args_log.read_text().splitlines()
+    assert argv[argv.index("-n") + 1] == "3"
 
 
 def test_runtime_gate_supports_serial_debugging(tmp_path):

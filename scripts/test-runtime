@@ -10,8 +10,9 @@
 # green run when a family contributed no passing coverage.
 #
 # Runtime tests are safe to distribute because every test uses pytest's
-# per-test temporary workspace. The default is deliberately bounded rather
-# than CPU-sized; set DASIMULATOR_RUNTIME_WORKERS=1 for serial debugging.
+# per-test temporary workspace. The default follows the machine but stays
+# bounded at four workers, which measured well ahead of the old fixed default
+# of two; set DASIMULATOR_RUNTIME_WORKERS=1 for serial debugging.
 #
 # usage: scripts/test-runtime [--modern PATH] [--legacy PATH] [pytest args...]
 set -euo pipefail
@@ -20,11 +21,32 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 modern="$repo_root/.venv-da110/bin/python"
 legacy="$repo_root/.venv-da19/bin/python"
-workers="${DASIMULATOR_RUNTIME_WORKERS:-2}"
+
+detect_cpu_count() {
+  local detected=""
+  detected="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+  if ! [[ "$detected" =~ ^[1-9][0-9]*$ ]]; then
+    detected="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+  fi
+  if [[ "$detected" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$detected"
+  fi
+}
+
+if [[ -n "${DASIMULATOR_RUNTIME_WORKERS:-}" ]]; then
+  workers="$DASIMULATOR_RUNTIME_WORKERS"
+else
+  cpu_count="$(detect_cpu_count)"
+  if [[ -n "$cpu_count" ]] && (( cpu_count < 4 )); then
+    workers="$cpu_count"
+  else
+    workers=4
+  fi
+fi
 
 if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]] || (( workers > 8 )); then
   echo "error: DASIMULATOR_RUNTIME_WORKERS must be an integer from 1 to 8 (got '$workers')" >&2
-  echo "       use 1 for serial execution; the default is 2" >&2
+  echo "       use 1 for serial execution; the default is min(4, CPU count)" >&2
   exit 2
 fi
 
@@ -64,7 +86,7 @@ export DASIMULATOR_RUNTIME_GATE=1
 
 cd "$repo_root"
 echo "runtime gate: selecting 'real_runtime and not corpus' with $workers worker(s)"
-pytest_args=(-q)
+pytest_args=(--durations=15 -q)
 if (( workers > 1 )); then
   pytest_args+=(-n "$workers")
 fi
