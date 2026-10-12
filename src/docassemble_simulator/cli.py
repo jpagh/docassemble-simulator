@@ -11,7 +11,7 @@ import textwrap
 from collections import Counter
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stdout
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -275,10 +275,10 @@ def _configured_bindings(config, template, command_bindings):
     return tuple((str(name), str(expression)) for name, expression in merged.items())
 
 
-def cmd_info(args, root):
+def _info_result(root, config, args):
+    """The ``sim info --json`` result for a workspace and effective config."""
     from docassemble_simulator.catalog import list_packages
 
-    config = getattr(args, "_simulator_config", {})
     data = {
         "root": str(root),
         "packages": list_packages(root),
@@ -310,102 +310,59 @@ def cmd_info(args, root):
         "session_persistence": "disabled (no server database substituted)",
     }
     data["runtime_compatibility"] = compatibility_report()
-    _emit(_envelope("info", data), args.json)
+    return data
+
+
+def cmd_info(args, root):
+    config = getattr(args, "_simulator_config", {})
+    _emit(_envelope("info", _info_result(root, config, args)), args.json)
     return 0
 
 
-def cmd_config(args, root):
-    config = getattr(args, "_simulator_config", {})
+def _config_result(root, config, args):
+    """The ``sim config --json`` result for a workspace and effective config."""
     report = _config_report(root, config, args)
     effective = dict(DOCASSEMBLE_DEFAULTS)
     deep_merge(effective, pass_through_config(config))
     report["effective"] = redact_config(effective)
     report["overrides"] = redact_config(config)
     report["source"] = "defaults plus discovered/--config overrides"
-    _emit(_envelope("config", report), args.json)
+    return report
+
+
+def cmd_config(args, root):
+    config = getattr(args, "_simulator_config", {})
+    _emit(_envelope("config", _config_result(root, config, args)), args.json)
     return 0
 
 
 def cmd_catalog(args, root):
-    from docassemble_simulator.catalog import CatalogFailure, InterviewCatalog
-    from docassemble_simulator.execution import ExplainResolution
+    from docassemble_simulator.catalog import InterviewCatalog
 
     if args.command == "why":
-        outcome = _execution(args, root).run(ExplainResolution(args.variable))
-        if not outcome.ok:
-            _emit(
-                _envelope(
-                    args.command,
-                    error=outcome.error,
-                    diagnostics=outcome.diagnostics,
-                ),
-                args.json,
-            )
-            return _exit_for_error(outcome.error.kind)
+        catalog = None
+        execution = _execution(args, root)
+        variable = args.variable
+        var = None
     else:
         catalog = InterviewCatalog(root, args.interview)
-        try:
-            if args.command == "check":
-                outcome = catalog.check()
-            elif args.command == "questions":
-                outcome = catalog.questions(args.var)
-            else:
-                outcome = catalog.index(args.var)
-        except AssemblyLineCompatibilityError as error:
-            _emit(
-                _envelope(
-                    args.command,
-                    error=Failure(
-                        ErrorKind.RUNTIME_COMPATIBILITY, str(error), error.details
-                    ),
-                ),
-                args.json,
-            )
-            return _exit_for_error(ErrorKind.RUNTIME_COMPATIBILITY)
-        except CatalogFailure as error:
-            _emit(
-                _envelope(
-                    args.command,
-                    error=Failure(ErrorKind.COMPILE, str(error), {}),
-                ),
-                args.json,
-            )
-            return 2
-    result = outcome.result | (
-        {"interview": getattr(outcome, "interview", None)}
-        if getattr(outcome, "interview", None)
-        else {}
+        execution = None
+        variable = None
+        var = getattr(args, "var", None)
+    built = _catalog_payload(
+        args.command,
+        catalog=catalog,
+        execution=execution,
+        variable=variable,
+        var=var,
+        strict=bool(getattr(args, "strict", False)),
     )
-    ok = not (
-        (args.command == "check" and result["failures"])
-        or (
-            args.command == "check"
-            and args.strict
-            and result.get("totals", {}).get("duplicate_ids", 0)
-        )
-        or (args.command == "why" and args.strict and result["conflict"])
-    )
-    failure_kind = ErrorKind.COMPILE
-    failure_message = "one or more interviews failed to compile"
-    if ok:
-        payload = _envelope(args.command, result)
-    else:
-        if args.command == "why":
-            failure_kind = ErrorKind.RESOLUTION_CONFLICT
-            failure_message = "variable resolution conflict found"
-        elif not result["failures"] and args.strict:
-            failure_kind = ErrorKind.DUPLICATE_ID
-            failure_message = "duplicate explicit question ids found"
-        payload = _envelope(
-            args.command,
-            error=Failure(failure_kind, failure_message, result),
-        )
-    _emit(payload, args.json)
-    if args.command == "check" and not args.json:
-        totals = result.get("totals") or {
-            "checked": result.get("checked", 0),
-            "ok": result.get("checked", 0) - result.get("failures", 0),
-            "failed": result.get("failures", 0),
+    _emit(built.envelope, args.json)
+    if args.command == "check" and not args.json and built.result is not None:
+        totals = built.result.get("totals") or {
+            "checked": built.result.get("checked", 0),
+            "ok": built.result.get("checked", 0) - built.result.get("failures", 0),
+            "failed": built.result.get("failures", 0),
             "duplicate_ids": 0,
         }
         print(
@@ -413,7 +370,120 @@ def cmd_catalog(args, root):
             f"ok: {totals['ok']}  failures: {totals['failed']}  "
             f"duplicate ids: {totals.get('duplicate_ids', 0)}"
         )
-    return 0 if ok else _exit_for_error(failure_kind)
+    return built.exit_code
+
+
+@dataclass(frozen=True)
+class _CatalogPayload:
+    """A catalog command's ``--json`` envelope, exit code, and result.
+
+    ``result`` is the computed catalog result once the command reached its
+    reporting stage, and ``None`` when a raising catalog produced the error,
+    so the human ``check`` totals are only printed for a computed result.
+    """
+
+    envelope: dict[str, Any]
+    exit_code: int
+    result: dict[str, Any] | None
+
+
+def _catalog_result(outcome):
+    """The public catalog result with its interview identity when it has one."""
+    result = outcome.result
+    interview = getattr(outcome, "interview", None)
+    if interview:
+        result = result | {"interview": interview}
+    return result
+
+
+def _catalog_failure(command, result, strict):
+    """The typed failure a catalog result reports, or ``None`` when it passes."""
+    if command == "check" and result["failures"]:
+        return Failure(
+            ErrorKind.COMPILE,
+            "one or more interviews failed to compile",
+            result,
+        )
+    if (
+        command == "check"
+        and strict
+        and result.get("totals", {}).get("duplicate_ids", 0)
+    ):
+        return Failure(
+            ErrorKind.DUPLICATE_ID,
+            "duplicate explicit question ids found",
+            result,
+        )
+    if command == "why" and strict and result["conflict"]:
+        return Failure(
+            ErrorKind.RESOLUTION_CONFLICT,
+            "variable resolution conflict found",
+            result,
+        )
+    return None
+
+
+def _catalog_payload(command, *, catalog, execution, variable, var, strict):
+    """Build one read-only catalog command's envelope without emitting it.
+
+    Shared by :func:`cmd_catalog` and the worker's catalog adapter so both
+    transports return the same ``result``/``error`` for the same project.
+    ``catalog``/``execution`` let the persistent worker reuse its own compiled
+    interview and saved namespace: ``execution`` serves ``why`` (read-only
+    through ``ExplainResolution``) and ``catalog`` serves the listings/check.
+    """
+    from docassemble_simulator.catalog import CatalogFailure
+    from docassemble_simulator.execution import ExplainResolution
+
+    if command == "why":
+        outcome = execution.run(ExplainResolution(variable))
+        if not outcome.ok:
+            return _CatalogPayload(
+                _envelope(
+                    command,
+                    error=outcome.error,
+                    diagnostics=outcome.diagnostics,
+                ),
+                _exit_for_error(outcome.error.kind),
+                None,
+            )
+    else:
+        try:
+            if command == "check":
+                outcome = catalog.check()
+            elif command == "questions":
+                outcome = catalog.questions(var)
+            else:
+                outcome = catalog.index(var)
+        except AssemblyLineCompatibilityError as error:
+            return _CatalogPayload(
+                _envelope(
+                    command,
+                    error=Failure(
+                        ErrorKind.RUNTIME_COMPATIBILITY, str(error), error.details
+                    ),
+                ),
+                _exit_for_error(ErrorKind.RUNTIME_COMPATIBILITY),
+                None,
+            )
+        except CatalogFailure as error:
+            return _CatalogPayload(
+                _envelope(
+                    command,
+                    error=Failure(ErrorKind.COMPILE, str(error), {}),
+                ),
+                2,
+                None,
+            )
+    result = _catalog_result(outcome)
+    failure = _catalog_failure(command, result, strict)
+    if failure is None:
+        return _CatalogPayload(_envelope(command, result), 0, result)
+    return _CatalogPayload(
+        _envelope(command, error=failure),
+        _exit_for_error(failure.kind),
+        result,
+    )
 
 
 def cmd_execution(args, root):
@@ -577,13 +647,107 @@ def _worker_request_handlers(args):
     """The non-execution requests the worker command serves.
 
     ``worker.py`` stays an operation-only server (ADR-0015); the command
-    adapter owns the ``render`` request and maps it onto the same
-    ``InterviewRenderer``/``RenderRequest`` path as ``sim render``.
+    adapter owns the ``render`` request, the read-only catalog/project
+    requests, and the trace requests, mapping each onto the same payload its
+    one-shot command builds.
     """
     return {
         "render": lambda worker, request: _render_worker_request(args, worker, request),
+        **_catalog_worker_handlers(args),
         **_trace_worker_handlers(args),
     }
+
+
+def _catalog_worker_handlers(args):
+    """The read-only catalog/project requests the worker command serves.
+
+    Each request returns the ``sim <command> --json`` payload for the worker's
+    project, so an agent can switch transports without changing its parsing.
+    None of them creates or mutates a Saved session: ``questions``/``index``/
+    ``check`` only compile, ``info``/``config`` never touch session state, and
+    ``why`` reads the worker's saved namespace through ``ExplainResolution``
+    without committing (and stays a static read-only report when there is no
+    session).
+    """
+
+    def catalog(command):
+        return lambda worker, request: _catalog_worker_request(worker, command, request)
+
+    return {
+        "questions": catalog("questions"),
+        "index": catalog("index"),
+        "check": catalog("check"),
+        "why": catalog("why"),
+        "info": lambda worker, request: _project_worker_request(
+            args, worker, "info", request
+        ),
+        "config": lambda worker, request: _project_worker_request(
+            args, worker, "config", request
+        ),
+    }
+
+
+def _catalog_worker_request(worker, command, request):
+    """Map one worker catalog request onto the shared catalog payload."""
+    from docassemble_simulator.catalog import InterviewCatalog
+
+    variable, var, strict = _catalog_worker_fields(command, request)
+    built = _catalog_payload(
+        command,
+        catalog=(
+            None if command == "why" else InterviewCatalog(worker.root, worker.identity)
+        ),
+        execution=worker.execution if command == "why" else None,
+        variable=variable,
+        var=var,
+        strict=strict,
+    )
+    return _catalog_worker_outcome(built.envelope)
+
+
+def _catalog_worker_fields(command, request):
+    """Decode a catalog request's optional fields into CLI command inputs."""
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    variable = None
+    if command == "why":
+        variable = request.get("variable")
+        if not isinstance(variable, str) or not variable.strip():
+            raise WorkerProtocolError("why requires a variable")
+    var = None
+    if command in {"questions", "index"}:
+        var = request.get("var")
+        if var is not None and not isinstance(var, str):
+            raise WorkerProtocolError(f"{command} var must be a string")
+    strict = False
+    if command in {"check", "why"}:
+        strict = request.get("strict", False)
+        if not isinstance(strict, bool):
+            raise WorkerProtocolError(f"{command} strict must be a boolean")
+    return variable, var, strict
+
+
+def _project_worker_request(args, worker, command, request):
+    """Map one worker ``info``/``config`` request onto the shared payload."""
+    config = getattr(args, "_simulator_config", {})
+    result = (
+        _info_result(worker.root, config, args)
+        if command == "info"
+        else _config_result(worker.root, config, args)
+    )
+    return Outcome(True, _clean(result))
+
+
+def _catalog_worker_outcome(envelope):
+    """Convert a one-shot catalog envelope into the worker's typed Outcome."""
+    if envelope["ok"]:
+        return Outcome(True, _clean(envelope["result"]))
+    error = envelope["error"]
+    return Outcome(
+        False,
+        error=Failure(error["kind"], error["message"], error.get("details") or {}),
+        diagnostics=tuple(_clean(envelope.get("diagnostics") or ())),
+    )
 
 
 def _render_worker_request(args, worker, request):

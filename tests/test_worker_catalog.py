@@ -1,0 +1,281 @@
+"""The command adapter's read-only catalog/project requests for the worker.
+
+``worker.py`` stays an operation-only server; each read-only catalog/project
+request is mapped by ``cli``'s command adapter onto the same payload the
+one-shot ``sim <command> --json`` builds, and served through the worker's
+generic handler seam. These tests pin dispatch, payload parity (including the
+``--json`` None-dropping cleaning), and the error shapes without a real
+runtime.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from docassemble_simulator import catalog as catalog_module
+from docassemble_simulator import cli
+from docassemble_simulator._outcomes import Outcome
+from docassemble_simulator.catalog import CatalogOutcome
+from docassemble_simulator.execution import ExecutionScope, ExplainResolution
+from docassemble_simulator.worker import Worker, serve
+
+_INTERVIEW = "docassemble.example:data/questions/main.yml"
+
+
+class _FakeExecution:
+    """A worker execution that answers one fixed outcome read-only."""
+
+    _identity = _INTERVIEW
+
+    def __init__(self, tmp_path, outcome=None):
+        self.scope = ExecutionScope(
+            tmp_path,
+            self._identity,
+            "",
+            tmp_path / "sessions",
+            tmp_path / "sessions" / "main.pkl",
+        )
+        self.outcome = outcome
+        self.operations = []
+
+    def run(self, operation):
+        self.operations.append(operation)
+        return self.outcome
+
+    def reset(self):
+        pass
+
+
+def _args(config=None):
+    return SimpleNamespace(_simulator_config=config or {})
+
+
+def _handlers(args=None):
+    return cli._worker_request_handlers(args or _args())
+
+
+def _patch_catalog(monkeypatch, outcome, constructed):
+    class FakeCatalog:
+        def __init__(self, root, selector=None, **kwargs):
+            constructed.append((root, selector))
+
+        def check(self):
+            return outcome
+
+        def questions(self, contains=None):
+            return outcome
+
+        def index(self, contains=None):
+            return outcome
+
+    monkeypatch.setattr(catalog_module, "InterviewCatalog", FakeCatalog)
+
+
+def _cli_catalog(monkeypatch, capsys, argv, root, expected_code):
+    args = cli.build_parser().parse_args(argv)
+    assert cli.cmd_catalog(args, root) == expected_code
+    return json.loads(capsys.readouterr().out)
+
+
+def _workspace(tmp_path):
+    package = tmp_path / "docassemble" / "example"
+    (package / "data" / "questions").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    return package
+
+
+def test_worker_catalog_requests_match_the_json_envelope(tmp_path, monkeypatch, capsys):
+    """Listing/check payloads equal ``sim <command> --json`` for the same catalog."""
+    result = {"blocks": [{"index": 0, "name": "Q", "variables": None}]}
+    outcome = CatalogOutcome(_INTERVIEW, result)
+    constructed = []
+    _patch_catalog(monkeypatch, outcome, constructed)
+
+    expected = _cli_catalog(monkeypatch, capsys, ["questions", "--json"], tmp_path, 0)
+    worker = Worker(tmp_path, execution=_FakeExecution(tmp_path), handlers=_handlers())
+
+    response = worker.handle({"operation": "questions"})
+
+    assert response["ok"] is True
+    assert response["result"] == expected["result"]
+    # The CLI drops the None-valued ``variables`` key; the worker must too.
+    assert "variables" not in response["result"]["blocks"][0]
+    # The worker scopes the catalog to its own resolved interview.
+    assert constructed[-1] == (tmp_path, _INTERVIEW)
+
+
+def test_worker_check_error_shapes_match_the_json_envelope(
+    tmp_path, monkeypatch, capsys
+):
+    compile_result = {
+        "checked": 1,
+        "failures": 1,
+        "duplicate_ids": [],
+        "totals": {"checked": 1, "ok": 0, "failed": 1, "duplicate_ids": 0},
+        "results": [{"interview": _INTERVIEW, "ok": False, "message": "broken"}],
+    }
+    _patch_catalog(monkeypatch, CatalogOutcome(None, compile_result), [])
+    expected = _cli_catalog(monkeypatch, capsys, ["check", "--json"], tmp_path, 2)
+    worker = Worker(tmp_path, execution=_FakeExecution(tmp_path), handlers=_handlers())
+
+    response = worker.handle({"operation": "check"})
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == expected["error"]["kind"] == "compile"
+    assert response["error"]["message"] == expected["error"]["message"]
+    assert response["error"]["details"] == expected["error"]["details"]
+
+    duplicate_result = {
+        "checked": 1,
+        "failures": 0,
+        "duplicate_ids": [{"id": "shared", "kind": "duplicate-id"}],
+        "totals": {"checked": 1, "ok": 1, "failed": 0, "duplicate_ids": 1},
+        "results": [],
+    }
+    _patch_catalog(monkeypatch, CatalogOutcome(None, duplicate_result), [])
+    expected = _cli_catalog(
+        monkeypatch, capsys, ["check", "--strict", "--json"], tmp_path, 2
+    )
+
+    strict = worker.handle({"operation": "check", "strict": True})
+
+    assert strict["ok"] is False
+    assert strict["error"]["kind"] == expected["error"]["kind"] == "duplicate-id"
+
+
+def test_worker_why_matches_the_json_envelope_and_reuses_execution(
+    tmp_path, monkeypatch, capsys
+):
+    report = {
+        "variable": "M.value",
+        "order": "last-loaded-first",
+        "session_state": "not saved",
+        "candidates": [],
+        "winner": None,
+        "conflict": False,
+        "conflict_details": None,
+    }
+    execution = _FakeExecution(tmp_path, Outcome(True, report))
+    monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+    expected = _cli_catalog(
+        monkeypatch, capsys, ["why", "M.value", "--json"], tmp_path, 0
+    )
+    worker = Worker(tmp_path, execution=execution, handlers=_handlers())
+
+    response = worker.handle({"operation": "why", "variable": "M.value"})
+
+    assert response["ok"] is True
+    assert response["result"] == expected["result"]
+    # The CLI drops the None-valued ``winner``; the worker must too.
+    assert "winner" not in response["result"]
+    assert isinstance(execution.operations[-1], ExplainResolution)
+    assert execution.operations[-1].variable == "M.value"
+
+
+def test_worker_why_without_a_session_stays_read_only(tmp_path, monkeypatch, capsys):
+    from docassemble_simulator.execution import InterviewExecution
+
+    package = _workspace(tmp_path)
+    (package / "data" / "questions" / "main.yml").write_text(
+        "---\nquestion: Hello\nfields:\n  - Value: value\n"
+    )
+    session_root = tmp_path / "sessions"
+    execution = InterviewExecution(tmp_path, session_directory=session_root)
+    report = {
+        "variable": "value",
+        "order": "last-loaded-first",
+        "session_state": "not saved",
+        "candidates": [],
+        "winner": None,
+        "conflict": False,
+        "conflict_details": None,
+    }
+    monkeypatch.setattr(
+        execution._catalog,
+        "why",
+        lambda variable, namespace=None, **kwargs: CatalogOutcome(
+            execution._catalog.identity, report
+        ),
+    )
+    monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+    expected = _cli_catalog(
+        monkeypatch, capsys, ["why", "value", "--json"], tmp_path, 0
+    )
+    worker = Worker(tmp_path, execution=execution, handlers=_handlers())
+
+    response = worker.handle({"operation": "why", "variable": "value"})
+
+    assert response["ok"] is True
+    assert response["result"] == expected["result"]
+    assert response["result"]["session_state"] == "not saved"
+    assert not list(session_root.glob("*.pkl"))
+
+
+def test_worker_info_and_config_match_the_json_envelope(tmp_path, capsys):
+    _workspace(tmp_path)
+    for command, cmd in (("info", cli.cmd_info), ("config", cli.cmd_config)):
+        args = cli.build_parser().parse_args([command, "--json"])
+        assert cmd(args, tmp_path) == 0
+        expected = json.loads(capsys.readouterr().out)
+
+        worker = Worker(
+            tmp_path, execution=_FakeExecution(tmp_path), handlers=_handlers()
+        )
+        response = worker.handle({"operation": command})
+
+        assert response["ok"] is True
+        assert response["result"] == expected["result"], command
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"operation": "why"}, "variable"),
+        ({"operation": "why", "variable": 7}, "variable"),
+        ({"operation": "questions", "var": 7}, "var must be a string"),
+        ({"operation": "index", "var": 7}, "var must be a string"),
+        ({"operation": "check", "strict": "yes"}, "strict must be a boolean"),
+        ({"operation": "why", "variable": "M.value", "strict": "yes"}, "boolean"),
+    ],
+)
+def test_malformed_catalog_requests_are_typed_input_errors(tmp_path, payload, message):
+    worker = Worker(tmp_path, execution=_FakeExecution(tmp_path), handlers=_handlers())
+
+    response = worker.handle(payload)
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "input"
+    assert message in response["error"]["message"]
+
+
+def test_catalog_requests_flow_through_the_worker_protocol(tmp_path, monkeypatch):
+    outcome = CatalogOutcome(_INTERVIEW, {"blocks": []})
+    _patch_catalog(monkeypatch, outcome, [])
+    worker = Worker(tmp_path, execution=_FakeExecution(tmp_path), handlers=_handlers())
+    incoming = io.StringIO(
+        '{"id":"one","operation":"questions"}\n'
+        '{"id":"two","operation":"index"}\n'
+        '{"id":"three","operation":"shutdown"}\n'
+    )
+    outgoing = io.StringIO()
+
+    assert serve(worker, incoming, outgoing) == 0
+    responses = [json.loads(line) for line in outgoing.getvalue().splitlines()]
+
+    assert responses[0]["ok"] is True
+    assert responses[0]["result"]["blocks"] == []
+    assert responses[1]["ok"] is True
+    assert responses[2]["result"]["kind"] == "shutdown"
+
+
+def test_worker_catalog_handlers_are_registered():
+    handlers = _handlers()
+
+    assert {"render", "questions", "index", "check", "why", "info", "config"} <= set(
+        handlers
+    )
+    assert all(callable(handler) for handler in handlers.values())
