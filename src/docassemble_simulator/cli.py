@@ -1083,20 +1083,35 @@ def cmd_trace_replay(args, root):
         index = 0
         while index < len(golden.entries):
             entry = golden.entries[index]
-            if (
-                (entry.intent or entry.operation) == "auto"
-                and index + 1 < len(golden.entries)
-                and golden.entries[index + 1].post_auto
-            ):
-                grouped, index = _trace_replay_automatic_group(
-                    golden.entries, index, overrides, execution, actual_entries
-                )
-                steps.extend(grouped)
-                divergence = next((step for step in grouped if not step["match"]), None)
-                if divergence is not None:
-                    first_divergence = divergence
-                    break
-                continue
+            if (entry.intent or entry.operation) == "auto":
+                # Recorder-produced walks have one post-walk marker after all
+                # consecutive automatic screens. Find that trailing marker
+                # before choosing the legacy per-entry compatibility path.
+                post_index = index + 1
+                while (
+                    post_index < len(golden.entries)
+                    and (
+                        golden.entries[post_index].intent
+                        or golden.entries[post_index].operation
+                    )
+                    == "auto"
+                ):
+                    post_index += 1
+                if (
+                    post_index < len(golden.entries)
+                    and golden.entries[post_index].post_auto
+                ):
+                    grouped, index = _trace_replay_automatic_group(
+                        golden.entries, index, overrides, execution, actual_entries
+                    )
+                    steps.extend(grouped)
+                    divergence = next(
+                        (step for step in grouped if not step["match"]), None
+                    )
+                    if divergence is not None:
+                        first_divergence = divergence
+                        break
+                    continue
             submitted = dict(entry.submitted)
             submitted.update(overrides.get(entry.seq, {}))
             step = _trace_replay_step(entry, submitted, execution, actual_entries)

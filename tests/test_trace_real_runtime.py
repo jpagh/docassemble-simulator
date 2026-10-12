@@ -212,6 +212,40 @@ question: |
   Done
 """
 
+MULTI_AUTO_REPLAY_INTERVIEW = """\
+---
+id: saved
+mandatory: True
+question: |
+  Saved screen
+fields:
+  - Value: saved_value
+---
+mandatory: True
+code: |
+  target_value = first_value + second_value
+---
+id: first automatic
+mandatory: True
+question: |
+  First automatic screen
+fields:
+  - Value: first_value
+    default: first
+---
+id: second automatic
+mandatory: True
+question: |
+  Second automatic screen
+fields:
+  - Value: second_value
+    default: second
+---
+mandatory: True
+question: |
+  Done
+"""
+
 REORDERED_INTERVIEW = (
     INTERVIEW_HEADER.replace(
         """---
@@ -422,6 +456,108 @@ def test_trace_replay_round_trips_default_auto_failure_and_answer(
         for path in (root / ".simulator" / "sessions").glob("*.pkl")
     }
     assert after == before
+
+
+def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
+    family_python,  # noqa: F811
+    tmp_path,
+):
+    """A recorded auto,auto walk stays isolated from its Saved source screen."""
+    interpreter = family_python.interpreter
+    root = _write_interview(tmp_path / "multi-auto", MULTI_AUTO_REPLAY_INTERVIEW)
+    record = root / "scenario.trace.jsonl"
+
+    code, payload = _command(interpreter, root, "start", "--record", str(record))
+    assert code == 0, payload
+    code, payload = _command(
+        interpreter,
+        root,
+        "seek",
+        "target_value",
+        "--auto",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+    # This answer must still target Saved screen A after the non-activated
+    # walk temporarily traversed screens B and C.
+    code, payload = _command(
+        interpreter,
+        root,
+        "answer",
+        "saved_value=done",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+
+    golden = load_trace(record)
+    automatic = [entry for entry in golden.entries if entry.intent == "auto"]
+    assert len(automatic) >= 2
+    assert golden.entries[1].intent == "auto"
+    assert golden.entries[2].intent == "auto"
+    assert golden.entries[3].post_auto is True
+    assert golden.entries[3].activate is False
+    original = record.read_bytes()
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
+
+    code, overridden = _command(
+        interpreter,
+        root,
+        "trace",
+        "replay",
+        str(record),
+        "--override",
+        "2.first_value=changed",
+    )
+    assert code == 0, overridden
+    assert overridden["result"]["clean"] is True, overridden
+    assert record.read_bytes() == original
+
+    code, diverged = _command(
+        interpreter,
+        root,
+        "trace",
+        "replay",
+        str(record),
+        "--override",
+        "2.not_a_field=changed",
+    )
+    assert code == 2, diverged
+    assert diverged["error"]["details"]["first_divergence"]["step"] == 2
+
+
+def test_trace_replay_groups_fresh_activated_multi_screen_walk(
+    family_python,  # noqa: F811
+    tmp_path,
+):
+    interpreter = family_python.interpreter
+    root = _write_interview(tmp_path / "fresh-multi-auto", MULTI_AUTO_REPLAY_INTERVIEW)
+    record = root / "fresh.trace.jsonl"
+
+    code, payload = _command(
+        interpreter,
+        root,
+        "seek",
+        "target_value",
+        "--auto",
+        "--fresh",
+        "--activate",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+    golden = load_trace(record)
+    automatic = [entry for entry in golden.entries if entry.intent == "auto"]
+    assert len(automatic) >= 2
+    assert automatic[0].fresh is True
+    assert next(entry for entry in golden.entries if entry.post_auto).activate is True
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
 
 
 def test_trace_replay_preserves_nonactivated_seek_context(
