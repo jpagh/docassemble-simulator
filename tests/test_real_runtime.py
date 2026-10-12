@@ -672,7 +672,7 @@ class WorkerJourney:
     the exemption; the harness never guesses the family from the interpreter
     path.
 
-    ``SimulatorRunner`` (ADR-0015) is not reused here on purpose. It returns
+    ``SimulatorRunner`` (ADR-0017) is not reused here on purpose. It returns
     transport failures (timeout, crash, unusable frame) as typed ``ok: false``
     responses, which is right for a client and wrong for a contract harness: a
     hung or crashed worker must fail the test with its drained stderr attached,

@@ -706,7 +706,7 @@ def cmd_worker(args, root):
 def _worker_request_handlers(args):
     """The non-execution requests the worker command serves.
 
-    ``worker.py`` stays an operation-only server (ADR-0015); the command
+    ``worker.py`` stays an operation-only server (ADR-0017); the command
     adapter owns the ``render`` request, the read-only catalog/project
     requests, and the trace requests, mapping each onto the same payload its
     one-shot command builds.

@@ -1,7 +1,8 @@
-# ADR 0015: Persistent worker and standard project runner
+---
+status: accepted
+---
 
-- Status: accepted
-- Date: 2026-10-11
+# Persistent worker and standard project runner
 
 ## Context
 

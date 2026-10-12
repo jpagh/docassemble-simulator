@@ -53,7 +53,7 @@ CLI-flavored concerns. Handlers are looked up by canonical
 :func:`operation_name` and never intercept the protocol lifecycle operations
 (``ping``, ``reset``, ``shutdown``).
 
-The current handlers are the command adapter's adapter seams (ADR-0015):
+The current handlers are the command adapter's adapter seams (ADR-0017):
 ``render``; the read-only catalog/project requests ``questions``, ``index``,
 ``check``, ``why``, ``info``, and ``config``; and the trace requests
 ``trace-compare`` and ``trace-replay``.
