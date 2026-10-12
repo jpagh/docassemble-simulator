@@ -13,11 +13,12 @@ from collections.abc import Callable
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from docassemble_simulator._outcomes import ErrorKind, Failure
+from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator._runtime import (
     SimulatorRuntime,
     bootstrap,
@@ -580,7 +581,8 @@ def _worker_request_handlers(args):
     ``InterviewRenderer``/``RenderRequest`` path as ``sim render``.
     """
     return {
-        "render": lambda worker, request: _render_worker_request(args, worker, request)
+        "render": lambda worker, request: _render_worker_request(args, worker, request),
+        **_trace_worker_handlers(args),
     }
 
 
@@ -714,6 +716,178 @@ def _worker_binding_pairs(raw):
             raise InputFailure("each render binding must be a NAME=EXPRESSION string")
         pairs.append(item)
     return tuple(pairs)
+
+
+def _trace_worker_handlers(args):
+    """The trace requests the worker command serves.
+
+    Kept in its own helper so registering them stays a one-line addition to
+    ``_worker_request_handlers`` and ``worker.py`` stays an operation-only
+    server. ``trace-compare`` is read-only over two sidecars; ``trace-replay``
+    runs its own isolated execution and never writes the golden.
+    """
+    return {
+        "trace-compare": lambda worker, request: _trace_compare_worker_request(
+            args, worker, request
+        ),
+        "trace-replay": lambda worker, request: _trace_replay_worker_request(
+            args, worker, request
+        ),
+    }
+
+
+def _trace_compare_worker_request(args, worker, request):
+    """Map one worker ``trace-compare`` request onto the compare seam.
+
+    The response ``result`` is the ``sim trace compare --json`` result for the
+    same sidecars and policy; a mismatch is the typed ``trace-mismatch`` error
+    whose ``details`` are the same report. The request is read-only: the worker
+    never has an ``--update`` path, so it never writes the golden.
+    """
+    from docassemble_simulator.trace import TraceError
+
+    expected = _worker_trace_path(request, "expected")
+    actual = _worker_trace_path(request, "actual")
+    policy = _worker_trace_policy(request)
+    exceptions = _worker_trace_optional_path(request, "exceptions")
+    try:
+        comparison = _trace_compare_report(expected, actual, policy, exceptions)
+    except TraceError as error:
+        return _outcome_from_trace_input(error)
+    report = _clean(comparison.as_dict())
+    if comparison.matched:
+        return Outcome(True, result=report)
+    return Outcome(
+        False,
+        error=Failure(
+            ErrorKind.TRACE_MISMATCH,
+            "screen trace comparison failed",
+            report,
+        ),
+    )
+
+
+def _trace_replay_worker_request(args, worker, request):
+    """Map one worker ``trace-replay`` request onto the replay seam.
+
+    The replay runs against its own temporary session directory inside the
+    replay seam, so the worker's own Saved session is untouched and the golden
+    is only read. The response ``result`` is the ``sim trace replay --json``
+    result for a clean replay; a divergence is the typed ``trace-mismatch``
+    error whose ``details`` are the same report.
+    """
+    from docassemble_simulator.trace import TraceError
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    golden = _worker_trace_path(request, "golden")
+    interview = _worker_field(request, "interview")
+    if interview is not None and not isinstance(interview, str):
+        raise WorkerProtocolError("trace replay interview must be a string")
+    overrides = _worker_trace_overrides(request)
+    replay_args = SimpleNamespace(
+        golden=golden,
+        interview=interview or worker.identity,
+        _resolved_configuration=getattr(args, "_resolved_configuration", None),
+    )
+    try:
+        report = _trace_replay_report(replay_args, worker.root, overrides)
+    except TraceError as error:
+        return _outcome_from_trace_input(error)
+    report = _clean(report)
+    if report["clean"]:
+        return Outcome(True, result=report)
+    return Outcome(
+        False,
+        error=Failure(
+            ErrorKind.TRACE_MISMATCH,
+            "screen trace replay diverged",
+            report,
+        ),
+    )
+
+
+def _outcome_from_trace_input(error):
+    """A typed ``input`` outcome for a trace seam's ``TraceError``."""
+    return Outcome(False, error=Failure(ErrorKind.INPUT, str(error), {}))
+
+
+def _worker_trace_path(request, *names):
+    """A required trace sidecar path from the request."""
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    value = _worker_field(request, *names)
+    if not isinstance(value, str) or not value.strip():
+        raise WorkerProtocolError(f"{names[0]} requires a trace path")
+    return value
+
+
+def _worker_trace_optional_path(request, *names):
+    """An optional trace sidecar path from the request."""
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    value = _worker_field(request, *names)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise WorkerProtocolError(f"{names[0]} must be a path string")
+    return value
+
+
+def _worker_trace_overrides(request):
+    """The ``STEP.FIELD=VALUE`` overrides a replay request carries."""
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    raw = _worker_field(request, "overrides", "override")
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if not isinstance(raw, (list, tuple)):
+        raise WorkerProtocolError("trace replay overrides must be a string or array")
+    for item in raw:
+        if not isinstance(item, str):
+            raise WorkerProtocolError(
+                "each trace replay override must be a STEP.FIELD=VALUE string"
+            )
+    return tuple(raw)
+
+
+def _worker_trace_policy(request):
+    """Decode the comparison policy fields of a ``trace-compare`` request."""
+    from docassemble_simulator.trace import ComparePolicy
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    def choice(name, default):
+        value = _worker_field(request, name)
+        if value is None:
+            return default
+        if not isinstance(value, str):
+            raise WorkerProtocolError(f"trace compare {name} must be a string")
+        return value
+
+    full_text = _worker_field(request, "full_text", "full-text")
+    if full_text is None:
+        full_text = False
+    if not isinstance(full_text, bool):
+        raise WorkerProtocolError("trace compare full_text must be a boolean")
+    phases = _worker_field(request, "phases")
+    if phases is None:
+        declared = None
+    elif isinstance(phases, str):
+        declared = tuple(item for item in phases.split(",") if item) or None
+    elif isinstance(phases, (list, tuple)):
+        if not all(isinstance(item, str) for item in phases):
+            raise WorkerProtocolError("trace compare phases must be strings")
+        declared = tuple(phases) or None
+    else:
+        raise WorkerProtocolError("trace compare phases must be a string or array")
+    return ComparePolicy(
+        order=choice("order", "ordered"),
+        missing=choice("missing", "strict"),
+        extra=choice("extra", "strict"),
+        full_text=full_text,
+        phases=declared,
+    )
 
 
 def _trace_metadata(args, root):
@@ -1325,54 +1499,59 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
     return reports, end + (1 if post is not None else 0)
 
 
-def cmd_trace_replay(args, root):
+def _trace_replay_report(args, root, overrides=()):
+    """Run ``trace replay`` and return its report without emitting or exiting.
+
+    Shared by ``cmd_trace_replay`` and the worker's ``trace-replay`` handler so
+    both compute the same ``sim trace replay --json`` report (``golden``,
+    ``metadata``, ``clean``, ``steps``, ``first_divergence``, ``counts``) and
+    raise the same ``TraceError`` for an unreadable golden, an interview or
+    config mismatch, or a malformed override. The replay always runs against
+    its own temporary session directory, so it never touches a caller's Saved
+    session and never writes the golden.
+    """
     from docassemble_simulator.execution import InterviewExecution
     from docassemble_simulator.trace import TraceError, load_trace
 
-    try:
-        golden = load_trace(args.golden)
-        if args.interview and args.interview != golden.metadata.interview:
-            raise TraceError(
-                "trace interview mismatch: "
-                f"{args.interview!r} does not match {golden.metadata.interview!r}"
-            )
-        args.interview = golden.metadata.interview
-        current = _trace_metadata(args, root)
-        for label, expected, actual in (
-            ("interview definition", golden.metadata.interview, current.interview),
-            (
-                "config fingerprint",
-                golden.metadata.config_fingerprint,
-                current.config_fingerprint,
-            ),
-        ):
-            if expected != actual:
-                raise TraceError(
-                    f"trace {label} mismatch: {expected!r} does not match {actual!r}"
-                )
-        overrides = _trace_replay_overrides(args.overrides, golden.entries)
-    except TraceError as error:
-        _emit(
-            _envelope("trace", error=Failure(ErrorKind.INPUT, str(error), {})),
-            args.json,
+    golden_path = Path(args.golden).expanduser()
+    golden = load_trace(golden_path)
+    if args.interview and args.interview != golden.metadata.interview:
+        raise TraceError(
+            "trace interview mismatch: "
+            f"{args.interview!r} does not match {golden.metadata.interview!r}"
         )
-        return _exit_for_error(ErrorKind.INPUT)
+    metadata_args = SimpleNamespace(
+        interview=golden.metadata.interview,
+        _resolved_configuration=getattr(args, "_resolved_configuration", None),
+    )
+    current = _trace_metadata(metadata_args, root)
+    for label, expected, actual in (
+        ("interview definition", golden.metadata.interview, current.interview),
+        (
+            "config fingerprint",
+            golden.metadata.config_fingerprint,
+            current.config_fingerprint,
+        ),
+    ):
+        if expected != actual:
+            raise TraceError(
+                f"trace {label} mismatch: {expected!r} does not match {actual!r}"
+            )
+    try:
+        overrides = _trace_replay_overrides(overrides, golden.entries)
+    except InputFailure as error:
+        raise TraceError(str(error)) from error
 
+    resolved = getattr(args, "_resolved_configuration", None)
     scope_parent = root / ".simulator"
     scope_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="trace-replay-", dir=scope_parent) as scope:
         execution = InterviewExecution(
             root,
-            args.interview,
-            config_fingerprint=(
-                args._resolved_configuration.fingerprint
-                if args._resolved_configuration is not None
-                else ""
-            ),
+            golden.metadata.interview,
+            config_fingerprint=(resolved.fingerprint if resolved is not None else ""),
             config_context=(
-                args._resolved_configuration.session_context()
-                if args._resolved_configuration is not None
-                else None
+                resolved.session_context() if resolved is not None else None
             ),
             session_directory=Path(scope) / "sessions",
         )
@@ -1421,8 +1600,8 @@ def cmd_trace_replay(args, root):
                 first_divergence = step
                 break
 
-    report = {
-        "golden": str(Path(args.golden).expanduser()),
+    return {
+        "golden": str(golden_path),
         "metadata": golden.metadata.as_dict(),
         "clean": first_divergence is None and len(steps) == len(golden.entries),
         "steps": steps,
@@ -1433,6 +1612,20 @@ def cmd_trace_replay(args, root):
             "matched": sum(step["match"] for step in steps),
         },
     }
+
+
+def cmd_trace_replay(args, root):
+    from docassemble_simulator.trace import TraceError
+
+    try:
+        report = _trace_replay_report(args, root, args.overrides)
+    except TraceError as error:
+        _emit(
+            _envelope("trace", error=Failure(ErrorKind.INPUT, str(error), {})),
+            args.json,
+        )
+        return _exit_for_error(ErrorKind.INPUT)
+
     if report["clean"]:
         if args.json:
             _emit(_envelope("trace", report), True)
@@ -1455,7 +1648,7 @@ def cmd_trace_replay(args, root):
             True,
         )
     else:
-        step = first_divergence or {}
+        step = report["first_divergence"] or {}
         print(
             f"trace replay: DIVERGENCE at step {step.get('step', '?')} "
             f"({step.get('operation', 'unknown')})"
@@ -1464,20 +1657,33 @@ def cmd_trace_replay(args, root):
     return _exit_for_error(ErrorKind.TRACE_MISMATCH)
 
 
-def cmd_trace(args, root):
+def _trace_compare_report(expected, actual, policy, exceptions=None):
+    """Compare two recorded traces without emitting or writing the golden.
+
+    Shared by ``cmd_trace`` and the worker's ``trace-compare`` handler so both
+    return the same ``trace compare --json`` report and the same typed input
+    errors. A malformed trace or exception file raises ``TraceError``; a
+    mismatch is a normal return value whose ``matched`` is ``False``.
+    """
     from docassemble_simulator.trace import (
-        TraceError,
         compare_traces,
         load_exceptions,
         load_trace,
-        write_trace,
     )
 
+    expected_trace = load_trace(expected)
+    actual_trace = load_trace(actual)
+    exceptions_loaded = load_exceptions(exceptions) if exceptions else ()
+    return compare_traces(expected_trace, actual_trace, policy, exceptions_loaded)
+
+
+def cmd_trace(args, root):
+    from docassemble_simulator.trace import TraceError, load_trace, write_trace
+
     try:
-        expected = load_trace(args.expected)
-        actual = load_trace(args.actual)
-        exceptions = load_exceptions(args.exceptions) if args.exceptions else ()
-        comparison = compare_traces(expected, actual, _trace_policy(args), exceptions)
+        comparison = _trace_compare_report(
+            args.expected, args.actual, _trace_policy(args), args.exceptions
+        )
     except TraceError as error:
         _emit(
             _envelope("trace", error=Failure(ErrorKind.INPUT, str(error), {})),
@@ -1487,7 +1693,7 @@ def cmd_trace(args, root):
     report = comparison.as_dict()
     if args.update:
         try:
-            write_trace(args.expected, actual)
+            write_trace(args.expected, load_trace(args.actual))
         except OSError as error:
             _emit(
                 _envelope(
