@@ -39,21 +39,30 @@ stale compile after an edit.
 - A reload changes compilation only. The Saved session is never cleared by a
   reload; `reset` remains the explicit clear. A reload that fails to compile
   reports the typed `compile` error and leaves the session intact.
-- Detection covers the selected interview source, the source files of its
-  declared `modules:`/`imports:` helpers, and every YAML the compiled interview
-  includes. An include is resolved through the same identity→path lookup as the
-  selected source for a `package:relative` identity, or against the source's
-  directory for a relative sibling. A helper that resolves to a file under the
-  workspace source tree is stamped directly; a helper that resolves to a
-  package directory is stamped by walking its `*.py` files, so an edited or
-  newly added submodule counts. A declared module that does not resolve to a
-  workspace file (stdlib, an installed docassemble package, a mis-declared
-  name) is skipped and logged at debug; so is an include outside the workspace
-  source tree (for example an installed AssemblyLine file). Those are not the
-  interview's own source. Module paths are resolved by workspace-tree lookup,
-  not `importlib.util.find_spec`: find_spec imports a dotted module's parent
+- Detection covers the selected interview source and every workspace source
+  file the compiled interview read, plus the source files of its declared
+  `modules:`/`imports:` helpers. The watched source set comes from question
+  provenance — each compiled question's `from_source.filepath` — not from the
+  include strings, so an abbreviated colon identity
+  (`docassemble.other:screens.yml` resolving under
+  `docassemble/other/data/questions/`) and a nested relative include resolved
+  against its own owning source's directory are watched at the exact file
+  docassemble read. A helper that resolves to a file under the workspace
+  source tree is stamped directly; a helper that resolves to a package
+  directory is stamped by walking its `*.py` files, so an edited or newly added
+  submodule counts. A declared module that does not resolve to a workspace file
+  (stdlib, an installed docassemble package, a mis-declared name) is skipped
+  and logged at debug. Module paths are resolved by workspace-tree lookup, not
+  `importlib.util.find_spec`: find_spec imports a dotted module's parent
   package, which would execute authored package code during compilation and
   could import a heavy installed dependency.
+- Watching, eviction, and bytecode invalidation all resolve candidates with
+  `Path.resolve()` and require containment under the resolved workspace root.
+  A workspace name that resolves through a symlink to a file outside the tree
+  is therefore neither watched, evicted, nor unlinked, and an include whose
+  real path is outside the root is not watched. A file that was recorded at
+  compile time and then deleted or made unreadable still counts as changed, so
+  recompilation surfaces the typed error.
 - Configuration is resolved once at worker startup and is not reloaded; a
   configuration change still requires a restart. Templates are read at render
   time (`prepare_docx_template` loads the file per render, with no cache), so a
@@ -69,12 +78,14 @@ stale compile after an edit.
 - The reload signal is a file timestamp, so tests set it explicitly
   (`os.utime`) rather than depending on clock resolution.
 - A helper edit under a declared workspace module, or an edit to a workspace
-  include, now reloads the worker with no restart. The remaining boundaries are
-  modules that are not the interview's own declared workspace helpers. A module
-  that lives outside the workspace source tree (a third-party or installed
-  package) is not watched. A workspace module the interview does not declare
-  in `modules:`/`imports:` — for example a sibling imported by a declared
-  helper — is neither watched nor evicted: capturing workspace-owned
-  `sys.modules` entries at compile time does not see it, because docassemble
-  imports `modules:`/`imports:` only during assembly, after compilation. This
-  is a recorded boundary, not a regression.
+  source the compiled questions came from, now reloads the worker with no
+  restart. The remaining boundaries are: a source or module whose real path is
+  outside the resolved workspace root is not watched (an installed AssemblyLine
+  include, an absolute include outside the tree, a workspace symlink that
+  escapes the tree); a workspace module the interview does not declare in
+  `modules:`/`imports:` — for example a sibling imported by a declared helper —
+  is neither watched nor evicted, because capturing workspace-owned
+  `sys.modules` entries at compile time does not see it (docassemble imports
+  `modules:`/`imports:` only during assembly, after compilation); and a
+  transitive include file that contributes no question of its own has no
+  provenance to watch. These are recorded boundaries, not regressions.

@@ -372,14 +372,16 @@ class _WatchRecord:
     """The compile-time reload state for one cached interview identity.
 
     ``source`` is docassemble's own source object (its ``get_modtime`` is the
-    timestamp docassemble keeps). ``source_paths`` is the selected YAML followed
-    by every YAML it includes, all resolved to workspace files.
-    ``module_paths`` is the declared workspace helper files and package
-    directories. Each signature is captured at compile time and compared at the
-    next operation boundary.
+    timestamp docassemble keeps for the selected file). ``main_path`` is that
+    file's resolved path when it is inside the workspace root. ``source_paths``
+    is every workspace source the compiled questions came from (the selected
+    file plus its includes). ``module_paths`` is the declared workspace helper
+    files and package directories. Each signature is captured at compile time
+    and compared at the next operation boundary.
     """
 
     source: Any
+    main_path: str | None
     source_paths: tuple[str, ...]
     source_signature: tuple | None
     module_paths: tuple[str, ...]
@@ -463,7 +465,26 @@ class InterviewCatalog:
         if not separator or not package.startswith("docassemble."):
             return None
         candidate = self.root / package.replace(".", "/") / relative
-        return str(candidate) if candidate.is_file() else None
+        return self._contained(candidate)
+
+    def _contained(self, candidate: Path) -> str | None:
+        """A candidate file/dir under the resolved workspace root, or ``None``.
+
+        ``Path.resolve()`` collapses symlinks, so a workspace name that points
+        outside the tree is rejected before it can be watched, evicted, or have
+        its bytecode unlinked. Existence is still required for the fallback
+        identity resolution; a recorded path that later disappears is handled
+        by the signature check, not here.
+        """
+        if not candidate.is_file() and not candidate.is_dir():
+            return None
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return None
+        if not resolved.is_relative_to(self.root):
+            return None
+        return str(resolved)
 
     def _record_source(self, selected: str, interview) -> None:
         """Capture the source and declared-module signatures for later checks."""
@@ -471,78 +492,85 @@ class InterviewCatalog:
         main_path = getattr(source, "filepath", None) or self._resolved_source_path(
             selected
         )
-        source_paths: list[str] = []
-        if main_path:
-            source_paths.append(str(main_path))
-        for included in self._include_paths(interview, source):
-            if included not in source_paths:
-                source_paths.append(included)
+        source_paths = self._source_paths(interview, main_path)
+        main_resolved = self._contained(Path(main_path)) if main_path else None
         module_paths = self._module_paths_for(self._declared_module_names(interview))
         self._watches[selected] = _WatchRecord(
             source=source,
-            source_paths=tuple(source_paths),
-            source_signature=self._source_signature(source, tuple(source_paths)),
+            main_path=main_resolved,
+            source_paths=source_paths,
+            source_signature=self._source_signature(
+                source, main_resolved, source_paths
+            ),
             module_paths=module_paths,
             module_signature=self._tree_signatures(module_paths),
         )
 
-    def _include_paths(self, interview, source) -> tuple[str, ...]:
-        """The workspace files the compiled interview included.
+    def _source_paths(self, interview, main_path) -> tuple[str, ...]:
+        """The workspace files the compiled interview actually read.
 
-        docassemble records ``interview.includes`` as ``source.path`` values:
-        a canonical ``package:relative`` identity for a colon include and the
-        authored relative path for a sibling include. Each is resolved the same
-        way the selected source is; an include outside the workspace source
-        tree (an installed AssemblyLine file) resolves to nothing and is
-        skipped rather than watched.
+        The set comes from question provenance rather than the include strings:
+        every compiled question carries ``from_source.filepath``, the absolute
+        file docassemble read it from. That covers abbreviated colon identities
+        (``docassemble.other:screens.yml`` resolving under
+        ``docassemble/other/data/questions/``) and a nested relative include
+        resolved against its own owning source. Only sources under the resolved
+        workspace root are watched; an include outside the tree is a recorded
+        boundary, not a watched file.
         """
-        includes = getattr(interview, "includes", None)
-        if not includes:
-            return ()
-        directory = getattr(source, "directory", None)
-        paths = {
-            path
-            for entry in includes
-            if isinstance(entry, str)
-            for path in (self._include_path(entry, directory),)
-            if path is not None
-        }
-        return tuple(sorted(paths))
+        candidates: list[str] = []
+        if main_path:
+            candidates.append(str(main_path))
+        for question in getattr(interview, "questions_list", None) or ():
+            from_source = getattr(question, "from_source", None)
+            filepath = getattr(from_source, "filepath", None)
+            if filepath:
+                candidates.append(str(filepath))
+        return self._contained_paths(candidates)
 
-    def _include_path(self, entry: str, directory: str | None) -> str | None:
-        if ":" in entry and not entry.startswith("/"):
-            return self._resolved_source_path(entry)
-        if not directory:
-            return None
-        candidate = Path(directory) / entry
-        return str(candidate) if candidate.is_file() else None
+    def _contained_paths(self, candidates: list[str]) -> tuple[str, ...]:
+        """Resolved, workspace-contained, de-duplicated paths in order."""
+        kept: list[str] = []
+        for candidate in candidates:
+            try:
+                resolved = Path(candidate).resolve()
+            except OSError:
+                continue
+            if not resolved.is_relative_to(self.root):
+                logger.debug(
+                    "reload watch skips source outside workspace %r", candidate
+                )
+                continue
+            text = str(resolved)
+            if text not in kept:
+                kept.append(text)
+        return tuple(kept)
 
-    def _source_signature(self, source, paths: tuple[str, ...]):
+    def _source_signature(self, source, main_path, paths: tuple[str, ...]):
         """docassemble's own source timestamp plus each file's size.
 
         The simulator's stubbed redis keeps docassemble's interview index at a
         constant and nothing here calls ``update_index`` (that is the web
         editor's job), so ``interview_cache.cache_valid`` never notices an
         edit. ``InterviewSourceFile.get_modtime`` is the per-source timestamp
-        docassemble itself keeps for the selected source; the rest of the files
+        docassemble itself keeps for the selected file; the rest of the files
         (includes) use ``os.stat``. A missing or unreadable source yields
         ``None`` so the next check forces a reload and compilation surfaces
         the typed error.
         """
         entries = []
-        for index, path in enumerate(paths):
+        get_modtime = getattr(source, "get_modtime", None)
+        for path in paths:
             try:
                 stat = os.stat(path)
             except OSError:
                 return None
             mtime = stat.st_mtime
-            if index == 0:
-                get_modtime = getattr(source, "get_modtime", None)
-                if callable(get_modtime):
-                    try:
-                        mtime = get_modtime()
-                    except Exception:  # noqa: BLE001, S110 - runtime source object
-                        pass
+            if path == main_path and callable(get_modtime):
+                try:
+                    mtime = get_modtime()
+                except Exception:  # noqa: BLE001, S110 - runtime source object
+                    pass
             entries.append((path, mtime, stat.st_size))
         return tuple(entries)
 
@@ -553,7 +581,9 @@ class InterviewCatalog:
             # No measurable source (for example an in-memory source); trust the
             # cache rather than recompiling every operation.
             return True
-        current = self._source_signature(record.source, record.source_paths)
+        current = self._source_signature(
+            record.source, record.main_path, record.source_paths
+        )
         if current is None or current != record.source_signature:
             return False
         return self._tree_signatures(record.module_paths) == record.module_signature
@@ -595,21 +625,25 @@ class InterviewCatalog:
         return tuple(sorted(paths))
 
     def _module_path(self, name: str) -> str | None:
-        """Map ``docassemble.<pkg>[.<sub>]`` to a source file or package dir."""
+        """Map ``docassemble.<pkg>[.<sub>]`` to a workspace file or package dir."""
         parts = name.split(".")
         if len(parts) < 2 or parts[0] != "docassemble":
             return None
         package_dir = self.root.joinpath(*parts)
-        if (package_dir / "__init__.py").is_file():
-            return str(package_dir)
         module_file = self.root.joinpath(*parts[:-1]) / (parts[-1] + ".py")
-        if module_file.is_file():
-            return str(module_file)
-        if package_dir.is_dir():
+        if (package_dir / "__init__.py").is_file():
+            candidate = package_dir
+        elif module_file.is_file():
+            candidate = module_file
+        elif package_dir.is_dir():
             # A namespace package has no __init__.py; walk it so its modules
             # are still watched.
-            return str(package_dir)
-        return None
+            candidate = package_dir
+        else:
+            return None
+        # ``_contained`` resolves symlinks, so a workspace name that escapes the
+        # tree is skipped instead of watched, evicted, or unlinked.
+        return self._contained(candidate)
 
     def _tree_signatures(self, paths: tuple[str, ...]) -> tuple:
         """Per-path ``*.py`` timestamp and size for the watched module trees."""
@@ -623,11 +657,17 @@ class InterviewCatalog:
                 for file in sorted(Path(path).rglob("*.py")):
                     if "__pycache__" in file.parts:
                         continue
+                    resolved = file.resolve()
+                    if not resolved.is_relative_to(self.root):
+                        continue
                     stat = file.stat()
-                    entries.append((str(file), stat.st_mtime, stat.st_size))
+                    entries.append((str(resolved), stat.st_mtime, stat.st_size))
                 return tuple(entries)
+            resolved = Path(path).resolve()
+            if not resolved.is_relative_to(self.root):
+                return None
             stat = os.stat(path)
-            return ((path, stat.st_mtime, stat.st_size),)
+            return ((str(resolved), stat.st_mtime, stat.st_size),)
         except OSError:
             return None
 
@@ -678,7 +718,13 @@ class InterviewCatalog:
                 if "__pycache__" in file.parts:
                     continue
                 try:
-                    cache = importlib.util.cache_from_source(str(file))
+                    resolved = file.resolve()
+                except OSError:
+                    continue
+                if not resolved.is_relative_to(self.root):
+                    continue
+                try:
+                    cache = importlib.util.cache_from_source(str(resolved))
                 except (NotImplementedError, ValueError):
                     continue
                 try:
