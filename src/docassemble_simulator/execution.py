@@ -1591,6 +1591,33 @@ def _replay_trailing_observation(result):
     return (result if is_screen_outcome(result) else None), None, True
 
 
+def _replay_verdict_payload(verdict):
+    """Serialize the trace-owned comparison so the adapter can render it."""
+    return {
+        "identity_match": verdict.identity_match,
+        "field_facts_match": verdict.field_facts_match,
+        "flow_match": verdict.flow_match,
+        "error_match": verdict.error_match,
+        "match": verdict.matched,
+    }
+
+
+def _replay_divergence(phase, seq, screen, error, ok, submitted, verdict):
+    """Report a divergent automatic step with its real observation and verdict.
+
+    Execution owns the persistence decision, so the adapter renders the
+    recorded observation and the trace-owned verdict rather than rebuilding
+    the comparison or inferring a mismatch from the report shape.
+    """
+    return {
+        "phase": phase,
+        "seq": seq,
+        "observation": {"screen": screen, "error": error, "ok": ok},
+        "submitted": dict(submitted),
+        "verdict": _replay_verdict_payload(verdict),
+    }
+
+
 def _replay_walk_divergence(expectations, attempted, trailing, result, context):
     """Decide whether a replayed automatic walk may be persisted.
 
@@ -1600,7 +1627,14 @@ def _replay_walk_divergence(expectations, attempted, trailing, result, context):
     ran is truncated, and the earliest missing expected step is the divergence.
     """
     if attempted < len(expectations):
-        return {"phase": "early-end", "seq": expectations[attempted].seq}
+        expectation = expectations[attempted]
+        screen, error, ok = _replay_trailing_observation(result)
+        verdict, _identity, _content = _replay_expectation_verdict(
+            expectation, screen, error, ok, context
+        )
+        return _replay_divergence(
+            "early-end", expectation.seq, screen, error, ok, {}, verdict
+        )
     if trailing is None:
         return None
     screen, error, ok = _replay_trailing_observation(result)
@@ -1609,7 +1643,7 @@ def _replay_walk_divergence(expectations, attempted, trailing, result, context):
     )
     if verdict.matched:
         return None
-    return {"phase": "trailing", "seq": trailing.seq}
+    return _replay_divergence("trailing", trailing.seq, screen, error, ok, {}, verdict)
 
 
 def _seek_auto(
@@ -1671,10 +1705,15 @@ def _seek_auto(
                 tuple(replay_context),
             )
             if not (pre_verdict.identity_match and pre_verdict.field_facts_match):
-                replay_divergence = {
-                    "phase": "before-submission",
-                    "seq": expectation.seq,
-                }
+                replay_divergence = _replay_divergence(
+                    "before-submission",
+                    expectation.seq,
+                    screen,
+                    None,
+                    expectation.ok,
+                    {},
+                    pre_verdict,
+                )
                 auto_trace.append(
                     {
                         "screen": screen,
@@ -1724,10 +1763,15 @@ def _seek_auto(
                 tuple(replay_context),
             )
             if not verdict.matched:
-                replay_divergence = {
-                    "phase": "after-submission",
-                    "seq": expectation.seq,
-                }
+                replay_divergence = _replay_divergence(
+                    "after-submission",
+                    expectation.seq,
+                    screen,
+                    actual_error,
+                    actual_ok,
+                    dict(assignments),
+                    verdict,
+                )
                 stop = {
                     "reason": "replay divergence",
                     "submitted": False,

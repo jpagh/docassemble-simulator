@@ -1077,8 +1077,15 @@ def test_trace_replay_reports_the_earliest_missing_expected_step(
     divergence = details["first_divergence"]
     assert divergence["step"] == automatic[1].seq
     assert divergence["identity_match"] is False
-    assert divergence["actual"].get("identity") is None
-    assert divergence["actual"]["submitted"] == {}
+    # The report carries the real walk-ending outcome (the target's `continue`
+    # resolution), not a fabricated empty observation.
+    actual = divergence["actual"]
+    assert actual["identity"]["key"] == "screen:continue"
+    assert actual["identity"]["rule"] == "category"
+    assert actual["ok"] is True
+    assert actual.get("error") is None
+    assert actual["submitted"] == {}
+    assert divergence["flow_match"] is True
     assert record.read_bytes() == golden_before
     assert _saved_session_files(root) == sessions_before
 
@@ -1193,6 +1200,7 @@ with SimulatorRuntime().activate(root):
             {
                 "replay_ok": outcome.ok,
                 "divergence": observed.get("replay_divergence"),
+                "auto_stop": (observed.get("auto_stop") or {}).get("reason"),
                 "auto_steps": len(observed.get("auto_trace") or []),
                 "before": before,
                 "after": after,
@@ -1281,7 +1289,12 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
             expected_seq = automatic[0].seq
         else:
             expected_seq = post.seq if phase == "trailing" else automatic[1].seq
-        assert observed["divergence"] == {"phase": phase, "seq": expected_seq}, name
+        assert observed["divergence"]["phase"] == phase, name
+        assert observed["divergence"]["seq"] == expected_seq, name
+        if name == "unrecorded-screen":
+            # The extra automatic screen is observed at the hard submission
+            # boundary, not submitted.
+            assert observed["auto_stop"] == "replay boundary", name
         # A divergent walk leaves the previous namespace, Saved outcome, and
         # Active seek unchanged in the isolated replay session.
         assert observed["after"] == observed["before"], name
@@ -1301,5 +1314,22 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
 
     assert observed["replay_ok"] is True
     assert observed["divergence"]["phase"] == "trailing"
+    assert observed["before"]["session_exists"] is False
+    assert observed["after"]["session_exists"] is False
+
+    # A fresh early-end walk creates no durable session either.
+    root, record, _marker = _bounded_walk_root(
+        interpreter,
+        tmp_path,
+        tmp_path_factory,
+        "fresh-early-end",
+        EARLY_END_INTERVIEW,
+    )
+    observed = _execution_seam(
+        interpreter, root, record, tmp_path / "fresh-early-end-sessions", fresh=True
+    )
+
+    assert observed["replay_ok"] is True
+    assert observed["divergence"]["phase"] == "early-end"
     assert observed["before"]["session_exists"] is False
     assert observed["after"]["session_exists"] is False

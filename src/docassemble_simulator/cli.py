@@ -951,6 +951,41 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
     )
 
 
+_REPLAY_VERDICT_FLAGS = (
+    "identity_match",
+    "field_facts_match",
+    "flow_match",
+    "error_match",
+)
+
+
+def _trace_replay_divergence_report(entry, submitted, divergence, actual_entries):
+    """Render the step execution flagged as divergent.
+
+    Execution owns the persistence decision, so the adapter reports its
+    observation and copies the trace-owned verdict instead of inferring a
+    mismatch from the report shape.
+    """
+    observation = divergence.get("observation")
+    observation = observation if isinstance(observation, dict) else {}
+    report = _trace_replay_observation(
+        entry,
+        submitted,
+        bool(observation.get("ok", False)),
+        observation.get("screen"),
+        observation.get("error"),
+        actual_entries,
+        divergence.get("submitted") or {},
+    )
+    actual_entries.append(report.pop("_actual_entry"))
+    verdict = divergence.get("verdict")
+    verdict = verdict if isinstance(verdict, dict) else {}
+    for flag in _REPLAY_VERDICT_FLAGS:
+        report[flag] = bool(verdict.get(flag, False))
+    report["match"] = all(report[flag] for flag in _REPLAY_VERDICT_FLAGS)
+    return report
+
+
 def _trace_replay_automatic_group(entries, start, overrides, execution, actual_entries):
     """Replay one recorded automatic walk in one operation-local context.
 
@@ -999,8 +1034,21 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
         details.get("auto_trace") if isinstance(details, dict) else []
     )
     actual_steps = actual_steps if isinstance(actual_steps, list) else []
+    observed = result or details
+    divergence = (
+        observed.get("replay_divergence") if isinstance(observed, dict) else None
+    )
+    divergence = divergence if isinstance(divergence, dict) else None
+    divergence_seq = divergence.get("seq") if divergence is not None else None
     reports = []
     for offset, entry in enumerate(group_entries):
+        if entry.seq == divergence_seq:
+            reports.append(
+                _trace_replay_divergence_report(
+                    entry, dict(submissions[offset]), divergence, actual_entries
+                )
+            )
+            return reports, end + (1 if post is not None else 0)
         actual = actual_steps[offset] if offset < len(actual_steps) else {}
         actual = actual if isinstance(actual, dict) else {}
         report = _trace_replay_observation(
@@ -1017,6 +1065,16 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
         if not report["match"]:
             return reports, end + (1 if post is not None else 0)
     if post is not None:
+        if post.seq == divergence_seq:
+            reports.append(
+                _trace_replay_divergence_report(
+                    post,
+                    dict(overrides.get(post.seq, dict(post.submitted))),
+                    divergence,
+                    actual_entries,
+                )
+            )
+            return reports, end + 1
         actual_error = _clean(outcome.error) if not outcome.ok else None
         actual_screen = result if outcome.ok and is_screen_outcome(result) else None
         report = _trace_replay_observation(
@@ -1029,21 +1087,6 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
         )
         actual_entries.append(report.pop("_actual_entry"))
         reports.append(report)
-    observed = result or details
-    divergence = (
-        observed.get("replay_divergence") if isinstance(observed, dict) else None
-    )
-    if isinstance(divergence, dict) and not any(
-        not report["match"] for report in reports
-    ):
-        # Execution owns the persistence decision, so its boundary, early-end,
-        # and trailing verdicts must surface even when a report would match.
-        seq = divergence.get("seq")
-        for report in reports:
-            if report["step"] == seq:
-                report["match"] = False
-                report["flow_match"] = False
-                break
     return reports, end + (1 if post is not None else 0)
 
 

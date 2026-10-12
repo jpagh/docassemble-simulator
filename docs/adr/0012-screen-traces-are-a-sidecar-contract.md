@@ -76,7 +76,13 @@ mismatch, matching rejection/completion/resolution keep their existing meaning,
 and ordinary non-replay automatic seeking keeps its existing unlimited
 behavior. The command adapter reports execution's divergence decision rather
 than inferring one by counting submissions, and a screen that failed a
-pre-submission check is reported as observed, not submitted.
+pre-submission check is reported as observed, not submitted. One limit
+remains: a hand-written schema-4 trace whose automatic entries have no
+following `post_auto` marker still replays through the legacy per-entry answer
+path, which submits the current screen without the pre-submission check and
+keeps a non-activated walk's mutations for later replayed entries. The recorder
+always writes the marker, so every recorded golden is covered by the hard
+boundary.
 
 ## Considered options
 
