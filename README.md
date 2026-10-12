@@ -207,8 +207,11 @@ redirected to stderr so stdout remains protocol-only. Timings are optional and
 remain in the protocol response.
 
 While a worker is running, editing the interview's source takes effect on the
-next operation. The worker checks the timestamp and size of the interview
-source file, every included YAML, and the declared `modules:`/`imports:` helper
+next operation. The worker checks the timestamp and size of every workspace
+source file the compiled interview read — the selected file plus each YAML its
+compiled questions came from, so an abbreviated `pkg:file` include and a
+relative include nested under another package are watched at the exact file
+docassemble read — together with the declared `modules:`/`imports:` helper
 files, once per operation and, when they changed, drops the compiled program,
 evicts the recompiled interview's declared helpers from `sys.modules`,
 invalidates their cached bytecode, and recompiles — so renaming a screen,
@@ -220,7 +223,10 @@ recursively, so an edited or newly added submodule counts. Only workspace
 declared helpers are evicted, so an installed module named in `imports:` keeps
 its identity. A declared module outside the workspace (stdlib or an installed
 docassemble package) is not watched, and neither is a workspace module the
-interview does not declare. An unchanged interview stays
+interview does not declare. Watching, eviction, and bytecode invalidation all
+resolve real paths first, so a workspace symlink that escapes the resolved root
+is not watched, evicted, or unlinked, and an include that resolves outside the
+workspace root is not watched. An unchanged interview stays
 warm and is not recompiled. A reload never touches the Saved session; `reset`
 remains the explicit way to clear it, and a reload that makes the interview
 invalid reports the usual typed `compile` error with the session intact.

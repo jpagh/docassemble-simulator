@@ -3766,3 +3766,197 @@ def test_catalog_reuses_the_compiled_interview_across_operations(
     assert observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["same_object"] is True, (label, observed)
+
+
+def _nested_reload_workspace(tmp_path):
+    """A cross-package interview whose includes need real path resolution.
+
+    ``main.yml`` (package ``reload``) includes an abbreviated colon identity
+    ``docassemble.other:screens.yml`` and a nested cross-package file
+    ``docassemble.other:data/questions/section.yml``, whose own relative
+    include ``screens2.yml`` resolves against ``other``'s questions directory.
+    A same-basename ``screens.yml`` under ``reload`` is not included.
+    """
+    for package in ("reload", "other"):
+        directory = tmp_path / "docassemble" / package
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "__init__.py").write_text("", encoding="utf-8")
+    main = tmp_path / "docassemble" / "reload" / "data" / "questions" / "main.yml"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    main.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: First screen\n"
+        "fields:\n"
+        "  - Name: user_name\n"
+        "---\n"
+        "include:\n"
+        "  - docassemble.other:screens.yml\n"
+        "  - docassemble.other:data/questions/section.yml\n",
+        encoding="utf-8",
+    )
+    other = tmp_path / "docassemble" / "other" / "data" / "questions"
+    other.mkdir(parents=True, exist_ok=True)
+    abbreviated = other / "screens.yml"
+    abbreviated.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Abbreviated screen\n"
+        "fields:\n"
+        "  - Abbrev: abbrev_value\n",
+        encoding="utf-8",
+    )
+    section = other / "section.yml"
+    section.write_text(
+        "---\n"
+        "include:\n"
+        "  - screens2.yml\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Section screen\n"
+        "fields:\n"
+        "  - Section: section_value\n",
+        encoding="utf-8",
+    )
+    nested = other / "screens2.yml"
+    nested.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Nested sibling screen\n"
+        "fields:\n"
+        "  - Nested: nested_value\n",
+        encoding="utf-8",
+    )
+    unrelated = (
+        tmp_path / "docassemble" / "reload" / "data" / "questions" / "screens.yml"
+    )
+    unrelated.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: Unrelated screen\n"
+        "fields:\n"
+        "  - Unrelated: unrelated_value\n",
+        encoding="utf-8",
+    )
+    return {
+        "main": main,
+        "abbreviated": abbreviated,
+        "section": section,
+        "nested": nested,
+        "unrelated": unrelated,
+    }
+
+
+WATCH_HARNESS = """\
+import json
+import os
+import sys
+from pathlib import Path
+
+from docassemble_simulator._runtime import SimulatorRuntime
+from docassemble_simulator.bootstrap import bootstrap
+from docassemble_simulator.execution import InterviewExecution, Refresh, Start
+from docassemble_simulator.preflight import ensure_importable
+
+root = Path(sys.argv[1]).resolve()
+identity = sys.argv[2]
+session_directory = Path(sys.argv[3]).resolve()
+target = Path(sys.argv[4]).resolve()
+with SimulatorRuntime().activate(root):
+    ensure_importable(root, offline=True)
+    bootstrap()
+    execution = InterviewExecution(
+        root,
+        identity,
+        session_directory=session_directory,
+        cache_interview=True,
+    )
+    key = execution._identity
+    started = execution.run(Start())
+    compiled_first = execution._catalog._compiled.get(key)
+    # Edit the target in place with a distinct mtime, then drive one more
+    # operation so the reload check runs.
+    target.write_text(target.read_text(encoding="utf-8") + "\\n", encoding="utf-8")
+    stamp = os.stat(target).st_mtime + 10
+    os.utime(target, (stamp, stamp))
+    refreshed = execution.run(Refresh())
+    compiled_second = execution._catalog._compiled.get(key)
+    print(json.dumps({
+        "start_ok": started.ok,
+        "refresh_ok": refreshed.ok,
+        "compiled": compiled_first is not None,
+        "reloaded": compiled_second is not compiled_first,
+    }))
+"""
+
+
+def _run_watch_harness(interpreter, root, target, session_directory):
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-c",
+            WATCH_HARNESS,
+            str(root),
+            "docassemble.reload:data/questions/main.yml",
+            str(session_directory),
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=180,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout.strip())
+
+
+def test_watch_set_covers_abbreviated_colon_include(family_python, tmp_path):
+    """An abbreviated ``pkg:file`` include is watched at its real path."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    paths = _nested_reload_workspace(root)
+
+    observed = _run_watch_harness(
+        interpreter, root, paths["abbreviated"], tmp_path / "abbrev-sessions"
+    )
+
+    assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
+    assert observed["compiled"] is True, (label, observed)
+    assert observed["reloaded"] is True, (label, observed)
+
+
+def test_watch_set_covers_cross_package_nested_sibling(family_python, tmp_path):
+    """A relative include is watched against its own owning source's dir."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    paths = _nested_reload_workspace(root)
+
+    observed = _run_watch_harness(
+        interpreter, root, paths["nested"], tmp_path / "nested-sessions"
+    )
+
+    assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
+    assert observed["compiled"] is True, (label, observed)
+    assert observed["reloaded"] is True, (label, observed)
+
+
+def test_watch_set_ignores_unrelated_same_basename_file(family_python, tmp_path):
+    """A same-basename file that was not compiled is not watched."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    paths = _nested_reload_workspace(root)
+
+    observed = _run_watch_harness(
+        interpreter, root, paths["unrelated"], tmp_path / "unrelated-sessions"
+    )
+
+    assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
+    assert observed["compiled"] is True, (label, observed)
+    assert observed["reloaded"] is False, (label, observed)

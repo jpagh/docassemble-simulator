@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 from docassemble_simulator import catalog as catalog_module
@@ -673,24 +674,27 @@ def test_new_file_under_watched_package_triggers_reload(
     assert len(calls) == 2
 
 
-def _included_interview(includes):
+def _provenance_interview(paths):
+    """An interview whose compiled questions came from the given files."""
+
     def factory():
+        questions = [
+            SimpleNamespace(from_source=SimpleNamespace(filepath=str(path)))
+            for path in paths
+        ]
         return SimpleNamespace(
-            questions_list=[],
-            questions={},
-            default_language="en",
-            includes=set(includes),
+            questions_list=questions, questions={}, default_language="en"
         )
 
     return factory
 
 
-def test_included_yaml_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
+def test_included_source_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
     source = _reload_workspace(tmp_path)
     included = source.parent / "included.yml"
     included.write_text("---\nquestion: Included\nfields:\n  - Name: user_name\n")
     calls = _install_interview_cache(
-        monkeypatch, source, _included_interview(["included.yml"])
+        monkeypatch, source, _provenance_interview([source, included])
     )
     catalog = InterviewCatalog(
         tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
@@ -703,8 +707,8 @@ def test_included_yaml_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
     included.write_text("---\nquestion: Changed\nfields:\n  - Name: user_name\n")
     os.utime(included, (0, 0))
 
-    # An edit to a YAML the interview includes invalidates the compile even
-    # though the selected source is untouched.
+    # An edit to a source the compiled questions came from invalidates the
+    # compile even though the selected source is untouched.
     second = catalog._compile()
     assert second is not first
     assert len(calls) == 2
@@ -712,12 +716,40 @@ def test_included_yaml_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
     assert len(calls) == 2
 
 
-def test_missing_included_yaml_forces_reload(tmp_path, monkeypatch, da_stubs):
+def test_unrelated_same_basename_source_does_not_reload(
+    tmp_path, monkeypatch, da_stubs
+):
+    source = _reload_workspace(tmp_path)
+    included = source.parent / "included.yml"
+    included.write_text("---\nquestion: Included\nfields:\n  - Name: user_name\n")
+    # A file with the same basename in another package is not a compiled
+    # source and must not be watched.
+    other = tmp_path / "docassemble" / "other" / "data" / "questions"
+    other.mkdir(parents=True)
+    (tmp_path / "docassemble" / "other" / "__init__.py").write_text("")
+    same_name = other / "included.yml"
+    same_name.write_text("---\nquestion: Other\nfields:\n  - Name: user_name\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _provenance_interview([source, included])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    same_name.write_text("---\nquestion: Changed\nfields:\n  - Name: user_name\n")
+    os.utime(same_name, (0, 0))
+
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+
+def test_missing_included_source_forces_reload(tmp_path, monkeypatch, da_stubs):
     source = _reload_workspace(tmp_path)
     included = source.parent / "included.yml"
     included.write_text("---\nquestion: Included\nfields:\n  - Name: user_name\n")
     calls = _install_interview_cache(
-        monkeypatch, source, _included_interview(["included.yml"])
+        monkeypatch, source, _provenance_interview([source, included])
     )
     catalog = InterviewCatalog(
         tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
@@ -726,11 +758,79 @@ def test_missing_included_yaml_forces_reload(tmp_path, monkeypatch, da_stubs):
     first = catalog._compile()
     included.unlink()
 
-    # A missing included source is treated as changed, like a missing main
+    # A missing compiled source is treated as changed, like a missing main
     # source, so recompilation can surface the typed compile error.
     second = catalog._compile()
     assert second is not first
     assert len(calls) == 2
+
+
+def test_outside_root_source_is_not_watched(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    outside = tmp_path.parent / (tmp_path.name + "-outside-source")
+    outside.mkdir()
+    outside_source = outside / "extra.yml"
+    outside_source.write_text("---\nquestion: Outside\nfields:\n  - Name: user_name\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _provenance_interview([source, outside_source])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    outside_source.write_text("---\nquestion: Changed\nfields:\n  - Name: user_name\n")
+    os.utime(outside_source, (0, 0))
+
+    # A compiled source outside the resolved workspace root is not watched.
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+
+def test_symlinked_module_outside_workspace_is_not_watched_or_evicted(
+    tmp_path, monkeypatch, da_stubs
+):
+    from importlib.util import cache_from_source
+
+    source = _reload_workspace(tmp_path)
+    package = tmp_path / "docassemble" / "pkg"
+    outside = tmp_path.parent / (tmp_path.name + "-outside-module")
+    outside.mkdir()
+    outside_helper = outside / "helpers.py"
+    outside_helper.write_text("VALUE = 'outside'\n")
+    # The declared helper is a symlink escaping the resolved workspace root.
+    (package / "helpers.py").symlink_to(outside_helper)
+    stale_bytecode = Path(cache_from_source(str(outside_helper)))
+    stale_bytecode.parent.mkdir(parents=True, exist_ok=True)
+    stale_bytecode.write_bytes(b"stale")
+    calls = _install_interview_cache(
+        monkeypatch, source, _modules_interview(["docassemble.pkg.helpers"])
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "docassemble.pkg.helpers",
+        types.ModuleType("docassemble.pkg.helpers"),
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    # Not watched: an edit to the outside target does not invalidate the
+    # compile, even though the workspace name resolves through a symlink.
+    outside_helper.write_text("VALUE = 'edited'\n")
+    os.utime(outside_helper, (0, 0))
+    assert catalog._compile() is first
+    assert len(calls) == 1
+
+    # Not evicted or unlinked: a real source edit reloads, but the escaping
+    # module keeps its identity and its bytecode cache stays put.
+    source.write_text("---\nquestion: Second\nfields:\n  - Name: user_name\n")
+    os.utime(source, (0, 0))
+    catalog._compile()
+    assert len(calls) == 2
+    assert sys.modules.get("docassemble.pkg.helpers") is not None
+    assert stale_bytecode.is_file()
 
 
 def test_reload_keeps_installed_module_identity(tmp_path, monkeypatch, da_stubs):
