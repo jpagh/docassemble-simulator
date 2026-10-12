@@ -342,16 +342,21 @@ printf '%s\n' \
 The `trace-compare` request mirrors `sim trace compare`: `expected` and
 `actual` (required sidecar paths), `order` (`ordered` by default, or
 `unordered`/`phased`), `missing`/`extra` (`strict` by default, or `allow`),
-`full_text`, `phases` (an array or comma-separated string), and an optional
-`exceptions` TOML path. It is read-only — the worker has no `--update` path and
-never writes a golden. For the same sidecars and policy the response `result`
+`full_text`, `phases` (an array or comma-separated string, only with
+`order: phased` — as with `--phases`, declaring phases for another order is the
+typed `input` error `sim` reports), and an optional `exceptions` TOML path. It
+is read-only: `--update` is the CLI's one golden write path, so the worker has
+no `--update` path, a request carrying `update` is the typed `input` error
+`trace compare update is not a worker capability`, and the worker never writes
+a golden. For the same sidecars and policy the response `result`
 is the `sim trace compare --json` result, and a mismatch is the typed
 `trace-mismatch` error whose `details` are that same report.
 
 The `trace-replay` request mirrors `sim trace replay`: `golden` (required),
 `overrides` (a `STEP.FIELD=VALUE` array, or a single `override` string), and an
 optional `interview` (it defaults to the worker's own interview, so a golden
-for another interview is rejected). The replay runs against its own temporary
+for another interview is rejected); `update` is rejected here too, because the
+worker never writes a golden. The replay runs against its own temporary
 session directory, so it never reads or writes the worker's Saved session and
 never writes the golden; a divergent activated walk leaves no durable session
 behind. The response `result` is the `sim trace replay --json` result
@@ -360,13 +365,17 @@ behind. The response `result` is the `sim trace replay --json` result
 
 Replaying through a warm worker reuses the interview the journey already
 compiled, because docassemble's compiled-interview cache is process-global and
-the replay's short-lived execution reads it rather than recompiling. On the
-`da110` lane a measured replay of a recorded default/auto/validation scenario
-takes ~15 ms once the worker is warm, against ~3 s for a fresh
-`sim trace replay` process whose cost is dominated by interpreter startup and
-bootstrap. The first trace request into a worker that has not compiled the
-interview yet pays that one-time compile inside the replay (~0.1 s for the
-same scenario). Replay is still one execution per request: it does not reuse a
+the replay's short-lived execution reads it rather than recompiling. Before
+each replay, and before every `questions`/`index`/`check` request, the worker
+runs the same lazy source check its execution operations use (#47), so an edit
+between two requests is recompiled rather than served stale; an unchanged
+source stays warm. Development measurements on the `da110` lane (a scratch
+measurement of one recorded default/auto/validation scenario, not a repository
+benchmark and not part of any gate) put a warm replay around 15 ms against
+about 3 s for a fresh `sim trace replay` process whose cost is dominated by
+interpreter startup and bootstrap, with the one-time compile for a worker that
+has not compiled the interview yet around 0.1 s inside that first request.
+Replay is still one execution per request: it does not reuse a
 previous replay's working state.
 
 The Python client uses the same protocol and lifecycle:

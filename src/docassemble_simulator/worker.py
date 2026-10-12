@@ -44,14 +44,19 @@ class WorkerProtocolError(ValueError):
 RequestHandler = Callable[["Worker", Any], Outcome]
 """A command-adapter request served outside the execution operation vocabulary.
 
-The handler owns the protocol-to-operation mapping (``render`` is the only
-current one) and returns the same typed :class:`Outcome` an execution
-operation returns.  Registering it through ``Worker`` keeps ``worker.py`` an
-operation-only server: the worker still owns serialization, the operation
-lock, the per-request deadline, and the error envelope, while the command
-adapter keeps the request fields and any CLI-flavored concerns.  Handlers are
-looked up by canonical :func:`operation_name` and never intercept the
-protocol lifecycle operations (``ping``, ``reset``, ``shutdown``).
+The handler owns the protocol-to-operation mapping and returns the same typed
+:class:`Outcome` an execution operation returns. Registering it through
+``Worker`` keeps ``worker.py`` an operation-only server: the worker still owns
+serialization, the operation lock, the per-request deadline, and the error
+envelope, while the command adapter keeps the request fields and any
+CLI-flavored concerns. Handlers are looked up by canonical
+:func:`operation_name` and never intercept the protocol lifecycle operations
+(``ping``, ``reset``, ``shutdown``).
+
+The current handlers are the command adapter's adapter seams (ADR-0015):
+``render``; the read-only catalog/project requests ``questions``, ``index``,
+``check``, ``why``, ``info``, and ``config``; and the trace requests
+``trace-compare`` and ``trace-replay``.
 """
 
 

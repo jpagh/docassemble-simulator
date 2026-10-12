@@ -14,10 +14,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from worker_adapter_fakes import AdapterFakeExecution
 
 from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
-from docassemble_simulator.execution import ExecutionScope
 from docassemble_simulator.trace import (
     ComparePolicy,
     ScreenIdentity,
@@ -30,32 +30,9 @@ from docassemble_simulator.trace import (
 from docassemble_simulator.worker import Worker, WorkerProtocolError, serve
 
 
-class _FakeExecution:
-    """A worker execution that must never serve a trace request."""
-
-    _identity = "docassemble.example:data/questions/main.yml"
-
-    def __init__(self, tmp_path):
-        self.scope = ExecutionScope(
-            tmp_path,
-            self._identity,
-            "",
-            tmp_path / "sessions",
-            tmp_path / "sessions" / "main.pkl",
-        )
-        self.operations = []
-
-    def run(self, operation):
-        self.operations.append(operation)
-        raise AssertionError("trace requests must not run an execution operation")
-
-    def reset(self):
-        pass
-
-
 def _worker(tmp_path, handlers):
     return Worker(
-        tmp_path, execution=_FakeExecution(tmp_path), timeout=1, handlers=handlers
+        tmp_path, execution=AdapterFakeExecution(tmp_path), timeout=1, handlers=handlers
     )
 
 
@@ -115,11 +92,8 @@ def test_trace_compare_worker_returns_the_cli_report(monkeypatch, tmp_path):
         return _comparison(True)
 
     monkeypatch.setattr(cli, "_trace_compare_report", fake)
-    worker = SimpleNamespace(root=tmp_path)
 
-    outcome = cli._trace_compare_worker_request(
-        SimpleNamespace(), worker, {"expected": "golden", "actual": "run"}
-    )
+    outcome = cli._trace_compare_worker_request({"expected": "golden", "actual": "run"})
 
     assert outcome.ok is True
     assert outcome.result["matched"] is True
@@ -137,11 +111,8 @@ def test_trace_compare_worker_maps_the_policy_and_exceptions(monkeypatch, tmp_pa
             seen.update(policy=policy, exceptions=exceptions) or _comparison(True)
         ),
     )
-    worker = SimpleNamespace(root=tmp_path)
 
     cli._trace_compare_worker_request(
-        SimpleNamespace(),
-        worker,
         {
             "expected": "golden",
             "actual": "run",
@@ -178,9 +149,7 @@ def test_trace_compare_worker_accepts_a_hyphenated_full_text_flag(
     )
 
     cli._trace_compare_worker_request(
-        SimpleNamespace(),
-        SimpleNamespace(root=tmp_path),
-        {"expected": "golden", "actual": "run", "full-text": True},
+        {"expected": "golden", "actual": "run", "full-text": True}
     )
 
     assert seen["policy"].full_text is True
@@ -192,11 +161,8 @@ def test_trace_compare_worker_reports_a_mismatch_as_trace_mismatch(
     monkeypatch.setattr(
         cli, "_trace_compare_report", lambda *a, **k: _comparison(False)
     )
-    worker = SimpleNamespace(root=tmp_path)
 
-    outcome = cli._trace_compare_worker_request(
-        SimpleNamespace(), worker, {"expected": "golden", "actual": "run"}
-    )
+    outcome = cli._trace_compare_worker_request({"expected": "golden", "actual": "run"})
 
     assert outcome.ok is False
     assert outcome.error.kind == ErrorKind.TRACE_MISMATCH
@@ -211,11 +177,8 @@ def test_trace_compare_worker_maps_a_trace_error_to_input(monkeypatch, tmp_path)
         raise TraceError("could not read trace golden")
 
     monkeypatch.setattr(cli, "_trace_compare_report", fail)
-    worker = SimpleNamespace(root=tmp_path)
 
-    outcome = cli._trace_compare_worker_request(
-        SimpleNamespace(), worker, {"expected": "golden", "actual": "run"}
-    )
+    outcome = cli._trace_compare_worker_request({"expected": "golden", "actual": "run"})
 
     assert outcome.ok is False
     assert outcome.error.kind == ErrorKind.INPUT
@@ -236,15 +199,24 @@ def test_trace_compare_worker_maps_a_trace_error_to_input(monkeypatch, tmp_path)
     ],
 )
 def test_trace_compare_worker_rejects_malformed_requests(tmp_path, payload, message):
-    worker = SimpleNamespace(root=tmp_path)
 
     with pytest.raises(WorkerProtocolError, match=message):
-        cli._trace_compare_worker_request(SimpleNamespace(), worker, payload)
+        cli._trace_compare_worker_request(payload)
 
 
 # -- trace replay ----------------------------------------------------------
 
 INTERVIEW = "docassemble.example:data/questions/main.yml"
+
+
+def _replay_worker(tmp_path, execution=None):
+    """A worker namespace for the replay handler, with a refreshable execution."""
+    return SimpleNamespace(
+        root=tmp_path,
+        identity=INTERVIEW,
+        execution=execution
+        or SimpleNamespace(ensure_current=lambda identity=None: None),
+    )
 
 
 def test_trace_replay_worker_returns_a_clean_report(monkeypatch, tmp_path):
@@ -253,11 +225,11 @@ def test_trace_replay_worker_returns_a_clean_report(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli,
         "_trace_replay_report",
-        lambda args, root, overrides: (
-            seen.update(args=args, root=root, overrides=overrides) or report
+        lambda root, golden, **kwargs: (
+            seen.update(root=root, golden=golden, **kwargs) or report
         ),
     )
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW)
+    worker = _replay_worker(tmp_path)
 
     outcome = cli._trace_replay_worker_request(
         SimpleNamespace(),
@@ -268,9 +240,10 @@ def test_trace_replay_worker_returns_a_clean_report(monkeypatch, tmp_path):
     assert outcome.ok is True
     assert outcome.result["clean"] is True
     assert seen["root"] == tmp_path
+    assert seen["golden"] == "golden.jsonl"
     assert seen["overrides"] == ("2.user_name=Bob",)
-    assert seen["args"].golden == "golden.jsonl"
-    assert seen["args"].interview == INTERVIEW
+    assert seen["interview"] == INTERVIEW
+    assert seen["resolved_configuration"] is None
 
 
 def test_trace_replay_worker_reports_a_divergence_as_trace_mismatch(
@@ -278,9 +251,9 @@ def test_trace_replay_worker_reports_a_divergence_as_trace_mismatch(
 ):
     report = _replay_report(False)
     monkeypatch.setattr(
-        cli, "_trace_replay_report", lambda args, root, overrides: report
+        cli, "_trace_replay_report", lambda root, golden, **kwargs: report
     )
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW)
+    worker = _replay_worker(tmp_path)
 
     outcome = cli._trace_replay_worker_request(
         SimpleNamespace(), worker, {"golden": "golden.jsonl"}
@@ -295,11 +268,11 @@ def test_trace_replay_worker_reports_a_divergence_as_trace_mismatch(
 def test_trace_replay_worker_maps_a_metadata_mismatch_to_input(monkeypatch, tmp_path):
     from docassemble_simulator.trace import TraceError
 
-    def fail(args, root, overrides):
+    def fail(root, golden, **kwargs):
         raise TraceError("trace config fingerprint mismatch: 'a' does not match 'b'")
 
     monkeypatch.setattr(cli, "_trace_replay_report", fail)
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW)
+    worker = _replay_worker(tmp_path)
 
     outcome = cli._trace_replay_worker_request(
         SimpleNamespace(), worker, {"golden": "golden.jsonl"}
@@ -315,9 +288,9 @@ def test_trace_replay_worker_honours_an_explicit_interview(monkeypatch, tmp_path
     monkeypatch.setattr(
         cli,
         "_trace_replay_report",
-        lambda args, root, overrides: seen.update(args=args) or _replay_report(True),
+        lambda root, golden, **kwargs: seen.update(kwargs) or _replay_report(True),
     )
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW)
+    worker = _replay_worker(tmp_path)
 
     cli._trace_replay_worker_request(
         SimpleNamespace(),
@@ -328,7 +301,7 @@ def test_trace_replay_worker_honours_an_explicit_interview(monkeypatch, tmp_path
         },
     )
 
-    assert seen["args"].interview == "docassemble.other:data/questions/main.yml"
+    assert seen["interview"] == "docassemble.other:data/questions/main.yml"
 
 
 def test_trace_replay_worker_accepts_a_single_override_string(monkeypatch, tmp_path):
@@ -336,11 +309,9 @@ def test_trace_replay_worker_accepts_a_single_override_string(monkeypatch, tmp_p
     monkeypatch.setattr(
         cli,
         "_trace_replay_report",
-        lambda args, root, overrides: (
-            seen.update(overrides=overrides) or _replay_report(True)
-        ),
+        lambda root, golden, **kwargs: seen.update(kwargs) or _replay_report(True),
     )
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW)
+    worker = _replay_worker(tmp_path)
 
     cli._trace_replay_worker_request(
         SimpleNamespace(),
@@ -362,7 +333,7 @@ def test_trace_replay_worker_accepts_a_single_override_string(monkeypatch, tmp_p
     ],
 )
 def test_trace_replay_worker_rejects_malformed_requests(tmp_path, payload, message):
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW)
+    worker = _replay_worker(tmp_path)
 
     with pytest.raises(WorkerProtocolError, match=message):
         cli._trace_replay_worker_request(SimpleNamespace(), worker, payload)
@@ -371,10 +342,101 @@ def test_trace_replay_worker_rejects_malformed_requests(tmp_path, payload, messa
 # -- protocol --------------------------------------------------------------
 
 
+def test_trace_replay_worker_refreshes_the_source_before_replaying(
+    monkeypatch, tmp_path
+):
+    """The replay refreshes the worker's watch before its isolated execution.
+
+    A replay compiles through its own short-lived execution, which reads
+    docassemble's process-global compiled-interview cache; the worker's own
+    watch is the only thing that can invalidate that entry when the source
+    changed between two requests.
+    """
+    order = []
+    monkeypatch.setattr(
+        cli,
+        "_trace_replay_report",
+        lambda *args, **kwargs: order.append("replay") or _replay_report(True),
+    )
+    execution = SimpleNamespace(
+        ensure_current=lambda identity=None: order.append(("refresh", identity))
+    )
+    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW, execution=execution)
+
+    outcome = cli._trace_replay_worker_request(
+        SimpleNamespace(), worker, {"golden": "golden.jsonl"}
+    )
+
+    assert outcome.ok is True
+    assert order == [("refresh", INTERVIEW), "replay"]
+
+
+def test_trace_replay_worker_refreshes_the_requested_interview(monkeypatch, tmp_path):
+    """A replay for another interview refreshes the identity it will compile."""
+    refreshed = []
+    monkeypatch.setattr(
+        cli, "_trace_replay_report", lambda *args, **kwargs: _replay_report(True)
+    )
+    execution = SimpleNamespace(ensure_current=refreshed.append)
+    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW, execution=execution)
+
+    cli._trace_replay_worker_request(
+        SimpleNamespace(),
+        worker,
+        {
+            "golden": "golden.jsonl",
+            "interview": "docassemble.other:data/questions/main.yml",
+        },
+    )
+
+    assert refreshed == ["docassemble.other:data/questions/main.yml"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"expected": "g", "actual": "r", "phases": "intake,close"},
+            "phases is only used with order phased",
+        ),
+        (
+            {
+                "expected": "g",
+                "actual": "r",
+                "order": "ordered",
+                "phases": ["intake"],
+            },
+            "phases is only used with order phased",
+        ),
+        (
+            {"expected": "g", "actual": "r", "update": True},
+            "update is not a worker capability",
+        ),
+    ],
+)
+def test_trace_compare_worker_rejects_policy_the_cli_refuses(
+    tmp_path, payload, message
+):
+    """The CLI refuses these pairings; the worker must not ignore them."""
+
+    with pytest.raises(WorkerProtocolError, match=message):
+        cli._trace_compare_worker_request(payload)
+
+
+def test_trace_replay_worker_rejects_the_update_field(tmp_path):
+    """``--update`` is the CLI's golden write path; a worker never writes one."""
+    worker = _replay_worker(tmp_path)
+
+    with pytest.raises(WorkerProtocolError, match="update is not a worker capability"):
+        cli._trace_replay_worker_request(
+            SimpleNamespace(), worker, {"golden": "g", "update": True}
+        )
+
+
 def test_trace_requests_flow_through_the_worker_protocol(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_trace_compare_report", lambda *a, **k: _comparison(True))
     monkeypatch.setattr(
-        cli, "_trace_replay_report", lambda args, root, overrides: _replay_report(True)
+        cli, "_trace_replay_report", lambda root, golden, **kwargs: _replay_report(True)
     )
     worker = _worker(
         tmp_path,
@@ -489,12 +551,13 @@ def test_trace_replay_report_runs_in_a_temporary_session_directory(
             return SimpleNamespace(ok=True, result=trace.entries[0].screen, error=None)
 
     monkeypatch.setattr(execution_module, "InterviewExecution", FakeExecution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
-    args = SimpleNamespace(
-        golden=str(golden), interview=None, _resolved_configuration=None
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
     )
 
-    report = cli._trace_replay_report(args, tmp_path)
+    report = cli._trace_replay_report(tmp_path, str(golden))
 
     assert report["clean"] is True
     assert captured["root"] == tmp_path
@@ -526,7 +589,11 @@ def test_trace_replay_worker_never_runs_the_workers_own_execution(
             return SimpleNamespace(ok=True, result=trace.entries[0].screen, error=None)
 
     monkeypatch.setattr(execution_module, "InterviewExecution", FakeExecution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
     worker = _worker(
         tmp_path,
         cli._trace_worker_handlers(
@@ -677,8 +744,6 @@ def test_trace_compare_worker_report_equals_the_cli_for_every_policy_case(
         cli_payload = json.loads(capsys.readouterr().out)
 
         outcome = cli._trace_compare_worker_request(
-            SimpleNamespace(),
-            SimpleNamespace(root=tmp_path),
             {
                 "expected": str(expected_path),
                 "actual": str(actual_path),
