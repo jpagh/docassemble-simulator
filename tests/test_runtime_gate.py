@@ -47,6 +47,19 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
               printf 'legacy=%s\\n' "${{{LEGACY_ENV}:-}}"
               printf 'gate=%s\\n' "${{{GATE_ENV}:-}}"
             }} > "{env_log}"
+            # A real pytest prints the durations section only when asked, so
+            # the substitute does too: a gate that drops the flag produces no
+            # summary for the test to find (#53).
+            durations=""
+            for argument in "$@"; do
+              case "$argument" in
+                --durations=*) durations="$argument" ;;
+              esac
+            done
+            if [[ -n "$durations" ]]; then
+              printf '%s\\n' "slowest 15 durations"
+              printf '%s\\n' "0.01s call     tests/test_durations_probe.py::test_probe"
+            fi
             exit "${{GATE_PROBE_UV_STATUS:-0}}"
             """
         ),
@@ -169,6 +182,28 @@ def test_runtime_gate_wires_both_lane_interpreters(tmp_path, name, family, versi
     assert recorded["modern"] == str(modern)
     assert recorded["legacy"] == str(legacy)
     assert recorded["gate"] == "1"
+
+
+def test_runtime_gate_surfaces_the_slowest_durations(tmp_path):
+    """A dropped ``--durations`` fails here, not only in an argv assertion (#53).
+
+    The controlled ``uv`` substitute prints a durations summary only when the
+    gate forwards ``--durations``, so this asserts the summary reaches the
+    gate's output instead of merely appearing in argv.
+    """
+    bin_dir, args_log, _ = _fake_uv(tmp_path)
+    modern = fake_interpreter(tmp_path, "modern-python", "modern", "1.10.13")
+    legacy = fake_interpreter(tmp_path, "legacy-python", "legacy", "1.9.13")
+    result = _run_gate(
+        tmp_path,
+        modern=modern,
+        legacy=legacy,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--durations=15" in args_log.read_text().splitlines()
+    assert "slowest 15 durations" in result.stdout
 
 
 def test_runtime_gate_sizes_workers_to_the_machine(tmp_path):
