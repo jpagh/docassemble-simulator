@@ -545,12 +545,6 @@ class InterviewCatalog:
             for path in sorted(questions.rglob("*.yml")) + sorted(
                 questions.rglob("*.yaml")
             ):
-                relative = path.relative_to(questions)
-                if any(
-                    part.startswith(".") or part == "__pycache__"
-                    for part in relative.parts
-                ):
-                    continue
                 candidates.append(str(path))
         return candidates
 

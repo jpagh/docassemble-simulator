@@ -786,6 +786,33 @@ def test_workspace_scan_covers_include_only_source(tmp_path, monkeypatch, da_stu
     assert len(calls) == 2
 
 
+def test_workspace_scan_covers_hidden_include_only_source(
+    tmp_path, monkeypatch, da_stubs
+):
+    source = _reload_workspace(tmp_path)
+    routing = source.parent / ".routing.yml"
+    routing.write_text("---\ninclude:\n  - a.yml\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _provenance_interview([source])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+
+    # A dot-prefixed include-only source has no provenance and no compiled
+    # question, so only the questions-tree scan can watch it; the scan must not
+    # exclude hidden names.
+    routing.write_text("---\ninclude:\n  - b.yml\n")
+    os.utime(routing, (0, 0))
+
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+
+
 def test_workspace_scan_covers_features_only_source(tmp_path, monkeypatch, da_stubs):
     source = _reload_workspace(tmp_path)
     features = source.parent / "features.yml"
