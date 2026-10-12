@@ -1685,6 +1685,43 @@ def test_worker_catalog_requests_match_one_shot_payloads_across_families(
     assert not list(session_root.glob("*.pkl")), (label, "why")
 
 
+def test_worker_why_with_a_saved_session_matches_the_one_shot_command(
+    family_python, real_workspace, worker_journey
+):
+    """A saved-session ``why`` is the CLI report and leaves the session alone (#52)."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    interview = "resolution.yml"
+    _assert_family_interpreter(case)
+
+    started = _run(interpreter, root, "start", "--interview", interview)
+    assert started["ok"], label
+    assert started["result"]["kind"] == "question", (label, started)
+    sessions = root / ".simulator" / "sessions"
+    session = next(sessions.glob("*.pkl"))
+    before = session.read_bytes()
+
+    expected = _run(
+        interpreter, root, "why", "resolution_value", "--interview", interview
+    )
+    assert expected["ok"], label
+    assert expected["result"]["session_state"] == "saved", label
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=case.probe,
+        interview=interview,
+        session_root=sessions,
+    )
+    response = journey.request("why", variable="resolution_value")
+
+    assert response["ok"] is True, (label, response)
+    assert response["result"] == expected["result"], (label, "why")
+    assert session.read_bytes() == before, label
+
+
 def test_worker_check_reports_a_compile_failure_across_families(
     family_python, real_workspace, worker_journey
 ):
