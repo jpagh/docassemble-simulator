@@ -1584,6 +1584,87 @@ def test_unknown_resolution_overlap_is_conservative_across_families(
     assert session.read_bytes() == before, label
 
 
+def test_worker_catalog_requests_match_one_shot_payloads_across_families(
+    family_python, real_workspace, worker_journey
+):
+    """Catalog requests return the one-shot ``--json`` payload from a warm worker."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    interview = "docassemble.regression:data/questions/generic.yml"
+    session_root = root / "worker-catalog-sessions"
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=case.probe,
+        interview=interview,
+        session_root=session_root,
+    )
+
+    for command in ("questions", "index", "check", "info", "config"):
+        args = (
+            ("--interview", interview)
+            if command in {"questions", "index", "check"}
+            else ()
+        )
+        expected = _run(interpreter, root, command, *args)
+        response = journey.request(command)
+        assert response["ok"] is True, (label, command, response)
+        assert response["result"] == expected["result"], (label, command)
+        # A catalog request never creates a Saved session.
+        assert not list(session_root.glob("*.pkl")), (label, command)
+
+    static = _run(interpreter, root, "why", "start", "--interview", interview)
+    reason = journey.request("why", variable="start")
+    assert reason["ok"] is True, (label, reason)
+    assert reason["result"] == static["result"], (label, "why")
+    assert not list(session_root.glob("*.pkl")), (label, "why")
+
+
+def test_worker_check_reports_a_compile_failure_across_families(
+    family_python, real_workspace, worker_journey
+):
+    """A per-Interview compile failure is the typed catalog error, not a fault."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    broken = root / "docassemble" / "regression" / "data" / "questions" / "broken.yml"
+    broken.write_text(
+        '---\nquestion: "unterminated\nfields:\n  - Value: broken_value\n',
+        encoding="utf-8",
+    )
+    interview = "docassemble.regression:data/questions/broken.yml"
+
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-m",
+            "docassemble_simulator",
+            "--root",
+            str(root),
+            "--json",
+            "check",
+            "--interview",
+            interview,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=120,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    expected = json.loads(completed.stdout)
+    assert expected["error"]["kind"] == "compile", (label, expected)
+
+    journey = worker_journey(interpreter, root, family=case.probe, interview=interview)
+    response = journey.request("check")
+    assert response["ok"] is False, (label, response)
+    assert response["error"]["kind"] == "compile", (label, response)
+
+
 def test_seek_contract_across_families(family_python, real_workspace, worker_journey):
     case = family_python
     label, interpreter = case.label, case.interpreter
