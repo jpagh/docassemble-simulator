@@ -2087,6 +2087,147 @@ def test_real_runtime_rehydrates_helpers_for_every_render_source(
         _assert_helper_output(artifact)
 
 
+def test_persistent_worker_render_matches_the_one_shot_command(
+    family_python, real_workspace, worker_journey
+):
+    """A worker render is the one-shot render, byte for byte, on every family."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+
+    journey = worker_journey(interpreter, root, interview="main.yml", family=case.probe)
+
+    def compare(template, cli_flags, worker_fields, target):
+        """Render the same scenario both ways into one path and compare.
+
+        Writing both runs to the same target makes the reported artifact path
+        part of the comparison, so the worker result must equal the
+        ``sim render --json`` result exactly, and the second run's document
+        must equal the first's.
+        """
+        payload = _run(
+            interpreter,
+            root,
+            "render",
+            "--interview",
+            "main.yml",
+            template,
+            *cli_flags,
+            "--output",
+            str(target),
+        )
+        document = _document_xml(target)
+        response = journey.request(
+            "render", template=template, output=str(target), **worker_fields
+        )
+        assert response["ok"], (label, response)
+        assert response["result"] == payload["result"], label
+        assert _document_xml(target) == document, label
+        return response
+
+    fresh = root / "fresh.docx"
+    compare(
+        "helpers.docx",
+        ["--fresh", "--no-assemble"],
+        {"source": "fresh", "no_assemble": True},
+        fresh,
+    )
+
+    fixture_source = root / "fixture.py"
+    compare(
+        "helpers.docx",
+        ["--fixture", str(fixture_source)],
+        {"source": "fixture", "path": str(fixture_source)},
+        root / "fixture.docx",
+    )
+
+    # save_snapshot through the worker must produce a snapshot the one-shot
+    # command can read, and the snapshot source must render identically.
+    snapshot = root / "worker.snapshot"
+    worker_snapshot = journey.request(
+        "render",
+        template="helpers.docx",
+        source="fresh",
+        no_assemble=True,
+        save_snapshot=str(snapshot),
+        output=str(root / "snapshot-output.docx"),
+    )
+    assert worker_snapshot["ok"], (label, worker_snapshot)
+    assert snapshot.is_file(), label
+    compare(
+        "helpers.docx",
+        ["--snapshot", str(snapshot), "--no-assemble"],
+        {"source": "snapshot", "path": str(snapshot), "no_assemble": True},
+        root / "snapshot.docx",
+    )
+
+    assert journey.start()["ok"], label
+    assert journey.answer("filing_date=2026-08-26", "caption=2026-08-26")["ok"], label
+    compare(
+        "date.docx",
+        ["--no-assemble"],
+        {"no_assemble": True},
+        root / "saved.docx",
+    )
+
+
+def test_worker_journey_file_serves_a_render_request(
+    real_python, real_workspace, tmp_path
+):
+    """The ``--journey`` file path serves a render frame like stdin does."""
+    interpreter = real_python
+    root = real_workspace
+    artifact = tmp_path / "journey.docx"
+    journey_file = tmp_path / "journey.json"
+    journey_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "render",
+                    "operation": "render",
+                    "template": "helpers.docx",
+                    "source": "fresh",
+                    "no_assemble": True,
+                    "output": str(artifact),
+                },
+                {"id": "stop", "operation": "shutdown"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-m",
+            "docassemble_simulator",
+            "--root",
+            str(root),
+            "--interview",
+            "main.yml",
+            "run",
+            "--session-root",
+            str(tmp_path / "sessions"),
+            "--journey",
+            str(journey_file),
+            "--timeout",
+            "60",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_environment(),
+        timeout=180,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    frames = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert [frame["id"] for frame in frames] == ["render", "stop"]
+    assert frames[0]["ok"], completed.stdout + completed.stderr
+    assert frames[0]["result"]["artifact"] == str(artifact)
+    _assert_helper_output(artifact)
+
+
 @pytest.mark.corpus
 def test_demo_corpus_runner_canary(real_python, tmp_path):
     fixture_root = Path(
