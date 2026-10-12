@@ -430,6 +430,74 @@ def test_check_strict_fails_on_duplicate_ids(monkeypatch, tmp_path, capsys):
     assert payload["error"]["details"]["duplicate_ids"][0]["id"] == "shared"
 
 
+def test_check_compile_failure_precedes_duplicate_warning_in_both_modes(
+    monkeypatch, tmp_path, capsys
+):
+    class FakeCatalog:
+        def __init__(self, root, selector):
+            pass
+
+        def check(self):
+            return SimpleNamespace(
+                interview=None,
+                result={
+                    "checked": 2,
+                    "failures": 1,
+                    "totals": {
+                        "checked": 2,
+                        "ok": 1,
+                        "failed": 1,
+                        "duplicate_ids": 1,
+                    },
+                    "duplicate_ids": [{"kind": "duplicate-id", "id": "shared"}],
+                    "results": [
+                        {
+                            "interview": "docassemble.broken:data/questions/main.yml",
+                            "ok": False,
+                            "message": "authored compile failure",
+                        },
+                        {
+                            "interview": "docassemble.duplicate:data/questions/main.yml",
+                            "ok": True,
+                        },
+                    ],
+                },
+            )
+
+    monkeypatch.setattr("docassemble_simulator.catalog.InterviewCatalog", FakeCatalog)
+    expected_totals = {
+        "checked": 2,
+        "ok": 1,
+        "failed": 1,
+        "duplicate_ids": 1,
+    }
+
+    for strict in (False, True):
+        flags = ["check", "--json"]
+        if strict:
+            flags.insert(1, "--strict")
+        args = cli.build_parser().parse_args(flags)
+
+        assert cli.cmd_catalog(args, tmp_path) == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["error"]["kind"] == "compile"
+        assert payload["error"]["message"] == "one or more interviews failed to compile"
+        assert payload["error"]["details"]["totals"] == expected_totals
+
+    for strict in (False, True):
+        flags = ["check"]
+        if strict:
+            flags.append("--strict")
+        args = cli.build_parser().parse_args(flags)
+
+        assert cli.cmd_catalog(args, tmp_path) == 2
+        captured = capsys.readouterr()
+        assert "error: one or more interviews failed to compile" in captured.err
+        assert captured.out.rstrip().endswith(
+            "checked: 2  ok: 1  failures: 1  duplicate ids: 1"
+        )
+
+
 def test_diagnostic_summary_is_bounded_and_counts_kinds():
     events = [
         Diagnostic("variable-seek" if index % 2 else "other", str(index), {})

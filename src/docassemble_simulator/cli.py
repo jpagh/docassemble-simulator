@@ -384,27 +384,16 @@ def cmd_catalog(args, root):
         or (args.command == "why" and args.strict and result["conflict"])
     )
     failure_kind = ErrorKind.COMPILE
+    failure_message = "one or more interviews failed to compile"
     if ok:
         payload = _envelope(args.command, result)
     else:
-        failure_kind = (
-            ErrorKind.RESOLUTION_CONFLICT
-            if args.command == "why"
-            else (
-                ErrorKind.DUPLICATE_ID
-                if result.get("totals", {}).get("duplicate_ids", 0)
-                else ErrorKind.COMPILE
-            )
-        )
-        failure_message = (
-            "variable resolution conflict found"
-            if args.command == "why"
-            else (
-                "duplicate explicit question ids found"
-                if result.get("totals", {}).get("duplicate_ids", 0)
-                else "one or more interviews failed to compile"
-            )
-        )
+        if args.command == "why":
+            failure_kind = ErrorKind.RESOLUTION_CONFLICT
+            failure_message = "variable resolution conflict found"
+        elif not result["failures"] and args.strict:
+            failure_kind = ErrorKind.DUPLICATE_ID
+            failure_message = "duplicate explicit question ids found"
         payload = _envelope(
             args.command,
             error=Failure(failure_kind, failure_message, result),
