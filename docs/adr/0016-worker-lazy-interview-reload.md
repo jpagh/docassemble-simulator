@@ -25,7 +25,14 @@ stale compile after an edit.
   `InterviewSourceFile.get_modtime()` for the selected file, and `os.stat`
   mtime plus size for it and the rest — against the signatures captured when it
   compiled. One missing or unreadable source is treated as changed so
-  recompilation surfaces the typed error.
+  recompilation surfaces the typed error. A caller that compiles *outside* an
+  operation — the worker's read-only `check`/`questions`/`index` requests, and
+  a `trace replay`'s short-lived execution — runs the same check through
+  `InterviewCatalog.ensure_current(identity)` first, because docassemble's
+  compiled-interview cache is process-global and those callers read it through
+  their own catalog instance. A watched-but-changed or never-watched identity is
+  invalidated and recompiled there, so the check costs one reload per edit and
+  the next request is still warm.
 - On a change the worker calls `interview_cache.clear_cache(selected)`, evicts
   the recompiled interview's declared `modules:`/`imports:` helpers **that
   resolve under the workspace root** from `sys.modules` (an installed module
