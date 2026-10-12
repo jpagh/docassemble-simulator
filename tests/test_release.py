@@ -27,6 +27,8 @@ case "$name" in
       interrupt)
         trap 'printf "mise-terminated\n" >> "$RELEASE_LOG"; exit 143' INT TERM
         echo "controlled gate output"
+        sleep 60 &
+        printf 'gate-descendant %s\n' "$!" >> "$RELEASE_LOG"
         while :; do sleep 0.1; done
         ;;
       *)
@@ -90,6 +92,23 @@ def _run(
     return result, log.read_text().splitlines()
 
 
+def _gate_descendant(commands: list[str]) -> int | None:
+    for line in commands:
+        if line.startswith("gate-descendant "):
+            return int(line.split()[1])
+    return None
+
+
+def _process_gone(pid: int, deadline: float) -> bool:
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_release_validates_before_any_release_mutation(tmp_path: Path):
     result, commands = _run(tmp_path)
 
@@ -143,3 +162,17 @@ def test_interrupted_validation_terminates_gate_without_mutation(tmp_path: Path)
     assert not any(line.startswith("bump-my-version") for line in commands)
     assert "no release changes were made" in stderr
     assert "controlled gate output" in stdout
+
+    # The gate's own descendants (pytest workers, target interpreters) must be
+    # terminated too, not just the mise process the script signalled.
+    descendant = _gate_descendant(commands)
+    assert descendant is not None, commands
+    try:
+        assert _process_gone(descendant, time.monotonic() + 5), (
+            f"gate descendant {descendant} survived the interrupt"
+        )
+    finally:
+        try:
+            os.kill(descendant, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

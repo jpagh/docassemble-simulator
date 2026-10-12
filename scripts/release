@@ -46,7 +46,11 @@ fi
 gate_pid=
 cleanup_gate() {
   if [[ -n ${gate_pid:-} ]]; then
-    kill -TERM "$gate_pid" 2>/dev/null || true
+    # The gate is its own process group (see run_runtime_gate), so signal the
+    # whole group: mise's descendants include the task shell, uv, pytest
+    # workers, and the provisioned target interpreters. Fall back to the
+    # process itself if the group is already gone.
+    kill -TERM -- "-$gate_pid" 2>/dev/null || kill -TERM "$gate_pid" 2>/dev/null || true
     wait "$gate_pid" 2>/dev/null || true
     gate_pid=
   fi
@@ -65,8 +69,12 @@ trap cleanup_gate EXIT
 
 run_runtime_gate() {
   echo "release: running two-family runtime compatibility gate (mise run test:runtime)"
+  # Monitor mode gives the background gate its own process group, so an
+  # interrupt can terminate every descendant, not just the immediate mise.
+  set -m
   mise run test:runtime &
   gate_pid=$!
+  set +m
 
   local status
   set +e
