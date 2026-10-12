@@ -1665,6 +1665,87 @@ def test_worker_check_reports_a_compile_failure_across_families(
     assert response["error"]["kind"] == "compile", (label, response)
 
 
+def test_worker_catalog_inspection_sees_an_edit_between_requests(
+    family_python, tmp_path, worker_journey
+):
+    """A warm worker's catalog request reflects an edit made outside an operation.
+
+    The catalog requests compile through their own fresh catalog, so without the
+    worker's source refresh they read the program the worker compiled before the
+    edit: a stale listing, and a stale success where the current source no
+    longer compiles.
+    """
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    main = _reload_workspace(root)
+    helper = root / "docassemble" / "reload" / "helpers.py"
+    interview = "docassemble.reload:data/questions/main.yml"
+    journey = worker_journey(interpreter, root, family=case.probe, interview=interview)
+    journey.allow_stderr(interview)
+    try:
+        assert journey.start()["ok"], label
+        before = journey.request("questions", var="new_value")
+        assert before["ok"] is True, (label, before)
+        assert before["result"]["blocks"] == [], (label, before)
+
+        # Edit the interview YAML and an imported helper between two requests,
+        # with no execution operation in between.
+        main.write_text(RELOAD_INTERVIEW_EDITED, encoding="utf-8")
+        helper.write_text(
+            "def greeting(value):\n    return f'v2:{value}'\n", encoding="utf-8"
+        )
+        _mark_source_changed(main)
+        _mark_source_changed(helper)
+
+        after = journey.request("questions", var="new_value")
+        assert after["ok"] is True, (label, after)
+        assert [block["first_variable"] for block in after["result"]["blocks"]] == [
+            "new_value"
+        ], (label, after)
+
+        # An edit that breaks compilation is the typed compile error, not a
+        # stale success against the program compiled before the edit.
+        main.write_text("---\nquestion: [unterminated\n", encoding="utf-8")
+        _mark_source_changed(main)
+        check = journey.request("check")
+        assert check["ok"] is False, (label, check)
+        assert check["error"]["kind"] == "compile", (label, check)
+    finally:
+        journey.close()
+
+
+def test_worker_default_interview_matches_the_one_shot_command(
+    family_python, real_workspace, worker_journey
+):
+    """A worker started without ``--interview`` uses the project's default.
+
+    The worker is scoped to one interview, so its catalog requests compare with
+    ``sim <command> --interview <resolved default>``; a project-wide
+    ``sim check`` (no selector) checks every interview instead. This pins the
+    default selection path, which is otherwise only exercised with an explicit
+    selector.
+    """
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    default = _run(interpreter, root, "questions")["result"]["interview"]
+    journey = worker_journey(interpreter, root, family=case.probe)
+    try:
+        response = journey.request("questions")
+        assert response["ok"] is True, (label, response)
+        assert response["scope"]["interview"] == default, (label, response)
+        for command in ("questions", "index", "check"):
+            expected = _run(interpreter, root, command, "--interview", default)
+            response = journey.request(command)
+            assert response["ok"] is True, (label, command, response)
+            assert response["result"] == expected["result"], (label, command)
+    finally:
+        journey.close()
+
+
 def test_seek_contract_across_families(family_python, real_workspace, worker_journey):
     case = family_python
     label, interpreter = case.label, case.interpreter
@@ -3426,6 +3507,31 @@ def _reload_workspace(tmp_path):
         encoding="utf-8",
     )
     return main
+
+
+RELOAD_INTERVIEW_EDITED = (
+    "---\n"
+    "modules:\n"
+    "  - docassemble.reload.helpers\n"
+    "---\n"
+    "mandatory: True\n"
+    "question: First screen\n"
+    "fields:\n"
+    "  - Name: user_name\n"
+    "---\n"
+    "mandatory: True\n"
+    "question: Renamed second screen\n"
+    "subquestion: |\n"
+    "  ${ greeting(user_name) }\n"
+    "fields:\n"
+    "  - Color: favorite_color\n"
+    "---\n"
+    "mandatory: True\n"
+    "question: Third screen\n"
+    "fields:\n"
+    "  - Fresh: new_value\n"
+)
+"""The reload workspace's interview plus a screen the pre-edit program lacks."""
 
 
 def _reload_session_files(tmp_path):

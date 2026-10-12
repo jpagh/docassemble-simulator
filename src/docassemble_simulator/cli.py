@@ -12,8 +12,8 @@ from collections import Counter
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass, fields, is_dataclass, replace
+from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -339,23 +339,15 @@ def cmd_config(args, root):
 def cmd_catalog(args, root):
     from docassemble_simulator.catalog import InterviewCatalog
 
-    if args.command == "why":
-        catalog = None
-        execution = _execution(args, root)
-        variable = args.variable
-        var = None
-    else:
-        catalog = InterviewCatalog(root, args.interview)
-        execution = None
-        variable = None
-        var = getattr(args, "var", None)
     built = _catalog_payload(
-        args.command,
-        catalog=catalog,
-        execution=execution,
-        variable=variable,
-        var=var,
-        strict=bool(getattr(args, "strict", False)),
+        _CATALOG_VERBS[args.command].request(
+            args.command,
+            catalog=lambda: InterviewCatalog(root, args.interview),
+            execution=lambda: _execution(args, root),
+            variable=getattr(args, "variable", None),
+            var=getattr(args, "var", None),
+            strict=bool(getattr(args, "strict", False)),
+        )
     )
     _emit(built.envelope, args.json)
     if args.command == "check" and not args.json and built.result is not None:
@@ -387,6 +379,72 @@ class _CatalogPayload:
     result: dict[str, Any] | None
 
 
+@dataclass(frozen=True)
+class _CatalogRequest:
+    """One catalog command's namespace source and its decoded options.
+
+    ``catalog`` serves the listings and ``check`` (a read-only compile) and
+    ``execution`` serves ``why`` (read-only through ``ExplainResolution``);
+    exactly one is set. ``variable``/``var``/``strict`` are the command's
+    optional request fields. ``cmd_catalog`` and the worker's catalog adapter
+    both build one record and hand it to :func:`_catalog_payload`, so the two
+    transports cannot disagree about a verb's inputs.
+    """
+
+    command: str
+    catalog: Any = None
+    execution: Any = None
+    variable: str | None = None
+    var: str | None = None
+    strict: bool = False
+
+
+@dataclass(frozen=True)
+class _CatalogVerb:
+    """How one catalog verb reads its source and names its request fields.
+
+    ``source`` selects the record's namespace source (``catalog`` for the
+    read-only compile verbs, ``execution`` for ``why``); the flags say which
+    optional request fields the verb accepts. A new verb whose shape matches an
+    existing one only needs a row in :data:`_CATALOG_VERBS`.
+    """
+
+    source: str
+    variable_field: bool = False
+    filter_field: bool = False
+    strict_flag: bool = False
+
+    def request(
+        self,
+        command: str,
+        *,
+        catalog,
+        execution,
+        variable=None,
+        var=None,
+        strict=False,
+    ) -> _CatalogRequest:
+        """Build one request record from the sources a transport can offer.
+
+        Each source is a callable, so a transport only pays for the one its
+        verb reads.
+        """
+        if self.source == "execution":
+            return _CatalogRequest(
+                command, execution=execution(), variable=variable, strict=strict
+            )
+        return _CatalogRequest(command, catalog=catalog(), var=var, strict=strict)
+
+
+_CATALOG_VERBS = {
+    "questions": _CatalogVerb("catalog", filter_field=True),
+    "index": _CatalogVerb("catalog", filter_field=True),
+    "check": _CatalogVerb("catalog", strict_flag=True),
+    "why": _CatalogVerb("execution", variable_field=True, strict_flag=True),
+}
+"""The read-only catalog verbs, keyed by their one-shot command name."""
+
+
 def _catalog_result(outcome):
     """The public catalog result with its interview identity when it has one."""
     result = outcome.result
@@ -396,17 +454,17 @@ def _catalog_result(outcome):
     return result
 
 
-def _catalog_failure(command, result, strict):
+def _catalog_failure(request: _CatalogRequest, result):
     """The typed failure a catalog result reports, or ``None`` when it passes."""
-    if command == "check" and result["failures"]:
+    if request.command == "check" and result["failures"]:
         return Failure(
             ErrorKind.COMPILE,
             "one or more interviews failed to compile",
             result,
         )
     if (
-        command == "check"
-        and strict
+        request.command == "check"
+        and request.strict
         and result.get("totals", {}).get("duplicate_ids", 0)
     ):
         return Failure(
@@ -414,7 +472,7 @@ def _catalog_failure(command, result, strict):
             "duplicate explicit question ids found",
             result,
         )
-    if command == "why" and strict and result["conflict"]:
+    if request.command == "why" and request.strict and result["conflict"]:
         return Failure(
             ErrorKind.RESOLUTION_CONFLICT,
             "variable resolution conflict found",
@@ -423,20 +481,22 @@ def _catalog_failure(command, result, strict):
     return None
 
 
-def _catalog_payload(command, *, catalog, execution, variable, var, strict):
+def _catalog_payload(request: _CatalogRequest):
     """Build one read-only catalog command's envelope without emitting it.
 
     Shared by :func:`cmd_catalog` and the worker's catalog adapter so both
-    transports return the same ``result``/``error`` for the same project.
-    ``catalog``/``execution`` let the persistent worker reuse its own compiled
-    interview and saved namespace: ``execution`` serves ``why`` (read-only
-    through ``ExplainResolution``) and ``catalog`` serves the listings/check.
+    transports return the same ``result``/``error`` for the same project. The
+    request's ``catalog``/``execution`` let the persistent worker reuse its own
+    compiled interview and saved namespace: ``execution`` serves ``why``
+    (read-only through ``ExplainResolution``) and ``catalog`` serves the
+    listings/``check``.
     """
     from docassemble_simulator.catalog import CatalogFailure
     from docassemble_simulator.execution import ExplainResolution
 
+    command = request.command
     if command == "why":
-        outcome = execution.run(ExplainResolution(variable))
+        outcome = request.execution.run(ExplainResolution(request.variable))
         if not outcome.ok:
             return _CatalogPayload(
                 _envelope(
@@ -450,11 +510,11 @@ def _catalog_payload(command, *, catalog, execution, variable, var, strict):
     else:
         try:
             if command == "check":
-                outcome = catalog.check()
+                outcome = request.catalog.check()
             elif command == "questions":
-                outcome = catalog.questions(var)
+                outcome = request.catalog.questions(request.var)
             else:
-                outcome = catalog.index(var)
+                outcome = request.catalog.index(request.var)
         except AssemblyLineCompatibilityError as error:
             return _CatalogPayload(
                 _envelope(
@@ -476,7 +536,7 @@ def _catalog_payload(command, *, catalog, execution, variable, var, strict):
                 None,
             )
     result = _catalog_result(outcome)
-    failure = _catalog_failure(command, result, strict)
+    failure = _catalog_failure(request, result)
     if failure is None:
         return _CatalogPayload(_envelope(command, result), 0, result)
     return _CatalogPayload(
@@ -668,66 +728,74 @@ def _catalog_worker_handlers(args):
     ``why`` reads the worker's saved namespace through ``ExplainResolution``
     without committing (and stays a static read-only report when there is no
     session).
+
+    The catalog verbs come from :data:`_CATALOG_VERBS`, so adding one there
+    registers its request without touching this table.
     """
-
-    def catalog(command):
-        return lambda worker, request: _catalog_worker_request(worker, command, request)
-
     return {
-        "questions": catalog("questions"),
-        "index": catalog("index"),
-        "check": catalog("check"),
-        "why": catalog("why"),
-        "info": lambda worker, request: _project_worker_request(
-            args, worker, "info", request
-        ),
+        **{
+            command: partial(_catalog_worker_request, command=command)
+            for command in _CATALOG_VERBS
+        },
+        "info": lambda worker, request: _project_worker_request(args, worker, "info"),
         "config": lambda worker, request: _project_worker_request(
-            args, worker, "config", request
+            args, worker, "config"
         ),
     }
 
 
-def _catalog_worker_request(worker, command, request):
-    """Map one worker catalog request onto the shared catalog payload."""
+def _worker_catalog_source(worker):
+    """The worker's read-only catalog, refreshed to the current source first.
+
+    The payload compiles through its own catalog instance, whose compile reads
+    docassemble's process-global cache, so the worker's own watch has to run
+    its reload check before the payload can be stale-free.
+    """
     from docassemble_simulator.catalog import InterviewCatalog
 
-    variable, var, strict = _catalog_worker_fields(command, request)
+    worker.execution.ensure_current()
+    return InterviewCatalog(worker.root, worker.identity)
+
+
+def _catalog_worker_request(worker, request, *, command):
+    """Map one worker catalog request onto the shared catalog payload."""
+    verb = _CATALOG_VERBS[command]
+    fields = _catalog_worker_fields(verb, command, request)
     built = _catalog_payload(
-        command,
-        catalog=(
-            None if command == "why" else InterviewCatalog(worker.root, worker.identity)
-        ),
-        execution=worker.execution if command == "why" else None,
-        variable=variable,
-        var=var,
-        strict=strict,
+        verb.request(
+            command,
+            catalog=lambda: _worker_catalog_source(worker),
+            execution=lambda: worker.execution,
+            **fields,
+        )
     )
     return _catalog_worker_outcome(built.envelope)
 
 
-def _catalog_worker_fields(command, request):
-    """Decode a catalog request's optional fields into CLI command inputs."""
+def _catalog_worker_fields(verb, command, request):
+    """Decode a catalog request's optional fields into request-record fields."""
     from docassemble_simulator.worker import WorkerProtocolError
 
-    variable = None
-    if command == "why":
+    fields: dict[str, Any] = {}
+    if verb.variable_field:
         variable = request.get("variable")
         if not isinstance(variable, str) or not variable.strip():
-            raise WorkerProtocolError("why requires a variable")
-    var = None
-    if command in {"questions", "index"}:
+            raise WorkerProtocolError(f"{command} requires a variable")
+        fields["variable"] = variable
+    if verb.filter_field:
         var = request.get("var")
         if var is not None and not isinstance(var, str):
             raise WorkerProtocolError(f"{command} var must be a string")
-    strict = False
-    if command in {"check", "why"}:
+        fields["var"] = var
+    if verb.strict_flag:
         strict = request.get("strict", False)
         if not isinstance(strict, bool):
             raise WorkerProtocolError(f"{command} strict must be a boolean")
-    return variable, var, strict
+        fields["strict"] = strict
+    return fields
 
 
-def _project_worker_request(args, worker, command, request):
+def _project_worker_request(args, worker, command):
     """Map one worker ``info``/``config`` request onto the shared payload."""
     config = getattr(args, "_simulator_config", {})
     result = (
@@ -891,29 +959,25 @@ def _trace_worker_handlers(args):
     runs its own isolated execution and never writes the golden.
     """
     return {
-        "trace-compare": lambda worker, request: _trace_compare_worker_request(
-            args, worker, request
-        ),
+        "trace-compare": lambda worker, request: _trace_compare_worker_request(request),
         "trace-replay": lambda worker, request: _trace_replay_worker_request(
             args, worker, request
         ),
     }
 
 
-def _trace_compare_worker_request(args, worker, request):
+def _trace_compare_worker_request(request):
     """Map one worker ``trace-compare`` request onto the compare seam.
 
     The response ``result`` is the ``sim trace compare --json`` result for the
     same sidecars and policy; a mismatch is the typed ``trace-mismatch`` error
-    whose ``details`` are the same report. The request is read-only: the worker
-    never has an ``--update`` path, so it never writes the golden.
+    whose ``details`` are the same report. The request is read-only over two
+    sidecar paths, so it needs neither the worker nor an execution: the worker
+    never has an ``--update`` path and never writes the golden.
     """
     from docassemble_simulator.trace import TraceError
 
-    expected = _worker_trace_path(request, "expected")
-    actual = _worker_trace_path(request, "actual")
-    policy = _worker_trace_policy(request)
-    exceptions = _worker_trace_optional_path(request, "exceptions")
+    policy, expected, actual, exceptions = _trace_compare_worker_fields(request)
     try:
         comparison = _trace_compare_report(expected, actual, policy, exceptions)
     except TraceError as error:
@@ -931,30 +995,57 @@ def _trace_compare_worker_request(args, worker, request):
     )
 
 
+def _trace_compare_worker_fields(request):
+    """Decode a ``trace-compare`` request into the compare seam's inputs.
+
+    Decoding failures are ``InputFailure`` at this layer, the same vocabulary
+    the render decoders use, and become one typed ``input`` protocol error in
+    the handler.
+    """
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    try:
+        _reject_trace_update("compare", request)
+        expected = _worker_trace_path(request, "expected")
+        actual = _worker_trace_path(request, "actual")
+        policy = _worker_trace_policy(request)
+        exceptions = _worker_trace_optional_path(request, "exceptions")
+    except InputFailure as error:
+        raise WorkerProtocolError(str(error)) from error
+    return policy, expected, actual, exceptions
+
+
 def _trace_replay_worker_request(args, worker, request):
     """Map one worker ``trace-replay`` request onto the replay seam.
 
     The replay runs against its own temporary session directory inside the
     replay seam, so the worker's own Saved session is untouched and the golden
-    is only read. The response ``result`` is the ``sim trace replay --json``
-    result for a clean replay; a divergence is the typed ``trace-mismatch``
-    error whose ``details`` are the same report.
+    is only read. That isolated execution compiles through the process-global
+    docassemble cache, so the worker's source watch is refreshed first: an edit
+    between two requests must not replay the pre-edit program. The response
+    ``result`` is the ``sim trace replay --json`` result for a clean replay; a
+    divergence is the typed ``trace-mismatch`` error whose ``details`` are the
+    same report.
     """
     from docassemble_simulator.trace import TraceError
     from docassemble_simulator.worker import WorkerProtocolError
 
-    golden = _worker_trace_path(request, "golden")
-    interview = _worker_field(request, "interview")
-    if interview is not None and not isinstance(interview, str):
-        raise WorkerProtocolError("trace replay interview must be a string")
-    overrides = _worker_trace_overrides(request)
-    replay_args = SimpleNamespace(
-        golden=golden,
-        interview=interview or worker.identity,
-        _resolved_configuration=getattr(args, "_resolved_configuration", None),
-    )
     try:
-        report = _trace_replay_report(replay_args, worker.root, overrides)
+        _reject_trace_update("replay", request)
+        golden = _worker_trace_path(request, "golden")
+        interview = _worker_trace_interview(request)
+        overrides = _worker_trace_overrides(request)
+    except InputFailure as error:
+        raise WorkerProtocolError(str(error)) from error
+    worker.execution.ensure_current(interview or worker.identity)
+    try:
+        report = _trace_replay_report(
+            worker.root,
+            golden,
+            interview=interview or worker.identity,
+            overrides=overrides,
+            resolved_configuration=getattr(args, "_resolved_configuration", None),
+        )
     except TraceError as error:
         return _outcome_from_trace_input(error)
     report = _clean(report)
@@ -975,42 +1066,58 @@ def _outcome_from_trace_input(error):
     return Outcome(False, error=Failure(ErrorKind.INPUT, str(error), {}))
 
 
+def _reject_trace_update(verb, request):
+    """Refuse an ``update`` field: the worker never writes a golden.
+
+    ``--update`` is the CLI's one golden write path, so a worker request that
+    asks for it is a typed input error rather than a silently ignored field.
+    """
+    if _worker_field(request, "update") is not None:
+        raise InputFailure(
+            f"trace {verb} update is not a worker capability; --update stays CLI-only"
+        )
+
+
 def _worker_trace_path(request, *names):
     """A required trace sidecar path from the request."""
-    from docassemble_simulator.worker import WorkerProtocolError
-
     value = _worker_field(request, *names)
     if not isinstance(value, str) or not value.strip():
-        raise WorkerProtocolError(f"{names[0]} requires a trace path")
+        raise InputFailure(f"{names[0]} requires a trace path")
     return value
 
 
 def _worker_trace_optional_path(request, *names):
     """An optional trace sidecar path from the request."""
-    from docassemble_simulator.worker import WorkerProtocolError
-
     value = _worker_field(request, *names)
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise WorkerProtocolError(f"{names[0]} must be a path string")
+        raise InputFailure(f"{names[0]} must be a path string")
+    return value
+
+
+def _worker_trace_interview(request):
+    """The optional ``interview`` a replay request names."""
+    value = _worker_field(request, "interview")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InputFailure("trace replay interview must be a string")
     return value
 
 
 def _worker_trace_overrides(request):
     """The ``STEP.FIELD=VALUE`` overrides a replay request carries."""
-    from docassemble_simulator.worker import WorkerProtocolError
-
     raw = _worker_field(request, "overrides", "override")
     if raw is None:
         return ()
     if isinstance(raw, str):
         return (raw,)
     if not isinstance(raw, (list, tuple)):
-        raise WorkerProtocolError("trace replay overrides must be a string or array")
+        raise InputFailure("trace replay overrides must be a string or array")
     for item in raw:
         if not isinstance(item, str):
-            raise WorkerProtocolError(
+            raise InputFailure(
                 "each trace replay override must be a STEP.FIELD=VALUE string"
             )
     return tuple(raw)
@@ -1019,61 +1126,85 @@ def _worker_trace_overrides(request):
 def _worker_trace_policy(request):
     """Decode the comparison policy fields of a ``trace-compare`` request."""
     from docassemble_simulator.trace import ComparePolicy
-    from docassemble_simulator.worker import WorkerProtocolError
 
     def choice(name, default):
         value = _worker_field(request, name)
         if value is None:
             return default
         if not isinstance(value, str):
-            raise WorkerProtocolError(f"trace compare {name} must be a string")
+            raise InputFailure(f"trace compare {name} must be a string")
         return value
 
     full_text = _worker_field(request, "full_text", "full-text")
     if full_text is None:
         full_text = False
     if not isinstance(full_text, bool):
-        raise WorkerProtocolError("trace compare full_text must be a boolean")
-    phases = _worker_field(request, "phases")
-    if phases is None:
-        declared = None
-    elif isinstance(phases, str):
-        declared = tuple(item for item in phases.split(",") if item) or None
-    elif isinstance(phases, (list, tuple)):
-        if not all(isinstance(item, str) for item in phases):
-            raise WorkerProtocolError("trace compare phases must be strings")
-        declared = tuple(phases) or None
-    else:
-        raise WorkerProtocolError("trace compare phases must be a string or array")
+        raise InputFailure("trace compare full_text must be a boolean")
+    order = choice("order", "ordered")
+    declared = _worker_field(request, "phases")
+    phases = _worker_trace_phases(request)
+    if declared and order != "phased":
+        # The one-shot CLI rejects this pairing (``_validate_trace_arguments``)
+        # and treats an empty ``--phases`` as absent; a worker request must not
+        # silently ignore a declared phase order.
+        raise InputFailure(
+            "trace compare phases is only used with order phased; "
+            "add order phased or drop phases"
+        )
     return ComparePolicy(
-        order=choice("order", "ordered"),
+        order=order,
         missing=choice("missing", "strict"),
         extra=choice("extra", "strict"),
         full_text=full_text,
-        phases=declared,
+        phases=phases,
     )
 
 
-def _trace_metadata(args, root):
+def _worker_trace_phases(request):
+    """The declared phase order a phased comparison request carries."""
+    phases = _worker_field(request, "phases")
+    if phases is None:
+        return None
+    if isinstance(phases, str):
+        return tuple(item for item in phases.split(",") if item) or None
+    if isinstance(phases, (list, tuple)):
+        if not all(isinstance(item, str) for item in phases):
+            raise InputFailure("trace compare phases must be strings")
+        return tuple(phases) or None
+    raise InputFailure("trace compare phases must be a string or array")
+
+
+def _trace_metadata(root, interview, resolved_configuration=None):
+    """The trace metadata for one interview and resolved configuration."""
     from importlib import metadata as importlib_metadata
 
     from docassemble_simulator.catalog import InterviewCatalog
     from docassemble_simulator.compatibility import collect_environment
     from docassemble_simulator.trace import TraceMetadata
 
-    resolved = getattr(args, "_resolved_configuration", None)
     environment = collect_environment()
     try:
         simulator = importlib_metadata.version("docassemble-simulator")
     except importlib_metadata.PackageNotFoundError:
         simulator = "unknown"
     return TraceMetadata(
-        interview=InterviewCatalog(root, args.interview).identity,
-        config_fingerprint=resolved.fingerprint if resolved is not None else "",
+        interview=InterviewCatalog(root, interview).identity,
+        config_fingerprint=(
+            resolved_configuration.fingerprint
+            if resolved_configuration is not None
+            else ""
+        ),
         docassemble=environment.versions.get("docassemble-base") or "not installed",
         assemblyline=environment.versions.get("docassemble-assemblyline")
         or "not installed",
         simulator=simulator,
+    )
+
+
+def _command_trace_metadata(root, args):
+    """The trace metadata for a one-shot command's interview and configuration."""
+    return _trace_metadata(
+        root, args.interview, getattr(args, "_resolved_configuration", None)
     )
 
 
@@ -1145,7 +1276,7 @@ def _record_execution(
     result = payload.get("result") if payload.get("ok") else None
     auto_trace = result.get("auto_trace") if isinstance(result, dict) else None
     if auto_trace:
-        metadata = _trace_metadata(args, root)
+        metadata = _command_trace_metadata(root, args)
         for index, step in enumerate(auto_trace):
             append_trace(
                 record,
@@ -1190,7 +1321,7 @@ def _record_execution(
     final_fresh = context["fresh"] and not auto_trace
     append_trace(
         record,
-        _trace_metadata(args, root),
+        _command_trace_metadata(root, args),
         operation=command,
         intent=context["intent"],
         target=context["target"],
@@ -1663,37 +1794,43 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
     return reports, end + (1 if post is not None else 0)
 
 
-def _trace_replay_report(args, root, overrides=()):
+def _trace_replay_report(
+    root,
+    golden,
+    *,
+    interview=None,
+    overrides=(),
+    resolved_configuration=None,
+):
     """Run ``trace replay`` and return its report without emitting or exiting.
 
     Shared by ``cmd_trace_replay`` and the worker's ``trace-replay`` handler so
     both compute the same ``sim trace replay --json`` report (``golden``,
     ``metadata``, ``clean``, ``steps``, ``first_divergence``, ``counts``) and
     raise the same ``TraceError`` for an unreadable golden, an interview or
-    config mismatch, or a malformed override. The replay always runs against
-    its own temporary session directory, so it never touches a caller's Saved
-    session and never writes the golden.
+    config mismatch, or a malformed override. ``interview`` is the requested
+    interview (``None`` accepts the golden's own) and ``resolved_configuration``
+    the caller's already-resolved effective configuration, so neither caller has
+    to fabricate a command namespace. The replay always runs against its own
+    temporary session directory, so it never touches a caller's Saved session
+    and never writes the golden.
     """
     from docassemble_simulator.execution import InterviewExecution
     from docassemble_simulator.trace import TraceError, load_trace
 
-    golden_path = Path(args.golden).expanduser()
-    golden = load_trace(golden_path)
-    if args.interview and args.interview != golden.metadata.interview:
+    golden_path = Path(golden).expanduser()
+    recorded = load_trace(golden_path)
+    if interview and interview != recorded.metadata.interview:
         raise TraceError(
             "trace interview mismatch: "
-            f"{args.interview!r} does not match {golden.metadata.interview!r}"
+            f"{interview!r} does not match {recorded.metadata.interview!r}"
         )
-    metadata_args = SimpleNamespace(
-        interview=golden.metadata.interview,
-        _resolved_configuration=getattr(args, "_resolved_configuration", None),
-    )
-    current = _trace_metadata(metadata_args, root)
+    current = _trace_metadata(root, recorded.metadata.interview, resolved_configuration)
     for label, expected, actual in (
-        ("interview definition", golden.metadata.interview, current.interview),
+        ("interview definition", recorded.metadata.interview, current.interview),
         (
             "config fingerprint",
-            golden.metadata.config_fingerprint,
+            recorded.metadata.config_fingerprint,
             current.config_fingerprint,
         ),
     ):
@@ -1702,20 +1839,25 @@ def _trace_replay_report(args, root, overrides=()):
                 f"trace {label} mismatch: {expected!r} does not match {actual!r}"
             )
     try:
-        overrides = _trace_replay_overrides(overrides, golden.entries)
+        overrides = _trace_replay_overrides(overrides, recorded.entries)
     except InputFailure as error:
         raise TraceError(str(error)) from error
 
-    resolved = getattr(args, "_resolved_configuration", None)
     scope_parent = root / ".simulator"
     scope_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="trace-replay-", dir=scope_parent) as scope:
         execution = InterviewExecution(
             root,
-            golden.metadata.interview,
-            config_fingerprint=(resolved.fingerprint if resolved is not None else ""),
+            recorded.metadata.interview,
+            config_fingerprint=(
+                resolved_configuration.fingerprint
+                if resolved_configuration is not None
+                else ""
+            ),
             config_context=(
-                resolved.session_context() if resolved is not None else None
+                resolved_configuration.session_context()
+                if resolved_configuration is not None
+                else None
             ),
             session_directory=Path(scope) / "sessions",
         )
@@ -1723,28 +1865,28 @@ def _trace_replay_report(args, root, overrides=()):
         actual_entries = []
         first_divergence = None
         index = 0
-        while index < len(golden.entries):
-            entry = golden.entries[index]
+        while index < len(recorded.entries):
+            entry = recorded.entries[index]
             if (entry.intent or entry.operation) == "auto":
                 # Recorder-produced walks have one post-walk marker after all
                 # consecutive automatic screens. Find that trailing marker
                 # before choosing the legacy per-entry compatibility path.
                 post_index = index + 1
                 while (
-                    post_index < len(golden.entries)
+                    post_index < len(recorded.entries)
                     and (
-                        golden.entries[post_index].intent
-                        or golden.entries[post_index].operation
+                        recorded.entries[post_index].intent
+                        or recorded.entries[post_index].operation
                     )
                     == "auto"
                 ):
                     post_index += 1
                 if (
-                    post_index < len(golden.entries)
-                    and golden.entries[post_index].post_auto
+                    post_index < len(recorded.entries)
+                    and recorded.entries[post_index].post_auto
                 ):
                     grouped, index = _trace_replay_automatic_group(
-                        golden.entries, index, overrides, execution, actual_entries
+                        recorded.entries, index, overrides, execution, actual_entries
                     )
                     steps.extend(grouped)
                     divergence = next(
@@ -1766,12 +1908,12 @@ def _trace_replay_report(args, root, overrides=()):
 
     return {
         "golden": str(golden_path),
-        "metadata": golden.metadata.as_dict(),
-        "clean": first_divergence is None and len(steps) == len(golden.entries),
+        "metadata": recorded.metadata.as_dict(),
+        "clean": first_divergence is None and len(steps) == len(recorded.entries),
         "steps": steps,
         "first_divergence": first_divergence,
         "counts": {
-            "expected": len(golden.entries),
+            "expected": len(recorded.entries),
             "replayed": len(steps),
             "matched": sum(step["match"] for step in steps),
         },
@@ -1782,7 +1924,13 @@ def cmd_trace_replay(args, root):
     from docassemble_simulator.trace import TraceError
 
     try:
-        report = _trace_replay_report(args, root, args.overrides)
+        report = _trace_replay_report(
+            root,
+            args.golden,
+            interview=args.interview,
+            overrides=args.overrides,
+            resolved_configuration=getattr(args, "_resolved_configuration", None),
+        )
     except TraceError as error:
         _emit(
             _envelope("trace", error=Failure(ErrorKind.INPUT, str(error), {})),
@@ -1829,6 +1977,16 @@ def _trace_compare_report(expected, actual, policy, exceptions=None):
     errors. A malformed trace or exception file raises ``TraceError``; a
     mismatch is a normal return value whose ``matched`` is ``False``.
     """
+    return _trace_compare(expected, actual, policy, exceptions)[0]
+
+
+def _trace_compare(expected, actual, policy, exceptions=None):
+    """Load both sidecars, compare them, and return the compared actual trace.
+
+    The comparison and the trace it compared travel together so ``--update``
+    writes exactly the snapshot the report describes instead of re-reading a
+    sidecar another process may have replaced in between.
+    """
     from docassemble_simulator.trace import (
         compare_traces,
         load_exceptions,
@@ -1838,14 +1996,15 @@ def _trace_compare_report(expected, actual, policy, exceptions=None):
     expected_trace = load_trace(expected)
     actual_trace = load_trace(actual)
     exceptions_loaded = load_exceptions(exceptions) if exceptions else ()
-    return compare_traces(expected_trace, actual_trace, policy, exceptions_loaded)
+    comparison = compare_traces(expected_trace, actual_trace, policy, exceptions_loaded)
+    return comparison, actual_trace
 
 
 def cmd_trace(args, root):
-    from docassemble_simulator.trace import TraceError, load_trace, write_trace
+    from docassemble_simulator.trace import TraceError, write_trace
 
     try:
-        comparison = _trace_compare_report(
+        comparison, actual_trace = _trace_compare(
             args.expected, args.actual, _trace_policy(args), args.exceptions
         )
     except TraceError as error:
@@ -1857,7 +2016,7 @@ def cmd_trace(args, root):
     report = comparison.as_dict()
     if args.update:
         try:
-            write_trace(args.expected, load_trace(args.actual))
+            write_trace(args.expected, actual_trace)
         except OSError as error:
             _emit(
                 _envelope(

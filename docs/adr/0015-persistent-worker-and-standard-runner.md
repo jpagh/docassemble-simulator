@@ -56,11 +56,22 @@ controls.
 
 ## Amendment
 
-Issues #45, #46, and #47 added two adapter seams without widening the operation
-interface, so the enumerated operations above stay "the same typed operations".
-The screen-trace observer is a generic callable passed to `serve`, and the
-worker's `render` handler is a generic callable passed through the `Worker`
-constructor (`handlers`). Both are adapter concerns: `worker.py` imports
-neither the trace module nor the render pipeline, the render request is mapped
-to the same `InterviewRenderer`/`RenderRequest` path as `sim render` by the
-command adapter, and neither seam adds a typed execution operation.
+Issues #45, #46, #47, #48, and #49 added adapter seams without widening the
+operation interface, so the enumerated operations above stay "the same typed
+operations". The screen-trace observer is a generic callable passed to
+``serve``, and `worker.py`'s request handlers are generic callables passed
+through the ``Worker`` constructor (``handlers``). Each handler is an adapter
+concern: ``worker.py`` imports neither the trace module, the render pipeline,
+nor the catalog adapter, and every request maps onto the same seam its one-shot
+``sim`` command uses. The current handlers are:
+
+- ``render`` — the ``InterviewRenderer``/``RenderRequest`` path ``sim render``
+  uses (#46).
+- ``questions``, ``index``, ``check``, ``why``, ``info``, ``config`` — the
+  read-only catalog/project payloads ``sim <command> --json`` builds through
+  ``_catalog_payload``/``_info_result``/``_config_result`` (#48).
+- ``trace-compare``, ``trace-replay`` — the comparison/replay seams
+  ``sim trace compare``/``sim trace replay`` use (#49).
+
+None of these seams adds a typed execution operation, and no handler writes a
+golden: ``--update`` stays a CLI-only ``trace compare`` flag.

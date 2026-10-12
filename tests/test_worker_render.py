@@ -14,12 +14,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from worker_adapter_fakes import AdapterFakeExecution
 
 from docassemble_simulator import cli
 from docassemble_simulator import render as render_module
 from docassemble_simulator._diagnostics import Diagnostic
 from docassemble_simulator._outcomes import ErrorKind, Failure
-from docassemble_simulator.execution import ExecutionScope
 from docassemble_simulator.render import (
     FixtureSource,
     FreshSource,
@@ -31,28 +31,20 @@ from docassemble_simulator.render import (
 )
 from docassemble_simulator.worker import Worker, WorkerProtocolError, serve
 
-
-class _FakeExecution:
-    """A worker execution that must never serve a render request."""
-
-    _identity = "docassemble.example:data/questions/main.yml"
-
-    def __init__(self, tmp_path):
-        self.scope = ExecutionScope(
-            tmp_path,
-            self._identity,
-            "",
-            tmp_path / "sessions",
-            tmp_path / "sessions" / "main.pkl",
-        )
-        self.operations = []
-
-    def run(self, operation):
-        self.operations.append(operation)
-        raise AssertionError("render must not run an execution operation")
-
-    def reset(self):
-        pass
+ADAPTER_REQUEST_KEYS = frozenset(
+    {
+        "render",
+        "questions",
+        "index",
+        "check",
+        "why",
+        "info",
+        "config",
+        "trace-compare",
+        "trace-replay",
+    }
+)
+"""Every request the command adapter serves, and nothing else."""
 
 
 def _args(config=None):
@@ -61,7 +53,7 @@ def _args(config=None):
 
 def _worker(tmp_path, handlers):
     return Worker(
-        tmp_path, execution=_FakeExecution(tmp_path), timeout=1, handlers=handlers
+        tmp_path, execution=AdapterFakeExecution(tmp_path), timeout=1, handlers=handlers
     )
 
 
@@ -334,5 +326,16 @@ def test_worker_command_registers_the_render_handler(tmp_path, monkeypatch):
     )
 
     assert cli.cmd_worker(args, tmp_path) == 0
-    assert {"render"} <= set(seen["handlers"])
+    # The registry is exactly the adapter's request set: a stray key fails here.
+    assert set(seen["handlers"]) == ADAPTER_REQUEST_KEYS
     assert callable(seen["handlers"]["render"])
+
+
+def test_worker_adapter_handler_families_do_not_shadow_each_other():
+    """Every adapter request has one handler; a duplicate key would drop one."""
+    args = _args()
+    catalog = cli._catalog_worker_handlers(args)
+    trace = cli._trace_worker_handlers(args)
+
+    assert set(catalog).isdisjoint(trace)
+    assert set(cli._worker_request_handlers(args)) == {"render", *catalog, *trace}

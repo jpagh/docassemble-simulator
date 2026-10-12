@@ -368,7 +368,11 @@ def test_trace_replay_is_clean_with_failed_step_and_override(
     monkeypatch.setattr(
         "docassemble_simulator.execution.InterviewExecution", FakeExecution
     )
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: expected_metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: expected_metadata,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=["2.user_name=Bob"],
@@ -453,7 +457,11 @@ def test_trace_replay_applies_automatic_submission_before_next_seek(
     monkeypatch.setattr(
         "docassemble_simulator.execution.InterviewExecution", FakeExecution
     )
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=[],
@@ -501,7 +509,11 @@ def test_trace_replay_stops_at_first_identity_divergence(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         "docassemble_simulator.execution.InterviewExecution", FakeExecution
     )
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: expected.metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: expected.metadata,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=[],
@@ -651,7 +663,11 @@ def test_trace_replay_automatic_group_carries_the_trailing_expectation(
     monkeypatch.setattr(
         "docassemble_simulator.execution.InterviewExecution", FakeExecution
     )
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=[],
@@ -744,7 +760,11 @@ def test_trace_replay_renders_executions_early_end_observation(
     monkeypatch.setattr(
         "docassemble_simulator.execution.InterviewExecution", FakeExecution
     )
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=[],
@@ -821,7 +841,11 @@ def test_trace_replay_reports_no_submission_for_a_screen_it_only_observed(
     monkeypatch.setattr(
         "docassemble_simulator.execution.InterviewExecution", FakeExecution
     )
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=["2.first_value=changed"],
@@ -847,7 +871,11 @@ def test_trace_replay_rejects_metadata_mismatch_without_running(
     golden = tmp_path / "golden.trace.jsonl"
     write_trace(golden, trace)
     mismatched = _metadata(config_fingerprint="different")
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: mismatched)
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: mismatched,
+    )
     args = SimpleNamespace(
         golden=str(golden),
         overrides=[],

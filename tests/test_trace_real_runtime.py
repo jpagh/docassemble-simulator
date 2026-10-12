@@ -8,7 +8,9 @@ comparison reports the intended verdict on both runtime families.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -1597,3 +1599,80 @@ def test_worker_trace_compare_and_replay_match_the_cli(
     assert record.read_bytes() == golden_before
     assert _saved_session_files(root) == sessions_before
     assert list((root / ".simulator").glob("trace-replay-*")) == []
+
+
+REPLAY_EDIT_BASE_INTERVIEW = """\
+---
+id: intro
+mandatory: True
+question: |
+  Intro
+fields:
+  - Your name: user_name
+"""
+
+REPLAY_EDIT_INTERVIEW = """\
+---
+mandatory: True
+question: |
+  Preamble
+fields:
+  - Agree: preamble_agreed
+---
+id: intro
+mandatory: True
+question: |
+  Intro
+fields:
+  - Your name: user_name
+"""
+
+
+def _mark_source_changed(path):
+    """Give the edit an unmistakable timestamp independent of clock resolution."""
+    edited = time.time() + 5
+    os.utime(path, (edited, edited))
+
+
+def test_worker_trace_replay_sees_an_edit_between_requests(
+    family_python,  # noqa: F811
+    tmp_path,
+    worker_journey,  # noqa: F811
+):
+    """A warm replay must not report clean against the pre-edit program.
+
+    The replay's short-lived execution reads docassemble's process-global
+    compiled-interview cache, which the recording operation left warm. The
+    worker's own source watch is the only thing that can invalidate that entry,
+    so without the refresh the replay re-runs the pre-edit program and reports
+    ``clean`` for a scenario the current source no longer produces.
+    """
+    label = family_python.label
+    interpreter = family_python.interpreter
+    root = _write_interview(tmp_path / "replay-edit", REPLAY_EDIT_BASE_INTERVIEW)
+    record = root / "scenario.trace.jsonl"
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
+    )
+    try:
+        assert _record(journey, "start", record)["ok"]
+
+        # Edit the interview between two requests; the recording compiled it.
+        main = root / "docassemble" / "tracefix" / "data" / "questions" / "main.yml"
+        main.write_text(REPLAY_EDIT_INTERVIEW, encoding="utf-8")
+        _mark_source_changed(main)
+
+        # A fresh process replays the edited program and reports the divergence.
+        code, cli = _command(interpreter, root, "trace", "replay", str(record))
+        assert code == 2, (label, cli)
+        assert cli["error"]["kind"] == "trace-mismatch", (label, cli)
+
+        replay = journey.request("trace-replay", golden=str(record))
+        assert replay["ok"] is False, (label, replay)
+        assert replay["error"]["kind"] == "trace-mismatch", (label, replay)
+        assert replay["error"]["details"]["clean"] is False, (label, replay)
+    finally:
+        journey.close()

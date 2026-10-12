@@ -107,7 +107,11 @@ def _outcome(ok, result=None, error=None):
 def test_execution_records_a_screen_sidecar(tmp_path, monkeypatch):
     execution = _FakeExecution(_outcome(True, _screen()))
     monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "run.trace.jsonl"
     args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
 
@@ -139,7 +143,11 @@ def test_cli_records_each_auto_submitted_screen_before_the_final_outcome(
         )
     )
     monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "run.trace.jsonl"
     args = _parse(
         "seek",
@@ -167,7 +175,11 @@ def test_cli_records_each_auto_submitted_screen_before_the_final_outcome(
 def test_default_answer_records_browser_submission_intent(tmp_path, monkeypatch):
     execution = _FakeExecution(_outcome(True, _screen()))
     monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "defaults.trace.jsonl"
     args = _parse("answer", "--defaults", "--record", str(record), "--json")
 
@@ -184,7 +196,11 @@ def test_failed_answer_records_the_unchanged_active_screen(tmp_path, monkeypatch
     )
     execution = _FakeExecution(failure, _outcome(True, _screen("ID name")))
     monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "run.trace.jsonl"
     args = _parse("answer", "user_name=bad", "--record", str(record), "--json")
 
@@ -220,7 +236,11 @@ def test_failed_start_records_the_error_identity(tmp_path, monkeypatch):
     )
     execution = _FakeExecution(failure, stored)
     monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "run.trace.jsonl"
     args = _parse("start", "--record", str(record), "--json")
 
@@ -247,7 +267,11 @@ def test_recorded_phases_compare_without_repeating_the_declaration(
             _outcome(True, _screen()), _outcome(True, _screen("ID done"))
         )
         monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
-        monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+        monkeypatch.setattr(
+            cli,
+            "_trace_metadata",
+            lambda root, interview, resolved_configuration=None: _metadata(),
+        )
         for phase in ("intake", "download"):
             args = _parse("start", "--record", str(path), "--phase", phase, "--json")
             assert cli.cmd_execution(args, tmp_path) == 0
@@ -349,6 +373,41 @@ def test_trace_compare_update_rewrites_the_golden(tmp_path, capsys):
     assert load_trace(expected) == load_trace(actual)
 
 
+def test_trace_compare_update_writes_the_compared_snapshot(
+    tmp_path, monkeypatch, capsys
+):
+    """``--update`` writes the trace it compared, not a later re-read.
+
+    A concurrent replacement between the comparison and the update must not
+    change what the golden receives (the report describes the compared
+    snapshot), and a re-read that fails must not escape as an untyped error.
+    """
+    from docassemble_simulator import trace as trace_module
+
+    expected = tmp_path / "expected.jsonl"
+    actual = tmp_path / "actual.jsonl"
+    _write_trace(expected, "id:intro")
+    _write_trace(actual, "id:intro", "id:done")
+    compared = load_trace(actual)
+    real_load = trace_module.load_trace
+    reads = []
+
+    def load(path):
+        if str(path) == str(actual):
+            reads.append(path)
+            if len(reads) > 1:
+                raise trace_module.TraceError("actual trace was replaced")
+        return real_load(path)
+
+    monkeypatch.setattr(trace_module, "load_trace", load)
+    args = _parse("trace", "compare", str(expected), str(actual), "--update", "--json")
+
+    assert cli.cmd_trace(args, tmp_path) == 0
+
+    assert reads == [str(actual)]
+    assert load_trace(expected) == compared
+
+
 def test_trace_compare_rejects_unreadable_traces(tmp_path, capsys):
     args = _parse(
         "trace", "compare", str(tmp_path / "missing.jsonl"), "actual.jsonl", "--json"
@@ -365,7 +424,11 @@ def test_recording_refuses_a_trace_from_another_run(tmp_path, monkeypatch, capsy
     execution = _FakeExecution(_outcome(True, _screen()), _outcome(True, _screen()))
     monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
     metadata = [_metadata()]
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: metadata[0])
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: metadata[0],
+    )
     record = tmp_path / "run.trace.jsonl"
     args = _parse("start", "--record", str(record), "--json")
     assert cli.cmd_execution(args, tmp_path) == 0
@@ -433,7 +496,11 @@ def test_worker_journey_records_execution_responses_and_skips_protocol(
 ):
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "journey.trace.jsonl"
     args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
     execution = _ScopedFakeExecution(
@@ -472,7 +539,11 @@ def test_worker_journey_recorder_keeps_pairing_for_non_object_requests(
     """A JSON null, array, or string must not abort the recorder."""
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "journey.trace.jsonl"
     args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
     execution = _ScopedFakeExecution(tmp_path, _outcome(True, _screen("ID first")))
@@ -514,7 +585,11 @@ def test_worker_journey_recorder_rejects_a_non_string_record_or_phase(
 ):
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "journey.trace.jsonl"
     args = _parse("start", "--record", str(record), "--json")
     execution = _ScopedFakeExecution(
@@ -563,7 +638,11 @@ def test_worker_journey_rejects_a_non_string_phase_without_a_destination(
     """The phase contract holds even when the journey records nothing (#44)."""
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     args = _parse("start", "--json")
     assert getattr(args, "record", None) is None
     execution = _ScopedFakeExecution(
@@ -601,7 +680,11 @@ def test_worker_journey_surfaces_a_recording_failure_as_a_typed_response(
     """
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "journey.trace.jsonl"
     missing = tmp_path / "missing" / "journey.trace.jsonl"
     args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
@@ -643,7 +726,11 @@ def test_worker_journey_keeps_a_failed_operation_when_recording_also_fails(
     """
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "journey.trace.jsonl"
     missing = tmp_path / "missing" / "journey.trace.jsonl"
     args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
@@ -689,7 +776,11 @@ def test_worker_journey_phase_null_falls_back_to_the_worker_default(
 ):
     from docassemble_simulator.worker import Worker
 
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
     record = tmp_path / "journey.trace.jsonl"
     args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
     execution = _ScopedFakeExecution(
@@ -725,7 +816,11 @@ def test_worker_journey_records_an_alias_operation_under_the_canonical_name(
 
     assert operation_name({"operation": "evaluate"}) == "eval"
     assert _parse("eval", "x").command == "eval"
-    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: _metadata(),
+    )
 
     alias_record = tmp_path / "alias.trace.jsonl"
     canonical_record = tmp_path / "canonical.trace.jsonl"

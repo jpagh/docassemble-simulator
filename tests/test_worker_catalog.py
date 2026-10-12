@@ -41,10 +41,14 @@ class _FakeExecution:
         )
         self.outcome = outcome
         self.operations = []
+        self.source_refreshes = []
 
     def run(self, operation):
         self.operations.append(operation)
         return self.outcome
+
+    def ensure_current(self, identity=None):
+        self.source_refreshes.append(identity)
 
     def reset(self):
         pass
@@ -252,6 +256,32 @@ def test_malformed_catalog_requests_are_typed_input_errors(tmp_path, payload, me
     assert message in response["error"]["message"]
 
 
+def test_catalog_requests_refresh_the_source_before_compiling(tmp_path, monkeypatch):
+    """The payload's fresh catalog compiles after the worker watch refreshed.
+
+    The payload compiles through its own catalog instance, so a warm worker's
+    watch must invalidate docassemble's process-global compile first; otherwise
+    a request after an edit inspects the pre-edit program.
+    """
+    order = []
+
+    class FakeCatalog:
+        def __init__(self, root, selector=None, **kwargs):
+            order.append(("catalog", selector))
+
+        def questions(self, contains=None):
+            return CatalogOutcome(_INTERVIEW, {"blocks": []})
+
+    monkeypatch.setattr(catalog_module, "InterviewCatalog", FakeCatalog)
+    execution = _FakeExecution(tmp_path)
+    execution.ensure_current = lambda identity=None: order.append(("refresh", identity))
+    worker = Worker(tmp_path, execution=execution, handlers=_handlers())
+
+    assert worker.handle({"operation": "questions"})["ok"] is True
+
+    assert order == [("refresh", None), ("catalog", _INTERVIEW)]
+
+
 def test_catalog_requests_flow_through_the_worker_protocol(tmp_path, monkeypatch):
     outcome = CatalogOutcome(_INTERVIEW, {"blocks": []})
     _patch_catalog(monkeypatch, outcome, [])
@@ -273,9 +303,10 @@ def test_catalog_requests_flow_through_the_worker_protocol(tmp_path, monkeypatch
 
 
 def test_worker_catalog_handlers_are_registered():
-    handlers = _handlers()
+    """The catalog family is exactly the declared verbs and the project pair."""
+    args = _args()
+    handlers = cli._catalog_worker_handlers(args)
 
-    assert {"render", "questions", "index", "check", "why", "info", "config"} <= set(
-        handlers
-    )
+    assert set(handlers) == {*cli._CATALOG_VERBS, "info", "config"}
     assert all(callable(handler) for handler in handlers.values())
+    assert set(cli._worker_request_handlers(args)) >= set(handlers)
