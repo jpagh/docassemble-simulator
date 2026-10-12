@@ -619,11 +619,11 @@ _SHUTDOWN_WAIT = 10.0
 
 # The interpreter runtime writes this line just before aborting when CPython
 # finalizes while a locked C++ object (docassemble's native dependencies) is
-# still alive. It happens intermittently on the legacy family and is written
-# after the shutdown response, so it is teardown noise from the runtime rather
-# than authored interview output: a journey whose worker died this way is not
-# held to the empty-stderr guarantee, and the abort is reported as a warning so
-# it stays visible in the gate's summary.
+# still alive. It happens intermittently on both supported families and is
+# written after the shutdown response, so it is teardown noise from the runtime
+# rather than authored interview output: a journey whose worker died this way is
+# not held to the empty-stderr guarantee, and the abort is reported as a warning
+# so it stays visible in the gate's summary.
 _RUNTIME_ABORT = "libc++abi: terminating due to uncaught exception"
 # The rest of the one known teardown abort: libc++abi appends the exception's
 # ``what()``, which is the recursive-mutex failure. Both halves are required,
@@ -668,8 +668,9 @@ class WorkerJourney:
     unless the test declared it with ``allow_stderr()``; a worker that aborted
     at interpreter teardown reports its runtime abort as a warning instead
     (see ``_RUNTIME_ABORT``). The caller declares the runtime family
-    (``family=case.probe``) because that exemption is legacy-only; the harness
-    never guesses the family from the interpreter path.
+    (``family=case.probe``) so a journey that never declared one cannot claim
+    the exemption; the harness never guesses the family from the interpreter
+    path.
 
     ``SimulatorRunner`` (ADR-0015) is not reused here on purpose. It returns
     transport failures (timeout, crash, unusable frame) as typed ``ok: false``
@@ -790,9 +791,9 @@ class WorkerJourney:
     def assert_no_unexpected_stderr(self) -> None:
         """Fail unless every stderr line was declared with ``allow_stderr``.
 
-        A worker that died by the one known legacy teardown abort reports that
-        abort as a warning instead (see ``_is_legacy_teardown_abort``); every
-        other signal death is an unexpected death even when it wrote nothing.
+        A worker that died by the one known teardown abort reports that abort
+        as a warning instead (see ``_is_known_teardown_abort``); every other
+        signal death is an unexpected death even when it wrote nothing.
         """
         if self._aborted_at_exit:
             warnings.warn(
@@ -818,20 +819,22 @@ class WorkerJourney:
             "unexpected worker stderr:\n" + "".join(unexpected)
         )
 
-    def _is_legacy_teardown_abort(self) -> bool:
-        """Whether the worker died by the one known legacy teardown abort.
+    def _is_known_teardown_abort(self) -> bool:
+        """Whether the worker died by the one known interpreter teardown abort.
 
         Every condition is required, because the exemption trades a checked
-        guarantee for a tolerated runtime wart: the journey declared the legacy
-        family, the worker answered ``shutdown`` before it died, its return
-        code is exactly ``-SIGABRT``, and its non-empty stderr consists only of
-        the exact known teardown line (the whole libc++abi abort message
-        carrying the recursive-mutex failure). A modern-family worker, any
-        other signal, an abort before the shutdown answer, empty stderr, a
-        prefixed or suffixed line, or the generic libc++abi prefix without the
-        mutex message is an unexpected death instead.
+        guarantee for a tolerated runtime wart: the journey declared a runtime
+        family (an undeclared journey cannot claim it), the worker answered
+        ``shutdown`` before it died, its return code is exactly ``-SIGABRT``,
+        and its non-empty stderr consists only of the exact known teardown line
+        (the whole libc++abi abort message carrying the recursive-mutex
+        failure). The abort is native to the runtime and has been observed on
+        both supported families, so either declaration qualifies. Any other
+        signal, an abort before the shutdown answer, empty stderr, a prefixed
+        or suffixed line, or the generic libc++abi prefix without the mutex
+        message is an unexpected death instead.
         """
-        if self.family is not LEGACY:
+        if self.family not in (LEGACY, MODERN):
             return False
         if not self._shutdown_acknowledged:
             return False
@@ -965,7 +968,7 @@ class WorkerJourney:
                     stream.close()
                 except OSError:
                     pass
-        self._aborted_at_exit = self._is_legacy_teardown_abort()
+        self._aborted_at_exit = self._is_known_teardown_abort()
         self.assert_no_unexpected_stderr()
 
 
@@ -1170,7 +1173,7 @@ def test_worker_journey_close_flags_unexpected_stderr(family_python, real_worksp
         journey.close()
 
 
-# The one known legacy teardown abort as the runtime writes it, including the
+# The one known teardown abort as the runtime writes it, including the
 # ``what()`` text libc++abi appends to its own prefix.
 def _fake_worker_interpreter(
     tmp_path, *, diagnostics=(), death_signal="ABRT", acknowledge=True
@@ -1209,12 +1212,13 @@ def _fake_worker_interpreter(
     return script
 
 
-def test_worker_journey_exempts_the_known_legacy_teardown_abort(tmp_path):
+@pytest.mark.parametrize("family", [LEGACY, MODERN])
+def test_worker_journey_exempts_the_known_teardown_abort(tmp_path, family):
     """The exact teardown signature after an acknowledged shutdown warns."""
     interpreter = _fake_worker_interpreter(
         tmp_path, diagnostics=(_KNOWN_TEARDOWN_ABORT,)
     )
-    journey = WorkerJourney(interpreter, tmp_path, family=LEGACY)
+    journey = WorkerJourney(interpreter, tmp_path, family=family)
 
     with pytest.warns(RuntimeWarning, match="aborted at exit"):
         journey.close()
@@ -1277,19 +1281,19 @@ def test_worker_journey_exempts_the_known_legacy_teardown_abort(tmp_path):
             id="abort-before-the-shutdown-answer",
         ),
         pytest.param(
-            MODERN,
+            UNKNOWN,
             (_KNOWN_TEARDOWN_ABORT,),
             "ABRT",
             True,
             "SIGABRT",
-            id="modern-family",
+            id="undeclared-family",
         ),
     ],
 )
 def test_worker_journey_fails_a_death_it_cannot_excuse(
     tmp_path, family, diagnostics, death_signal, acknowledge, expected
 ):
-    """Only the exact legacy teardown abort may skip the exit guarantee."""
+    """Only the exact teardown abort may skip the exit guarantee."""
     interpreter = _fake_worker_interpreter(
         tmp_path,
         diagnostics=diagnostics,
