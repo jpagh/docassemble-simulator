@@ -206,6 +206,26 @@ the command uses a temporary isolated session. Interview/bootstrap output is
 redirected to stderr so stdout remains protocol-only. Timings are optional and
 remain in the protocol response.
 
+`worker` (and its `run`/`journey` aliases) also accepts `--record PATH
+--phase NAME` to append every execution response's screen outcome to one trace
+sidecar, using the same adapter and format as the one-shot `--record` commands.
+A request may override either field with its own `"record"` and `"phase"`
+keys, so one journey can tag entries per step. Protocol-only requests (`ping`,
+`reset`, `shutdown`, and malformed frames) are never recorded. A scenario
+recorded through a journey is equivalent to recording it one process per
+operation, including an automatic seek's expanded `auto` steps, its trailing
+post-walk marker, and a failed answer recorded against the unchanged active
+screen.
+
+```sh
+printf '%s\n' \
+  '{"operation":"start","record":"run.trace.jsonl","phase":"intake"}' \
+  '{"operation":"answer","assignments":{"user_name":"Alice"},"record":"run.trace.jsonl","phase":"intake"}' \
+  '{"operation":"shutdown"}' \
+  | sim --root ./my-project run --record run.trace.jsonl
+docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl
+```
+
 The Python client uses the same protocol and lifecycle:
 
 ```python
@@ -258,7 +278,9 @@ docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl --update
 ```
 
 `--record PATH` is accepted by `start`, `refresh`, `answer`, `seek`, and
-`exec`, and takes an optional `--phase NAME` used by phased comparison. Each
+`exec`, and takes an optional `--phase NAME` used by phased comparison. The
+persistent `worker`/`run`/`journey` commands accept the same flags (or
+per-request `record`/`phase` fields) and record an equivalent sidecar. Each
 record includes sequence, operation, explicit **intent**, phase, submitted
 assignments, outcome, screen outcome, and canonical **screen identity** with the
 rule that produced it. Intent distinguishes ordinary answers (`answer`),

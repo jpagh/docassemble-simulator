@@ -397,3 +397,70 @@ def test_trace_compare_human_mismatch_points_at_update(tmp_path, capsys):
     assert "trace compare: MISMATCH (unordered)" in output
     assert "missing: id:done" in output
     assert "pass --update to rewrite the golden after review" in output
+
+
+class _ScopedFakeExecution(_FakeExecution):
+    """A fake worker execution whose scope is serializable."""
+
+    def __init__(self, root, *outcomes):
+        super().__init__(*outcomes)
+        from docassemble_simulator.execution import ExecutionScope
+
+        self.scope = ExecutionScope(
+            root,
+            INTERVIEW,
+            "",
+            root / "sessions",
+            root / "sessions" / "main.pkl",
+        )
+
+    def reset(self):
+        pass
+
+
+def _serve_worker(worker, observer, incoming):
+    import io
+
+    from docassemble_simulator.worker import serve
+
+    outgoing = io.StringIO()
+    code = serve(worker, io.StringIO(incoming), outgoing, observer=observer)
+    return code, [json.loads(line) for line in outgoing.getvalue().splitlines()]
+
+
+def test_worker_journey_records_execution_responses_and_skips_protocol(
+    tmp_path, monkeypatch
+):
+    from docassemble_simulator.worker import Worker
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: _metadata())
+    record = tmp_path / "journey.trace.jsonl"
+    args = _parse("start", "--record", str(record), "--phase", "intake", "--json")
+    execution = _ScopedFakeExecution(
+        tmp_path,
+        _outcome(True, _screen("ID first")),
+        _outcome(True, _screen("ID second")),
+    )
+    worker = Worker(tmp_path, execution=execution)
+    observer = cli._worker_journey_recorder(args, tmp_path, worker)
+
+    code, responses = _serve_worker(
+        worker,
+        observer,
+        "not-json\n"
+        '{"id":"ping","operation":"ping"}\n'
+        '{"id":"start","operation":"start"}\n'
+        '{"id":"answer","operation":"answer","assignments":{"x":"1"},'
+        '"phase":"second"}\n',
+    )
+
+    assert code == 2  # the malformed frame still fails the stream
+    assert [response["id"] for response in responses] == [
+        None,
+        "ping",
+        "start",
+        "answer",
+    ]
+    trace = load_trace(record)
+    assert [entry.operation for entry in trace.entries] == ["start", "answer"]
+    assert [entry.phase for entry in trace.entries] == ["intake", "second"]

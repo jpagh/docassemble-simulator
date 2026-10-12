@@ -394,8 +394,15 @@ def serve(
     worker: Worker,
     input_stream: TextIO = sys.stdin,
     output_stream: TextIO = sys.stdout,
+    observer=None,
 ) -> int:
-    """Serve newline-delimited requests until EOF or graceful shutdown."""
+    """Serve newline-delimited requests until EOF or graceful shutdown.
+
+    ``observer``, when given, is called with each decoded request and its
+    response envelope after the operation runs.  It exists so a command
+    adapter can record execution responses without teaching this module about
+    traces; malformed requests never reach it.
+    """
     failed = False
     # Interview code is allowed to print.  Keep those diagnostics visible on
     # stderr without letting them become protocol frames on stdout.
@@ -416,6 +423,8 @@ def serve(
             else:
                 response = worker.handle(request)
                 failed = failed or not response.get("ok", False)
+                if observer is not None:
+                    observer(request, response)
             output_stream.write(
                 json.dumps(response, separators=(",", ":"), default=str) + "\n"
             )
