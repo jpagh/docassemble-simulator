@@ -340,51 +340,49 @@ def _record(journey, operation, record: Path, **fields):
 
 
 def _drive(interpreter, root: Path, record: Path) -> None:
-    """Drive the scenario, keying every answer on the current screen identity."""
+    """Drive the scenario, keying every answer on the current screen identity.
+
+    Recording goes through one persistent worker journey: the worker compiles
+    the interview once and serves every branch step, while each request asks
+    for its own ``record``/``phase`` exactly as the one-shot CLI commands did.
+    """
     consumed: dict[str, int] = defaultdict(int)
-
-    def screen_for(code, payload):
-        if payload.get("ok") and isinstance(payload.get("result"), dict):
-            return payload["result"]
-        assert code == 2, payload
-        assert payload["error"]["kind"] == "validation", payload
-        # A failed answer leaves the active screen in place.
-        status_code, status = _command(interpreter, root, "status")
-        assert status_code == 0, status
-        return status["result"]
-
-    code, payload = _command(
-        interpreter,
-        root,
-        "start",
-        "--record",
-        str(record),
-        "--phase",
-        "intake",
+    journey = WorkerJourney(
+        interpreter, root, arguments=("--offline", "--seek-diagnostics", "off")
     )
-    assert code == 0, payload
+    try:
 
-    while True:
-        screen = screen_for(code, payload)
-        key = screen_identity(screen).key
-        options = ANSWERS.get(key)
-        if not options:
-            return
-        index = consumed[key]
-        consumed[key] += 1
-        if index >= len(options):
-            return
-        assignments = options[index]
-        code, payload = _command(
-            interpreter,
-            root,
-            "answer",
-            *(f"{name}={value}" for name, value in assignments.items()),
-            "--record",
-            str(record),
-            "--phase",
-            PHASES.get(key, "intake"),
-        )
+        def screen_for(payload):
+            if payload.get("ok") and isinstance(payload.get("result"), dict):
+                return payload["result"]
+            assert payload["error"]["kind"] == "validation", payload
+            # A failed answer leaves the active screen in place.
+            status = journey.status()
+            assert status["ok"], status
+            return status["result"]
+
+        payload = journey.request("start", record=str(record), phase="intake")
+        assert payload["ok"], payload
+
+        while True:
+            screen = screen_for(payload)
+            key = screen_identity(screen).key
+            options = ANSWERS.get(key)
+            if not options:
+                return
+            index = consumed[key]
+            consumed[key] += 1
+            if index >= len(options):
+                return
+            assignments = options[index]
+            payload = journey.request(
+                "answer",
+                assignments=[f"{name}={value}" for name, value in assignments.items()],
+                record=str(record),
+                phase=PHASES.get(key, "intake"),
+            )
+    finally:
+        journey.close()
 
 
 def _record_base(interpreter, root: Path, record: Path) -> None:
