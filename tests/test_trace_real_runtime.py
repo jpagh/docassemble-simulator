@@ -390,6 +390,26 @@ def _record_base(interpreter, root: Path, record: Path) -> None:
     _drive(interpreter, root, record)
 
 
+def _replay_relevant_entries(trace):
+    """The recorded fields replay reads, normalized for a strict comparison.
+
+    ``compare_traces`` reports identity and content differences, so it cannot
+    catch a transport that records the wrong operation, intent, target,
+    activation policy, submitted assignments, or error kind. Comparing these
+    fields is the guard that a worker journey and the one-shot CLI really
+    record the same scenario.
+    """
+    entries = []
+    for entry in trace.entries:
+        relevant = entry.as_dict()
+        del relevant["screen"]
+        del relevant["content"]
+        relevant.pop("error", None)
+        relevant["error_kind"] = (entry.error or {}).get("kind")
+        entries.append(relevant)
+    return entries
+
+
 def test_trace_replay_round_trips_default_auto_failure_and_answer(
     family_python,  # noqa: F811
     tmp_path,
@@ -560,6 +580,11 @@ def test_worker_journey_recording_matches_the_one_shot_cli(
         cli_trace, worker_trace, ComparePolicy(order="phased", phases=phases)
     )
     assert phased.matched is True, phased.diffs
+    worker_entries = _replay_relevant_entries(worker_trace)
+    cli_entries = _replay_relevant_entries(cli_trace)
+    assert len(worker_entries) == len(cli_entries)
+    for worker_entry, cli_entry in zip(worker_entries, cli_entries):
+        assert worker_entry == cli_entry, (worker_entry, cli_entry)
 
 
 def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(

@@ -6,6 +6,8 @@ import queue
 import subprocess
 import sys
 import threading
+import time
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -604,6 +606,20 @@ def _run_human(real_python, root, *arguments, expected_code):
 
 _WORKER_EXIT = object()
 
+# How long a bounded stderr wait may take before it fails the journey. The
+# diagnostic is written by the worker process, not the drain thread, so a
+# generous bound only ever costs time on a genuine failure.
+_STDERR_WAIT = 30.0
+
+# The interpreter runtime writes this line just before aborting when CPython
+# finalizes while a locked C++ object (docassemble's native dependencies) is
+# still alive. It happens intermittently on the legacy family and is written
+# after the shutdown response, so it is teardown noise from the runtime rather
+# than authored interview output: a journey whose worker died this way is not
+# held to the empty-stderr guarantee, and the abort is reported as a warning so
+# it stays visible in the gate's summary.
+_RUNTIME_ABORT = "libc++abi: terminating due to uncaught exception"
+
 
 class WorkerJourney:
     """One persistent ``sim worker`` process for a branching runtime drive.
@@ -615,6 +631,22 @@ class WorkerJourney:
     screen it just received instead of committing to a pre-written journey
     file. Authored output is drained from stderr on a thread so it can neither
     deadlock the pipe nor be mistaken for a protocol frame.
+
+    That drain thread is asynchronous, so ``stderr_text()`` is only a snapshot:
+    use ``wait_for_stderr()`` when a response is expected to have produced a
+    diagnostic. ``close()`` joins the process and the drain before checking
+    stderr, so a journey that produced output nobody expected fails there
+    unless the test declared it with ``allow_stderr()``; a worker that aborted
+    at interpreter teardown reports its runtime abort as a warning instead
+    (see ``_RUNTIME_ABORT``).
+
+    ``SimulatorRunner`` (ADR-0015) is not reused here on purpose. It returns
+    transport failures (timeout, crash, unusable frame) as typed ``ok: false``
+    responses, which is right for a client and wrong for a contract harness: a
+    hung or crashed worker must fail the test with its drained stderr attached,
+    not arrive as one more interview-shaped outcome. It also inherits stderr
+    rather than capturing it, and it owns workspace isolation, config layers,
+    and ``PYTHONUNBUFFERED`` environment handling this harness must not adopt.
     """
 
     def __init__(
@@ -625,8 +657,8 @@ class WorkerJourney:
         interview=None,
         session_root=None,
         arguments=(),
-        operation_timeout=180.0,
-        response_timeout=180.0,
+        operation_timeout=120.0,
+        response_timeout=120.0,
     ):
         self.interpreter = Path(interpreter)
         self.root = Path(root)
@@ -639,6 +671,9 @@ class WorkerJourney:
         self.operation_timeout = operation_timeout
         self._responses: queue.Queue = queue.Queue()
         self._stderr: list[str] = []
+        self._allowed_stderr: list[str] = []
+        self._aborted_at_exit = False
+        self._closed = False
         self._sequence = 0
         command = [
             str(self.interpreter),
@@ -685,7 +720,57 @@ class WorkerJourney:
         self._responses.put(_WORKER_EXIT)
 
     def stderr_text(self) -> str:
+        """A snapshot of the diagnostics drained so far; may still grow."""
         return "".join(self._stderr)
+
+    def wait_for_stderr(self, text: str, *, timeout: float = _STDERR_WAIT) -> str:
+        """Return the drained stderr once it contains ``text``.
+
+        A response only proves the operation ran, not that the drain thread has
+        consumed the diagnostics it wrote, so this is the deterministic accessor
+        for asserting on authored output. It fails the journey with the drained
+        stderr attached once the deadline passes or the worker is gone.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            drained = self.stderr_text()
+            if text in drained:
+                return drained
+            if time.monotonic() >= deadline or not self._stderr_thread.is_alive():
+                raise AssertionError(
+                    self.failure_message(
+                        f"worker stderr never reported {text!r} within {timeout:g}s"
+                    )
+                )
+            time.sleep(0.05)
+
+    def allow_stderr(self, text: str) -> None:
+        """Declare authored output this journey is expected to write.
+
+        ``close()`` fails a journey that leaves stderr empty of anything it did
+        not expect, which is the guarantee the migrated per-command runs had.
+        Tests whose subject *is* a diagnostic declare it here.
+        """
+        self._allowed_stderr.append(text)
+
+    def assert_no_unexpected_stderr(self) -> None:
+        """Fail unless every stderr line was declared with ``allow_stderr``."""
+        if self._aborted_at_exit:
+            warnings.warn(
+                self.failure_message("worker journey aborted at exit"),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        unexpected = [
+            line
+            for line in self._stderr
+            if line.strip()
+            and not any(allowed in line for allowed in self._allowed_stderr)
+        ]
+        assert not unexpected, self.failure_message(
+            "unexpected worker stderr:\n" + "".join(unexpected)
+        )
 
     def failure_message(self, reason: str) -> str:
         return (
@@ -767,6 +852,10 @@ class WorkerJourney:
             pass
 
     def close(self) -> None:
+        """Stop the worker, drain its streams, and check its stderr."""
+        if self._closed:
+            return
+        self._closed = True
         self._send_shutdown()
         try:
             self.process.wait(timeout=10)
@@ -777,14 +866,22 @@ class WorkerJourney:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=10)
+        # Join the drains before closing the pipes: once the process is gone
+        # every buffered diagnostic is in ``self._stderr``, and the snapshot
+        # close() asserts on is then deterministic.
+        self._stderr_thread.join(timeout=5)
+        self._stdout_thread.join(timeout=5)
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream is not None:
                 try:
                     stream.close()
                 except OSError:
                     pass
-        self._stderr_thread.join(timeout=5)
-        self._stdout_thread.join(timeout=5)
+        self._aborted_at_exit = self.process.returncode is not None and (
+            self.process.returncode < 0
+            and all(_RUNTIME_ABORT in line for line in self._stderr if line.strip())
+        )
+        self.assert_no_unexpected_stderr()
 
 
 @pytest.fixture
@@ -921,6 +1018,71 @@ def test_persistent_worker_and_runner_contract_across_families(
         started = runner.start()
         assert started.ok, (label, started)
         assert runner.status().ok, label
+
+
+class _DeferredStderrJourney(WorkerJourney):
+    """A worker journey whose stderr drain thread starts behind a gate.
+
+    Nothing synchronizes the drain thread with the protocol, so a received
+    response does not prove its diagnostic has been consumed. Closing the gate
+    makes that interleaving deterministic: until the test opens it, no
+    diagnostic can be in ``stderr_text()``, and only the bounded
+    ``wait_for_stderr()`` accessor can observe output the drain has not read
+    yet.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # The drain thread starts inside the parent constructor, so the gate
+        # must exist before it can be consulted.
+        self.stderr_gate = threading.Event()
+        super().__init__(*args, **kwargs)
+
+    def _drain_stderr(self) -> None:
+        self.stderr_gate.wait(timeout=60)
+        super()._drain_stderr()
+
+
+def test_worker_journey_stderr_wait_survives_a_deferred_drain(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    journey = _DeferredStderrJourney(interpreter, root)
+    journey.allow_stderr("late worker diagnostic")
+    try:
+        assert journey.start()["ok"], label
+        executed = journey.execute("print('late worker diagnostic')", assemble=False)
+        assert executed["ok"], (label, executed)
+        # The premise: the response is in hand and the diagnostic is not.
+        assert "late worker diagnostic" not in journey.stderr_text(), label
+        journey.stderr_gate.set()
+        assert "late worker diagnostic" in journey.wait_for_stderr(
+            "late worker diagnostic"
+        ), label
+    finally:
+        journey.stderr_gate.set()
+        journey.close()
+
+
+def test_worker_journey_close_flags_unexpected_stderr(family_python, real_workspace):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    journey = WorkerJourney(interpreter, root)
+    try:
+        assert journey.start()["ok"], label
+        executed = journey.execute("print('unexpected worker output')", assemble=False)
+        assert executed["ok"], (label, executed)
+        with pytest.raises(AssertionError, match="unexpected worker stderr"):
+            journey.close()
+        # A closed journey stays closed, so the fixture's cleanup cannot
+        # repeat the failure after the test has observed it.
+        journey.close()
+    finally:
+        journey.close()
 
 
 def test_catalog_duplicate_relationships_across_families(family_python, real_workspace):
@@ -1315,8 +1477,12 @@ def test_tolerated_review_reference_is_not_attributed_to_a_later_failure(
     assert started["ok"], label
     assert started["result"]["question_name"] == "ID tolerated-review", label
     # The tolerated review reference is reported to stderr rather than
-    # attributed to the later terminal failure.
-    assert "Exception in review block" in journey.stderr_text(), label
+    # attributed to the later terminal failure. Receiving the response does not
+    # prove the drain thread consumed that diagnostic yet, so wait for it.
+    journey.allow_stderr("Exception in review block")
+    assert "Exception in review block" in journey.wait_for_stderr(
+        "Exception in review block"
+    ), label
 
     failed = journey.answer(defaults=True)
     assert failed["error"]["kind"] == "unresolved-variable", label
