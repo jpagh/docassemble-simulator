@@ -11,7 +11,7 @@ import textwrap
 from collections import Counter
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stdout
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -540,6 +540,7 @@ def cmd_worker(args, root):
                     if args.project_root
                     else None
                 ),
+                handlers=_worker_request_handlers(args),
             )
             stream = sys.stdin
             if args.journey:
@@ -569,6 +570,163 @@ def cmd_worker(args, root):
                 handle.close()
             if temporary_session is not None:
                 temporary_session.cleanup()
+
+
+def _worker_request_handlers(args):
+    """The non-execution requests the worker command serves.
+
+    ``worker.py`` stays an operation-only server (ADR-0015); the command
+    adapter owns the ``render`` request and maps it onto the same
+    ``InterviewRenderer``/``RenderRequest`` path as ``sim render``.
+    """
+    return {
+        "render": lambda worker, request: _render_worker_request(args, worker, request)
+    }
+
+
+def _render_worker_request(args, worker, request):
+    """Map one worker `render` request and render it with the worker's session.
+
+    The renderer reuses the worker's execution, so a ``saved`` source reads the
+    same session the journey produced and ``fresh``/``fixture``/``snapshot``
+    stay read-only exactly as they are for ``sim render``.  The result is
+    normalized through the CLI's public payload cleaning, so a response's
+    ``result`` is the ``sim render --json`` result for the same inputs.
+    """
+    from docassemble_simulator.render import InterviewRenderer, RenderRequest
+    from docassemble_simulator.worker import WorkerProtocolError
+
+    try:
+        template, source, assemble, save_snapshot, output, expect_missing, bindings = (
+            _worker_render_fields(request)
+        )
+    except InputFailure as error:
+        raise WorkerProtocolError(str(error)) from error
+    render_request = RenderRequest(
+        template,
+        source,
+        assemble,
+        save_snapshot,
+        output,
+        expect_missing,
+        _configured_bindings(
+            getattr(args, "_simulator_config", {}), template, bindings
+        ),
+    )
+    outcome = InterviewRenderer(worker.root, worker.execution).render(render_request)
+    # ``sim render --json`` drops absent fields (a null artifact when --output
+    # is not requested), so the worker response must drop them too.
+    return replace(outcome, result=_clean(outcome.result))
+
+
+def _worker_render_fields(request):
+    """Decode a worker `render` request into ``sim render`` inputs."""
+    from docassemble_simulator.render import (
+        FixtureSource,
+        FreshSource,
+        SavedSessionSource,
+        SnapshotSource,
+    )
+
+    template = request.get("template")
+    if not isinstance(template, str) or not template.strip():
+        raise InputFailure("render requires a template")
+    source_name = request.get("source")
+    if source_name is None:
+        source_name = "saved"
+    if not isinstance(source_name, str):
+        raise InputFailure("render source must be a string")
+    normalized = source_name.strip().lower().replace("_", "-")
+    if normalized == "saved":
+        source = SavedSessionSource()
+    elif normalized == "fresh":
+        source = FreshSource()
+    elif normalized in {"fixture", "snapshot"}:
+        path = _worker_optional_path(request, "path")
+        if path is None:
+            raise InputFailure(f"render source {normalized} requires a path")
+        source = (
+            FixtureSource(path) if normalized == "fixture" else SnapshotSource(path)
+        )
+    else:
+        raise InputFailure(f"unknown render source: {normalized}")
+    assemble = (
+        False
+        if isinstance(source, FixtureSource)
+        else not _worker_flag(request, "no-assemble", "no_assemble")
+    )
+    return (
+        template,
+        source,
+        assemble,
+        _worker_optional_path(request, "save_snapshot", "save-snapshot"),
+        _worker_optional_path(request, "output"),
+        _worker_optional_string(request, "expect-missing", "expect_missing"),
+        _parse_bindings(_worker_binding_pairs(request.get("bindings"))),
+    )
+
+
+def _worker_field(request, *names):
+    """Return the first present request field, accepting both key spellings."""
+    for name in names:
+        if name in request:
+            return request[name]
+    return None
+
+
+def _worker_flag(request, *names) -> bool:
+    value = _worker_field(request, *names)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise InputFailure(f"render {names[0]} must be a boolean")
+    return value
+
+
+def _worker_optional_string(request, *names):
+    value = _worker_field(request, *names)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InputFailure(f"render {names[0]} must be a string")
+    return value
+
+
+def _worker_optional_path(request, *names):
+    value = _worker_field(request, *names)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InputFailure(f"render {names[0]} must be a path string")
+    return Path(value).expanduser().resolve()
+
+
+def _worker_binding_pairs(raw):
+    """Normalize a request's `bindings` into NAME=EXPRESSION spellings."""
+    if raw is None:
+        return ()
+    if isinstance(raw, dict):
+        return tuple(f"{name}={expression}" for name, expression in raw.items())
+    if not isinstance(raw, (list, tuple)):
+        raise InputFailure("render bindings must be an object or array")
+    pairs: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            pairs.append(item)
+        elif isinstance(item, dict):
+            name = item.get("name", item.get("variable"))
+            expression = item.get("expression", item.get("value"))
+            if name is None or expression is None:
+                raise InputFailure("render binding objects require name and expression")
+            pairs.append(f"{name}={expression}")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            pairs.append(f"{item[0]}={item[1]}")
+        else:
+            raise InputFailure(
+                "each render binding must be NAME=EXPRESSION, [NAME, EXPRESSION], "
+                "or an object"
+            )
+    return tuple(pairs)
 
 
 def _trace_metadata(args, root):

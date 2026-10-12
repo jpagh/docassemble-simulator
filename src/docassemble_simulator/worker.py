@@ -14,7 +14,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import redirect_stdout
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from docassemble_simulator._diagnostics import Diagnostic
-from docassemble_simulator._outcomes import ErrorKind
+from docassemble_simulator._outcomes import ErrorKind, Outcome
 from docassemble_simulator._timeouts import OperationTimeout
 from docassemble_simulator.execution import (
     Answer,
@@ -39,6 +39,20 @@ from docassemble_simulator.execution import (
 
 class WorkerProtocolError(ValueError):
     """A malformed worker request."""
+
+
+RequestHandler = Callable[["Worker", Any], Outcome]
+"""A command-adapter request served outside the execution operation vocabulary.
+
+The handler owns the protocol-to-operation mapping (``render`` is the only
+current one) and returns the same typed :class:`Outcome` an execution
+operation returns.  Registering it through ``Worker`` keeps ``worker.py`` an
+operation-only server: the worker still owns serialization, the operation
+lock, the per-request deadline, and the error envelope, while the command
+adapter keeps the request fields and any CLI-flavored concerns.  Handlers are
+looked up by canonical :func:`operation_name` and never intercept the
+protocol lifecycle operations (``ping``, ``reset``, ``shutdown``).
+"""
 
 
 # Alias spellings the worker accepts, mapped to the one-shot CLI command name.
@@ -214,6 +228,7 @@ class Worker:
         timings: bool = False,
         project_root: str | Path | None = None,
         execution=None,
+        handlers: Mapping[str, RequestHandler] | None = None,
     ):
         if timeout is not None and timeout <= 0:
             raise ValueError("worker timeout must be greater than zero")
@@ -226,6 +241,7 @@ class Worker:
         self.timeout = timeout
         self.timings = timings
         self.execution = execution
+        self.handlers = dict(handlers or {})
         if self.execution is None:
             from docassemble_simulator.execution import InterviewExecution
 
@@ -362,12 +378,20 @@ class Worker:
                     result={"kind": "reset", "scope": self.scope},
                     timing=self._timing(started, timing_enabled),
                 )
-            operation = operation_from_request(request)
-            timeout = self._request_timeout(request)
-            with self._lock:
-                outcome = self._run_deadline(
-                    lambda: self.execution.run(operation), timeout
-                )
+            handler = self.handlers.get(normalized)
+            if handler is not None:
+                timeout = self._request_timeout(request)
+                with self._lock:
+                    outcome = self._run_deadline(
+                        lambda: handler(self, request), timeout
+                    )
+            else:
+                operation = operation_from_request(request)
+                timeout = self._request_timeout(request)
+                with self._lock:
+                    outcome = self._run_deadline(
+                        lambda: self.execution.run(operation), timeout
+                    )
             if outcome.ok:
                 return self._response(
                     request_id,
@@ -512,6 +536,7 @@ def serve(
 
 __all__ = [
     "OperationTimeout",
+    "RequestHandler",
     "Worker",
     "WorkerProtocolError",
     "operation_from_request",

@@ -4,6 +4,9 @@ import io
 import json
 import time
 
+import pytest
+
+from docassemble_simulator._diagnostics import Diagnostic
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator.execution import (
     Answer,
@@ -16,6 +19,7 @@ from docassemble_simulator.execution import (
 )
 from docassemble_simulator.worker import (
     Worker,
+    WorkerProtocolError,
     operation_from_request,
     operation_name,
     serve,
@@ -355,3 +359,76 @@ def test_execution_scope_is_immutable_and_configuration_specific(tmp_path):
     other = InterviewExecution(tmp_path, config_fingerprint="config-b")
     assert other.scope.session != scope.session
     assert Worker(tmp_path, execution=execution).scope["interview"] == scope.interview
+
+
+def test_render_is_not_an_execution_operation():
+    assert operation_name({"operation": "render"}) == "render"
+    with pytest.raises(WorkerProtocolError, match="unknown operation"):
+        operation_from_request({"operation": "render"})
+
+
+def test_worker_adapter_handlers_serve_outside_the_execution_vocabulary(tmp_path):
+    execution = FakeExecution(tmp_path)
+    seen = {}
+
+    def render(worker, request):
+        seen["worker"] = worker
+        seen["request"] = request
+        return Outcome(
+            True,
+            {"template": request["template"]},
+            diagnostics=(Diagnostic("render", "rendered", {}),),
+        )
+
+    worker = Worker(tmp_path, execution=execution, handlers={"render": render})
+    response = worker.handle(
+        {"id": "r", "operation": "render", "template": "form.docx"}
+    )
+
+    assert response["ok"] is True
+    assert response["result"] == {"template": "form.docx"}
+    assert response["diagnostics"] == [
+        {"kind": "render", "message": "rendered", "details": {}}
+    ]
+    assert seen["worker"] is worker
+    assert seen["request"]["template"] == "form.docx"
+    assert execution.operations == []
+
+
+def test_worker_adapter_handler_failures_are_typed(tmp_path):
+    def bad_request(worker, request):
+        raise WorkerProtocolError("render requires a template")
+
+    def explode(worker, request):
+        raise RuntimeError("boom")
+
+    rejected = Worker(
+        tmp_path, execution=FakeExecution(tmp_path), handlers={"render": bad_request}
+    ).handle({"operation": "render"})
+    assert rejected["ok"] is False
+    assert rejected["error"]["kind"] == "input"
+
+    faulted = Worker(
+        tmp_path, execution=FakeExecution(tmp_path), handlers={"render": explode}
+    ).handle({"operation": "render"})
+    assert faulted["ok"] is False
+    assert faulted["error"]["kind"] == "fault"
+    assert "boom" in faulted["error"]["message"]
+
+
+def test_worker_adapter_handler_respects_the_request_deadline(tmp_path):
+    def slow(worker, request):
+        time.sleep(0.05)
+        return Outcome(True, {})
+
+    worker = Worker(
+        tmp_path,
+        execution=FakeExecution(tmp_path),
+        timeout=1,
+        handlers={"render": slow},
+    )
+    response = worker.handle({"operation": "render", "timeout": 0.01})
+
+    assert response["ok"] is False
+    assert response["error"]["kind"] == "timeout"
+    assert response["error"]["details"]["operation"] == "render"

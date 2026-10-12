@@ -256,6 +256,30 @@ printf '%s\n' \
 docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl
 ```
 
+A worker also serves `render`, so a warm journey can produce documents without
+re-launching the interpreter:
+
+```sh
+printf '%s\n' \
+  '{"operation":"render","template":"form.docx","source":"saved","no_assemble":true,"output":"artifact.docx"}' \
+  '{"operation":"render","template":"form.docx","source":"fresh","no_assemble":true}' \
+  '{"operation":"shutdown"}' \
+  | sim --root ./my-project --interview docassemble.my_project:data/questions/main.yml run
+```
+
+The `render` request mirrors `sim render`: `template` (required), `source`
+(`saved` by default, or `fresh`, `fixture` + `path`, `snapshot` + `path`),
+`no_assemble`, `output`, `save_snapshot`, `expect_missing`, and `bindings` (an
+object of `NAME: EXPRESSION`, or an array of `NAME=EXPRESSION` strings). The
+per-request `timeout` applies as it does to every operation, and a `fixture`
+source never assembles, exactly as the `--fixture` flag does. For the same
+project and inputs, the response `result` is the `sim render --json` result
+(same artifact path and shape), with `diagnostics` and `attachments`
+forwarded. A malformed request or a render failure arrives as a typed
+`input`/`render` error, never a raw exception or protocol noise. Rendering
+reads the worker's saved session and never mutates it beyond what the
+`sim render` source policy already does.
+
 The Python client uses the same protocol and lifecycle:
 
 ```python
