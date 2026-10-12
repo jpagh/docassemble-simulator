@@ -39,30 +39,38 @@ stale compile after an edit.
 - A reload changes compilation only. The Saved session is never cleared by a
   reload; `reset` remains the explicit clear. A reload that fails to compile
   reports the typed `compile` error and leaves the session intact.
-- Detection covers the selected interview source and every workspace source
-  file the compiled interview read, plus the source files of its declared
-  `modules:`/`imports:` helpers. The watched source set comes from question
-  provenance — each compiled question's `from_source.filepath` — not from the
-  include strings, so an abbreviated colon identity
+- Detection covers two sets, both under the resolved workspace root. The
+  exact set is question provenance — each compiled question's
+  `from_source.filepath` — so an abbreviated colon identity
   (`docassemble.other:screens.yml` resolving under
   `docassemble/other/data/questions/`) and a nested relative include resolved
   against its own owning source's directory are watched at the exact file
-  docassemble read. A helper that resolves to a file under the workspace
-  source tree is stamped directly; a helper that resolves to a package
-  directory is stamped by walking its `*.py` files, so an edited or newly added
-  submodule counts. A declared module that does not resolve to a workspace file
-  (stdlib, an installed docassemble package, a mis-declared name) is skipped
-  and logged at debug. Module paths are resolved by workspace-tree lookup, not
-  `importlib.util.find_spec`: find_spec imports a dotted module's parent
-  package, which would execute authored package code during compilation and
-  could import a heavy installed dependency.
+  docassemble read. The safety net is every `*.yml`/`*.yaml` under the
+  workspace's `docassemble/*/data/questions` trees, because docassemble
+  excludes include-only blocks and features-only documents from
+  `questions_list`, so a routing YAML that changes its `include:` target has no
+  compiled question to watch. Walking the questions trees over-includes: an
+  unrelated YAML edit in the same workspace merely causes a reload, which is
+  preferred to under-including a source the interview could read. A helper that
+  resolves to a file under the workspace source tree is stamped directly; a
+  helper that resolves to a package directory is stamped by walking its `*.py`
+  files, so an edited or newly added submodule counts. A declared module that
+  does not resolve to a workspace file (stdlib, an installed docassemble
+  package, a mis-declared name) is skipped and logged at debug. Module paths
+  are resolved by workspace-tree lookup, not `importlib.util.find_spec`:
+  find_spec imports a dotted module's parent package, which would execute
+  authored package code during compilation and could import a heavy installed
+  dependency.
 - Watching, eviction, and bytecode invalidation all resolve candidates with
   `Path.resolve()` and require containment under the resolved workspace root.
   A workspace name that resolves through a symlink to a file outside the tree
-  is therefore neither watched, evicted, nor unlinked, and an include whose
-  real path is outside the root is not watched. A file that was recorded at
-  compile time and then deleted or made unreadable still counts as changed, so
-  recompilation surfaces the typed error.
+  is therefore neither watched, evicted, nor unlinked, and a YAML or include
+  whose real path is outside the root is not watched. Bytecode invalidation
+  resolves the derived cache path too, so a contained helper whose
+  `__pycache__` directory is a symlink outside the tree does not have its
+  external `.pyc` deleted. A file that was recorded at compile time and then
+  deleted or made unreadable still counts as changed, so recompilation surfaces
+  the typed error.
 - Configuration is resolved once at worker startup and is not reloaded; a
   configuration change still requires a restart. Templates are read at render
   time (`prepare_docx_template` loads the file per render, with no cache), so a
@@ -72,20 +80,21 @@ stale compile after an edit.
 
 ## Consequences
 
-- Unchanged interviews pay one `stat` per operation per watched interview file
-  and helper file, plus a `*.py` walk per watched helper package directory, not
-  a ~3s compile, so repeated operations stay in the warm range.
+- Unchanged interviews pay one `stat` per operation per watched YAML under the
+  workspace questions trees and per helper file, plus a `*.py` walk per watched
+  helper package directory, not a ~3s compile, so repeated operations stay in
+  the warm range. The questions-tree scan is captured once at compile, not per
+  operation.
 - The reload signal is a file timestamp, so tests set it explicitly
   (`os.utime`) rather than depending on clock resolution.
 - A helper edit under a declared workspace module, or an edit to a workspace
-  source the compiled questions came from, now reloads the worker with no
-  restart. The remaining boundaries are: a source or module whose real path is
-  outside the resolved workspace root is not watched (an installed AssemblyLine
-  include, an absolute include outside the tree, a workspace symlink that
-  escapes the tree); a workspace module the interview does not declare in
+  YAML under the questions trees, now reloads the worker with no restart. The
+  remaining boundaries are: a source or module whose real path is outside the
+  resolved workspace root is not watched (an installed AssemblyLine include, an
+  absolute include outside the tree, a workspace symlink that escapes the
+  tree); a workspace module the interview does not declare in
   `modules:`/`imports:` — for example a sibling imported by a declared helper —
   is neither watched nor evicted, because capturing workspace-owned
   `sys.modules` entries at compile time does not see it (docassemble imports
-  `modules:`/`imports:` only during assembly, after compilation); and a
-  transitive include file that contributes no question of its own has no
-  provenance to watch. These are recorded boundaries, not regressions.
+  `modules:`/`imports:` only during assembly, after compilation). These are
+  recorded boundaries, not regressions.

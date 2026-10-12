@@ -3775,7 +3775,6 @@ def _nested_reload_workspace(tmp_path):
     ``docassemble.other:screens.yml`` and a nested cross-package file
     ``docassemble.other:data/questions/section.yml``, whose own relative
     include ``screens2.yml`` resolves against ``other``'s questions directory.
-    A same-basename ``screens.yml`` under ``reload`` is not included.
     """
     for package in ("reload", "other"):
         directory = tmp_path / "docassemble" / package
@@ -3827,23 +3826,11 @@ def _nested_reload_workspace(tmp_path):
         "  - Nested: nested_value\n",
         encoding="utf-8",
     )
-    unrelated = (
-        tmp_path / "docassemble" / "reload" / "data" / "questions" / "screens.yml"
-    )
-    unrelated.write_text(
-        "---\n"
-        "mandatory: True\n"
-        "question: Unrelated screen\n"
-        "fields:\n"
-        "  - Unrelated: unrelated_value\n",
-        encoding="utf-8",
-    )
     return {
         "main": main,
         "abbreviated": abbreviated,
         "section": section,
         "nested": nested,
-        "unrelated": unrelated,
     }
 
 
@@ -3945,18 +3932,123 @@ def test_watch_set_covers_cross_package_nested_sibling(family_python, tmp_path):
     assert observed["reloaded"] is True, (label, observed)
 
 
-def test_watch_set_ignores_unrelated_same_basename_file(family_python, tmp_path):
-    """A same-basename file that was not compiled is not watched."""
+def test_watch_set_ignores_yaml_outside_workspace(family_python, tmp_path):
+    """A YAML outside the resolved workspace root is not watched."""
     case = family_python
     label, interpreter = case.label, case.interpreter
     _assert_family_interpreter(case)
     root = tmp_path
-    paths = _nested_reload_workspace(root)
+    _nested_reload_workspace(root)
+    outside = tmp_path.parent / (tmp_path.name + "-outside-yaml")
+    outside_questions = outside / "docassemble" / "pkg" / "data" / "questions"
+    outside_questions.mkdir(parents=True)
+    outside_yaml = outside_questions / "extra.yml"
+    outside_yaml.write_text(
+        "---\nquestion: Outside\nfields:\n  - X: x_value\n", encoding="utf-8"
+    )
 
     observed = _run_watch_harness(
-        interpreter, root, paths["unrelated"], tmp_path / "unrelated-sessions"
+        interpreter, root, outside_yaml, tmp_path / "outside-sessions"
     )
 
     assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["reloaded"] is False, (label, observed)
+
+
+def _scan_reload_workspace(tmp_path):
+    """An interview whose include-only routing and features files are watched.
+
+    ``routing.yml`` contains only an ``include:`` directive and ``features.yml``
+    only a ``features:`` document, so neither contributes a compiled question
+    and only the questions-tree scan can watch them.
+    """
+    package = tmp_path / "docassemble" / "reload"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    main = questions / "main.yml"
+    main.write_text(
+        "---\n"
+        "mandatory: True\n"
+        "question: First screen\n"
+        "fields:\n"
+        "  - Name: user_name\n"
+        "---\n"
+        "include:\n"
+        "  - routing.yml\n"
+        "  - features.yml\n",
+        encoding="utf-8",
+    )
+    routing = questions / "routing.yml"
+    routing.write_text("---\ninclude:\n  - a.yml\n", encoding="utf-8")
+    screen_a = questions / "a.yml"
+    screen_a.write_text(
+        "---\nmandatory: True\nquestion: Screen A\nfields:\n  - A: a_value\n",
+        encoding="utf-8",
+    )
+    screen_b = questions / "b.yml"
+    screen_b.write_text(
+        "---\nmandatory: True\nquestion: Screen B\nfields:\n  - B: b_value\n",
+        encoding="utf-8",
+    )
+    features = questions / "features.yml"
+    features.write_text("---\nfeatures:\n  progress bar: true\n", encoding="utf-8")
+    return {
+        "main": main,
+        "routing": routing,
+        "screen_a": screen_a,
+        "screen_b": screen_b,
+        "features": features,
+    }
+
+
+def test_worker_reloads_include_only_routing_change(
+    family_python, tmp_path, worker_journey
+):
+    """An include-only routing file's changed target serves the new screen."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    paths = _scan_reload_workspace(root)
+
+    journey = worker_journey(
+        interpreter,
+        root,
+        interview="docassemble.reload:data/questions/main.yml",
+        family=case.probe,
+    )
+    try:
+        assert journey.start()["ok"], label
+        answered = journey.answer("user_name=Ada")
+        assert answered["ok"], (label, answered)
+        assert answered["result"]["question_text"] == "Screen A", (label, answered)
+
+        # routing.yml has no compiled question; only the questions-tree scan
+        # watches it, and its new include must be served after a reload.
+        paths["routing"].write_text("---\ninclude:\n  - b.yml\n", encoding="utf-8")
+        _mark_source_changed(paths["routing"])
+
+        reloaded = journey.refresh()
+        assert reloaded["ok"], (label, reloaded)
+        assert reloaded["result"]["question_text"] == "Screen B", (label, reloaded)
+    finally:
+        journey.close()
+
+
+def test_watch_set_covers_features_only_document(family_python, tmp_path):
+    """A features-only document edit reloads through the questions-tree scan."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    root = tmp_path
+    paths = _scan_reload_workspace(root)
+
+    observed = _run_watch_harness(
+        interpreter, root, paths["features"], tmp_path / "features-sessions"
+    )
+
+    assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
+    assert observed["compiled"] is True, (label, observed)
+    assert observed["reloaded"] is True, (label, observed)

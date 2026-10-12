@@ -716,34 +716,6 @@ def test_included_source_edit_triggers_reload(tmp_path, monkeypatch, da_stubs):
     assert len(calls) == 2
 
 
-def test_unrelated_same_basename_source_does_not_reload(
-    tmp_path, monkeypatch, da_stubs
-):
-    source = _reload_workspace(tmp_path)
-    included = source.parent / "included.yml"
-    included.write_text("---\nquestion: Included\nfields:\n  - Name: user_name\n")
-    # A file with the same basename in another package is not a compiled
-    # source and must not be watched.
-    other = tmp_path / "docassemble" / "other" / "data" / "questions"
-    other.mkdir(parents=True)
-    (tmp_path / "docassemble" / "other" / "__init__.py").write_text("")
-    same_name = other / "included.yml"
-    same_name.write_text("---\nquestion: Other\nfields:\n  - Name: user_name\n")
-    calls = _install_interview_cache(
-        monkeypatch, source, _provenance_interview([source, included])
-    )
-    catalog = InterviewCatalog(
-        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
-    )
-
-    first = catalog._compile()
-    same_name.write_text("---\nquestion: Changed\nfields:\n  - Name: user_name\n")
-    os.utime(same_name, (0, 0))
-
-    assert catalog._compile() is first
-    assert len(calls) == 1
-
-
 def test_missing_included_source_forces_reload(tmp_path, monkeypatch, da_stubs):
     source = _reload_workspace(tmp_path)
     included = source.parent / "included.yml"
@@ -765,11 +737,13 @@ def test_missing_included_source_forces_reload(tmp_path, monkeypatch, da_stubs):
     assert len(calls) == 2
 
 
-def test_outside_root_source_is_not_watched(tmp_path, monkeypatch, da_stubs):
+def test_yaml_outside_workspace_is_not_watched(tmp_path, monkeypatch, da_stubs):
     source = _reload_workspace(tmp_path)
+    # An outside tree with the same package/questions layout the scan walks.
     outside = tmp_path.parent / (tmp_path.name + "-outside-source")
-    outside.mkdir()
-    outside_source = outside / "extra.yml"
+    outside_questions = outside / "docassemble" / "pkg" / "data" / "questions"
+    outside_questions.mkdir(parents=True)
+    outside_source = outside_questions / "extra.yml"
     outside_source.write_text("---\nquestion: Outside\nfields:\n  - Name: user_name\n")
     calls = _install_interview_cache(
         monkeypatch, source, _provenance_interview([source, outside_source])
@@ -782,9 +756,88 @@ def test_outside_root_source_is_not_watched(tmp_path, monkeypatch, da_stubs):
     outside_source.write_text("---\nquestion: Changed\nfields:\n  - Name: user_name\n")
     os.utime(outside_source, (0, 0))
 
-    # A compiled source outside the resolved workspace root is not watched.
+    # A YAML outside the resolved workspace root is not watched, whether it
+    # arrives through provenance or the questions-tree scan.
     assert catalog._compile() is first
     assert len(calls) == 1
+
+
+def test_workspace_scan_covers_include_only_source(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    routing = source.parent / "routing.yml"
+    routing.write_text("---\ninclude:\n  - a.yml\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _provenance_interview([source])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+
+    # An include-only routing file contributes no compiled question, so only
+    # the questions-tree scan can watch it.
+    routing.write_text("---\ninclude:\n  - b.yml\n")
+    os.utime(routing, (0, 0))
+
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+
+
+def test_workspace_scan_covers_features_only_source(tmp_path, monkeypatch, da_stubs):
+    source = _reload_workspace(tmp_path)
+    features = source.parent / "features.yml"
+    features.write_text("---\nfeatures:\n  progress bar: true\n")
+    calls = _install_interview_cache(
+        monkeypatch, source, _provenance_interview([source])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    first = catalog._compile()
+    assert catalog._compile() is first
+
+    # A features-only document is excluded from questions_list, so the scan is
+    # what watches it.
+    features.write_text("---\nfeatures:\n  progress bar: false\n")
+    os.utime(features, (0, 0))
+
+    second = catalog._compile()
+    assert second is not first
+    assert len(calls) == 2
+
+
+def test_escaping_pycache_symlink_is_not_unlinked(tmp_path, monkeypatch, da_stubs):
+    from importlib.util import cache_from_source
+
+    source, package = _modules_workspace(tmp_path)
+    helper = package / "helpers.py"
+    outside = tmp_path.parent / (tmp_path.name + "-outside-pycache")
+    outside.mkdir()
+    external_cache = Path(cache_from_source(str(outside / "helpers.py")))
+    external_cache.parent.mkdir(parents=True, exist_ok=True)
+    external_cache.write_bytes(b"external")
+    # The workspace package's __pycache__ is a symlink to the external one.
+    (package / "__pycache__").symlink_to(external_cache.parent)
+    calls = _install_interview_cache(
+        monkeypatch, source, _modules_interview(["docassemble.pkg.helpers"])
+    )
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.pkg:data/questions/main.yml", cache_compiled=True
+    )
+
+    catalog._compile()
+    # A helper edit forces bytecode invalidation; the escaping cache path must
+    # not delete the external file.
+    helper.write_text("def greeting(v):\n    return f'v2:{v}'\n")
+    os.utime(helper, (0, 0))
+    catalog._compile()
+
+    assert len(calls) == 2
+    assert external_cache.is_file()
 
 
 def test_symlinked_module_outside_workspace_is_not_watched_or_evicted(
