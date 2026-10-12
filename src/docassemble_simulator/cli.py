@@ -944,7 +944,11 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
 def _trace_replay_automatic_group(entries, start, overrides, execution, actual_entries):
     """Replay one recorded automatic walk in one operation-local context."""
     from docassemble_simulator.execution import ReplayAutomatic
-    from docassemble_simulator.trace import is_screen_outcome
+    from docassemble_simulator.trace import (
+        is_screen_outcome,
+        replay_expectation,
+        replay_identity_context,
+    )
 
     first = entries[start]
     end = start
@@ -957,9 +961,10 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
     if not isinstance(target, str) or not target:
         raise InputFailure(f"trace step {first.seq} has no automatic seek target")
     activate = post.activate if post is not None else first.activate
+    group_entries = entries[start:end]
     submissions = tuple(
         tuple(overrides.get(entry.seq, dict(entry.submitted)).items())
-        for entry in entries[start:end]
+        for entry in group_entries
     )
     outcome = execution.run(
         ReplayAutomatic(
@@ -967,6 +972,8 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
             submissions=submissions,
             fresh=first.fresh,
             activate=activate,
+            expectations=tuple(replay_expectation(entry) for entry in group_entries),
+            identity_context=replay_identity_context(actual_entries),
         )
     )
     result = outcome.result if outcome.ok and isinstance(outcome.result, dict) else {}

@@ -18,6 +18,7 @@ from typing import Any
 __all__ = [
     "TRACE_SCHEMA_VERSION",
     "ComparePolicy",
+    "ReplayExpectation",
     "ReplayVerdict",
     "ScreenIdentity",
     "ScreenTrace",
@@ -30,12 +31,16 @@ __all__ = [
     "TracePhaseComparison",
     "append_trace",
     "assign_identity",
+    "assign_identity_from_context",
     "compare_replay_entries",
+    "compare_replay_expectation",
     "compare_traces",
     "error_identity",
     "is_screen_outcome",
     "load_exceptions",
     "load_trace",
+    "replay_expectation",
+    "replay_identity_context",
     "screen_content",
     "screen_identity",
     "write_trace",
@@ -388,6 +393,19 @@ class TraceEntry:
 
 
 @dataclass(frozen=True)
+class ReplayExpectation:
+    """Immutable automatic-step facts supplied to execution for prechecks."""
+
+    seq: int
+    phase: str | None
+    identity_key: str | None
+    identity_rule: str | None
+    content_signature: str
+    ok: bool
+    error_kind: str | None
+
+
+@dataclass(frozen=True)
 class ScreenTrace:
     """A trace sidecar: metadata plus the recorded operations."""
 
@@ -453,10 +471,21 @@ def _compatible_metadata(expected: TraceMetadata, actual: TraceMetadata) -> None
             )
 
 
-def assign_identity(
+def replay_identity_context(
+    entries: tuple[TraceEntry, ...] | list[TraceEntry],
+) -> tuple[tuple[str, str, str | None], ...]:
+    """Reduce prior trace entries to immutable identity/phase context."""
+    return tuple(
+        (entry.identity.key, entry.identity.rule, entry.phase)
+        for entry in entries
+        if entry.identity is not None
+    )
+
+
+def assign_identity_from_context(
     screen: dict[str, Any] | None,
     error: dict[str, Any] | None,
-    entries: tuple[TraceEntry, ...],
+    context: tuple[tuple[str, str, str | None], ...],
     phase: str | None,
 ) -> ScreenIdentity | None:
     if screen is not None and "kind" in screen:
@@ -465,13 +494,8 @@ def assign_identity(
             base = identity.key
             collisions = sum(
                 1
-                for entry in entries
-                if entry.identity is not None
-                and entry.identity.rule == "category"
-                and (
-                    entry.identity.key == base
-                    or entry.identity.key.startswith(f"{base}#")
-                )
+                for key, rule, _phase in context
+                if rule == "category" and (key == base or key.startswith(f"{base}#"))
             )
             if collisions:
                 identity = replace(identity, key=f"{base}#{collisions + 1}")
@@ -481,12 +505,24 @@ def assign_identity(
         return None
     occurrence = 1 + sum(
         1
-        for entry in entries
-        if entry.identity is not None
-        and entry.identity.key == identity.key
-        and entry.phase == phase
+        for key, _rule, entry_phase in context
+        if key == identity.key and entry_phase == phase
     )
     return replace(identity, occurrence=occurrence)
+
+
+def assign_identity(
+    screen: dict[str, Any] | None,
+    error: dict[str, Any] | None,
+    entries: tuple[TraceEntry, ...],
+    phase: str | None,
+) -> ScreenIdentity | None:
+    return assign_identity_from_context(
+        screen,
+        error,
+        replay_identity_context(entries),
+        phase,
+    )
 
 
 # Kept as a package-local alias for the recording adapter and older callers.
@@ -512,6 +548,26 @@ class ReplayVerdict:
             and self.flow_match
             and self.error_match
         )
+
+
+def replay_expectation(entry: TraceEntry) -> ReplayExpectation:
+    """Capture only immutable expected facts needed by execution prechecks."""
+    return ReplayExpectation(
+        seq=entry.seq,
+        phase=entry.phase,
+        identity_key=entry.identity.key if entry.identity is not None else None,
+        identity_rule=entry.identity.rule if entry.identity is not None else None,
+        content_signature=json.dumps(
+            list(
+                entry.content
+                or (screen_content(entry.screen) if entry.screen is not None else ())
+            ),
+            sort_keys=True,
+            default=str,
+        ),
+        ok=entry.ok,
+        error_kind=(entry.error or {}).get("kind"),
+    )
 
 
 def compare_replay_entries(expected: TraceEntry, actual: TraceEntry) -> ReplayVerdict:
@@ -544,6 +600,60 @@ def compare_replay_entries(expected: TraceEntry, actual: TraceEntry) -> ReplayVe
         error_match=error_match,
         expected_content=expected_content,
         actual_content=actual_content,
+    )
+
+
+def compare_replay_expectation(
+    expected: ReplayExpectation,
+    screen: dict[str, Any] | None,
+    error: dict[str, Any] | None,
+    ok: bool,
+    context: tuple[tuple[str, str, str | None], ...],
+) -> tuple[ReplayVerdict, ScreenIdentity | None, tuple[dict[str, Any], ...]]:
+    """Compare execution's current automatic observation to expected facts."""
+    actual_identity = assign_identity_from_context(
+        screen,
+        error,
+        context,
+        expected.phase,
+    )
+    expected_identity = (
+        ScreenIdentity(expected.identity_key, expected.identity_rule)
+        if expected.identity_key is not None and expected.identity_rule is not None
+        else None
+    )
+    expected_content = tuple(json.loads(expected.content_signature))
+    expected_entry = TraceEntry(
+        seq=expected.seq,
+        operation="seek",
+        phase=expected.phase,
+        submitted={},
+        ok=expected.ok,
+        screen=None,
+        identity=expected_identity,
+        content=expected_content,
+        error=(
+            {"kind": expected.error_kind} if expected.error_kind is not None else None
+        ),
+        intent="auto",
+    )
+    actual_content = screen_content(screen) if screen is not None else ()
+    actual_entry = TraceEntry(
+        seq=expected.seq,
+        operation="seek",
+        phase=expected.phase,
+        submitted={},
+        ok=ok,
+        screen=screen,
+        identity=actual_identity,
+        content=actual_content,
+        error=error,
+        intent="auto",
+    )
+    return (
+        compare_replay_entries(expected_entry, actual_entry),
+        actual_identity,
+        actual_content,
     )
 
 

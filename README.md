@@ -309,8 +309,11 @@ compare each pre-submission screen, and then apply the recorded transaction;
 a failed automatic submission is therefore not silently replaced by a seek.
 The recorded activation policy is preserved: a non-activated walk does not
 replace the replay session's Saved screen, while an activated walk commits its
-result once. Use `--override STEP.FIELD=VALUE` to vary one answer without
-changing the golden. Replay validates the interview and configuration
+result once. Replay checks identity and field facts before each submission and
+checks flow/error results before continuing; a mismatch stops the operation
+without saving a partly replayed activated walk. Use
+`--override STEP.FIELD=VALUE` to vary one answer without changing the golden.
+Replay validates the interview and configuration
 fingerprint metadata, never writes the golden or the user's Saved session, and
 exits non-zero on divergence.
 

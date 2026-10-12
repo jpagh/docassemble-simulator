@@ -240,6 +240,9 @@ question: |
 fields:
   - Value: second_value
     default: second
+validation code: |
+  from pathlib import Path
+  Path("__TRACE_REPLAY_MARKER__").write_text("visited")
 ---
 mandatory: True
 question: |
@@ -464,7 +467,11 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
 ):
     """A recorded auto,auto walk stays isolated from its Saved source screen."""
     interpreter = family_python.interpreter
-    root = _write_interview(tmp_path / "multi-auto", MULTI_AUTO_REPLAY_INTERVIEW)
+    marker = tmp_path / "multi-auto.marker"
+    interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
+        "__TRACE_REPLAY_MARKER__", str(marker)
+    )
+    root = _write_interview(tmp_path / "multi-auto", interview)
     record = root / "scenario.trace.jsonl"
 
     code, payload = _command(interpreter, root, "start", "--record", str(record))
@@ -479,6 +486,7 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
         str(record),
     )
     assert code == 0, payload
+    marker.unlink()
     # This answer must still target Saved screen A after the non-activated
     # walk temporarily traversed screens B and C.
     code, payload = _command(
@@ -529,12 +537,72 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
     assert diverged["error"]["details"]["first_divergence"]["step"] == 2
 
 
+def test_trace_replay_stops_before_later_automatic_effect_on_first_identity_divergence(
+    family_python,  # noqa: F811
+    tmp_path,
+):
+    interpreter = family_python.interpreter
+    marker = tmp_path / "later-screen-validation.marker"
+    interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
+        "__TRACE_REPLAY_MARKER__", str(marker)
+    )
+    root = _write_interview(tmp_path / "first-divergence", interview)
+    record = root / "scenario.trace.jsonl"
+
+    code, payload = _command(interpreter, root, "start", "--record", str(record))
+    assert code == 0, payload
+    code, payload = _command(
+        interpreter,
+        root,
+        "seek",
+        "target_value",
+        "--auto",
+        "--activate",
+        "--record",
+        str(record),
+    )
+    assert code == 0, payload
+    assert marker.exists()
+    marker.unlink()
+    golden_before = record.read_bytes()
+    session_files = {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+
+    questions = root / "docassemble" / "tracefix" / "data" / "questions" / "main.yml"
+    questions.write_text(
+        questions.read_text().replace(
+            "id: first automatic", "id: first automatic changed"
+        )
+    )
+    code, diverged = _command(interpreter, root, "trace", "replay", str(record))
+    assert code == 2, diverged
+    first = diverged["error"]["details"]["first_divergence"]
+    assert first["step"] == 2
+    assert first["identity_match"] is False
+    assert first["expected"]["identity"]["key"] == "id:first automatic"
+    assert first["actual"]["identity"]["key"] == "id:first automatic changed"
+    assert first["expected"]["submitted"] == {}
+    assert first["actual"]["submitted"] == {}
+    assert not marker.exists()
+    assert record.read_bytes() == golden_before
+    assert session_files == {
+        path.name: path.read_bytes()
+        for path in (root / ".simulator" / "sessions").glob("*.pkl")
+    }
+
+
 def test_trace_replay_groups_fresh_activated_multi_screen_walk(
     family_python,  # noqa: F811
     tmp_path,
 ):
     interpreter = family_python.interpreter
-    root = _write_interview(tmp_path / "fresh-multi-auto", MULTI_AUTO_REPLAY_INTERVIEW)
+    marker = tmp_path / "fresh-multi-auto.marker"
+    interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
+        "__TRACE_REPLAY_MARKER__", str(marker)
+    )
+    root = _write_interview(tmp_path / "fresh-multi-auto", interview)
     record = root / "fresh.trace.jsonl"
 
     code, payload = _command(
@@ -549,6 +617,7 @@ def test_trace_replay_groups_fresh_activated_multi_screen_walk(
         str(record),
     )
     assert code == 0, payload
+    marker.unlink()
     golden = load_trace(record)
     automatic = [entry for entry in golden.entries if entry.intent == "auto"]
     assert len(automatic) >= 2

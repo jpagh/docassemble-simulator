@@ -54,9 +54,12 @@ operation-local namespace, compares each pre-submission screen, and applies the
 recorded default or override in the same namespace. A non-activated walk never
 persists its temporary target or mutations, so later replayed answers observe
 the original Saved screen; an activated walk commits the resulting target only
-once the walk completes. Identity, field-fact, flow, and error verdicts are
-computed by pure functions in this module, while the CLI retains only
-execution and report orchestration.
+once the walk completes. Identity and field facts are checked before each
+submission, while flow and error verdicts are checked immediately after that
+submission and before the walk can continue. A mismatch terminates the
+operation; an activated replay does not save a partly replayed walk. Identity,
+field-fact, flow, and error verdicts are computed by pure functions in this
+module, while the CLI retains only execution and report orchestration.
 
 ## Considered options
 

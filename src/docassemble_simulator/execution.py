@@ -122,13 +122,16 @@ class ReplayAutomatic:
     Empty assignment tuples retain the recorded browser-default submission;
     non-empty tuples are explicit per-step replay overrides.  Keeping the
     seek and all of its submissions in one operation prevents a non-activated
-    walk from being persisted between adapter calls.
+    walk from being persisted between adapter calls.  Expected screen facts
+    and prior identity context are immutable trace values, never Working state.
     """
 
     variable: str
     submissions: tuple[tuple[tuple[str, str], ...], ...] = ()
     fresh: bool = False
     activate: bool = False
+    expectations: tuple[Any, ...] = ()
+    identity_context: tuple[tuple[str, str, str | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -861,8 +864,10 @@ class InterviewExecution:
                     operation.variable,
                     False,
                     operation.submissions,
+                    operation.expectations,
+                    operation.identity_context,
                 )
-            if operation.activate:
+            if operation.activate and not outcome.get("replay_divergence"):
                 self._store.save(namespace, outcome, operation.variable)
             return outcome
 
@@ -1555,6 +1560,13 @@ def _auto_trace_error(stop):
     return None
 
 
+def _replay_expectation_verdict(expectation, screen, error, ok, context):
+    """Use trace-owned verdict logic without exposing execution state."""
+    from docassemble_simulator.trace import compare_replay_expectation
+
+    return compare_replay_expectation(expectation, screen, error, ok, context)
+
+
 def _seek_auto(
     interview,
     namespace,
@@ -1562,11 +1574,15 @@ def _seek_auto(
     variable,
     trace,
     step_submissions: tuple[tuple[tuple[str, str], ...], ...] | None = None,
+    expectations: tuple[Any, ...] = (),
+    identity_context: tuple[tuple[str, str, str | None], ...] = (),
 ):
     result = _seek(interview, namespace, status, variable, trace)
     submitted = []
     auto_trace = []
     stop = None
+    replay_divergence = None
+    replay_context = list(identity_context)
     for index in range(100):
         if result.get("kind") != "question":
             reason = (
@@ -1585,6 +1601,40 @@ def _seek_auto(
             if step_submissions is not None and index < len(step_submissions)
             else ()
         )
+        expectation = expectations[index] if index < len(expectations) else None
+        if expectation is not None:
+            pre_error = (
+                {"kind": expectation.error_kind}
+                if expectation.error_kind is not None
+                else None
+            )
+            pre_verdict, _identity, _content = _replay_expectation_verdict(
+                expectation,
+                screen,
+                pre_error,
+                expectation.ok,
+                tuple(replay_context),
+            )
+            if not (pre_verdict.identity_match and pre_verdict.field_facts_match):
+                replay_divergence = {
+                    "phase": "before-submission",
+                    "seq": expectation.seq,
+                }
+                auto_trace.append(
+                    {
+                        "screen": screen,
+                        "submitted": dict(assignments),
+                        "ok": expectation.ok,
+                        "error": None,
+                    }
+                )
+                stop = {
+                    "reason": "replay divergence",
+                    "submitted": False,
+                    "screen": screen,
+                }
+                result = screen
+                break
         result, stop = _auto_submit_screen(
             interview,
             namespace,
@@ -1592,6 +1642,8 @@ def _seek_auto(
             screen,
             assignments,
         )
+        actual_error = _auto_trace_error(stop)
+        actual_ok = stop is None
         # Automatic records describe the screen that was submitted, rather
         # than only the screen returned after the submission.  A rejected
         # attempt is retained as a failed step so replay cannot silently turn
@@ -1600,10 +1652,33 @@ def _seek_auto(
             {
                 "screen": screen,
                 "submitted": dict(assignments),
-                "ok": stop is None,
-                "error": _auto_trace_error(stop),
+                "ok": actual_ok,
+                "error": actual_error,
             }
         )
+        if expectation is not None:
+            verdict, _identity, _content = _replay_expectation_verdict(
+                expectation,
+                screen,
+                actual_error,
+                actual_ok,
+                tuple(replay_context),
+            )
+            if not verdict.matched:
+                replay_divergence = {
+                    "phase": "after-submission",
+                    "seq": expectation.seq,
+                }
+                stop = {
+                    "reason": "replay divergence",
+                    "submitted": False,
+                    "screen": screen,
+                }
+                result = screen
+            elif _identity is not None:
+                replay_context.append(
+                    (_identity.key, _identity.rule, expectation.phase)
+                )
         if stop is None or stop.get("submitted"):
             submitted.append(_auto_screen_summary(screen))
         if stop is not None:
@@ -1624,6 +1699,8 @@ def _seek_auto(
     result["auto_submitted"] = submitted
     result["auto_stop"] = stop or {"reason": "seek stopped"}
     result["auto_trace"] = auto_trace
+    if replay_divergence is not None:
+        result["replay_divergence"] = replay_divergence
     return result
 
 
