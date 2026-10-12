@@ -507,16 +507,20 @@ class InterviewCatalog:
         )
 
     def _source_paths(self, interview, main_path) -> tuple[str, ...]:
-        """The workspace files the compiled interview actually read.
+        """The workspace files a reload must invalidate on.
 
-        The set comes from question provenance rather than the include strings:
+        Two sets are combined. The exact set comes from question provenance:
         every compiled question carries ``from_source.filepath``, the absolute
-        file docassemble read it from. That covers abbreviated colon identities
+        file docassemble read it from, which covers abbreviated colon identities
         (``docassemble.other:screens.yml`` resolving under
         ``docassemble/other/data/questions/``) and a nested relative include
-        resolved against its own owning source. Only sources under the resolved
-        workspace root are watched; an include outside the tree is a recorded
-        boundary, not a watched file.
+        resolved against its own owning source. The safety net is every YAML
+        under the workspace questions trees, because docassemble excludes
+        include-only blocks and features-only documents from
+        ``questions_list``, so a routing YAML that changes its ``include:``
+        target has no compiled question to watch. Over-inclusion only causes a
+        reload; under-inclusion would serve a stale program. Only sources under
+        the resolved workspace root are watched.
         """
         candidates: list[str] = []
         if main_path:
@@ -526,7 +530,29 @@ class InterviewCatalog:
             filepath = getattr(from_source, "filepath", None)
             if filepath:
                 candidates.append(str(filepath))
+        candidates.extend(self._workspace_source_candidates())
         return self._contained_paths(candidates)
+
+    def _workspace_source_candidates(self) -> list[str]:
+        """Every YAML source under the workspace's ``data/questions`` trees."""
+        docassemble = self.root / "docassemble"
+        if not docassemble.is_dir():
+            return []
+        candidates: list[str] = []
+        for questions in sorted(docassemble.glob("*/data/questions")):
+            if not questions.is_dir():
+                continue
+            for path in sorted(questions.rglob("*.yml")) + sorted(
+                questions.rglob("*.yaml")
+            ):
+                relative = path.relative_to(questions)
+                if any(
+                    part.startswith(".") or part == "__pycache__"
+                    for part in relative.parts
+                ):
+                    continue
+                candidates.append(str(path))
+        return candidates
 
     def _contained_paths(self, candidates: list[str]) -> tuple[str, ...]:
         """Resolved, workspace-contained, de-duplicated paths in order."""
@@ -727,8 +753,17 @@ class InterviewCatalog:
                     cache = importlib.util.cache_from_source(str(resolved))
                 except (NotImplementedError, ValueError):
                     continue
+                # Resolve the cache path too: a ``__pycache__`` directory that
+                # is a symlink outside the tree would otherwise have its
+                # external bytecode deleted.
                 try:
-                    os.unlink(cache)
+                    cache_resolved = Path(cache).resolve()
+                except OSError:
+                    continue
+                if not cache_resolved.is_relative_to(self.root):
+                    continue
+                try:
+                    os.unlink(cache_resolved)
                 except OSError:
                     continue
 

@@ -208,25 +208,31 @@ remain in the protocol response.
 
 While a worker is running, editing the interview's source takes effect on the
 next operation. The worker checks the timestamp and size of every workspace
-source file the compiled interview read — the selected file plus each YAML its
-compiled questions came from, so an abbreviated `pkg:file` include and a
-relative include nested under another package are watched at the exact file
-docassemble read — together with the declared `modules:`/`imports:` helper
-files, once per operation and, when they changed, drops the compiled program,
-evicts the recompiled interview's declared helpers from `sys.modules`,
-invalidates their cached bytecode, and recompiles — so renaming a screen,
-editing an included YAML, or editing a helper (with or without an
-interview-source edit) is served without restarting the worker. A declared
-helper is watched when it resolves to a file or package under the workspace
-source tree; helper edits to a declared package directory are watched
+YAML source it watches — every `*.yml`/`*.yaml` under the workspace's
+`docassemble/*/data/questions` trees, plus each file a compiled question came
+from, so an abbreviated `pkg:file` include and a relative include nested under
+another package are covered at the exact file docassemble read — together with
+the declared `modules:`/`imports:` helper files, once per operation and, when
+they changed, drops the compiled program, evicts the recompiled interview's
+declared helpers from `sys.modules`, invalidates their cached bytecode, and
+recompiles — so renaming a screen, editing an included YAML (including an
+include-only routing file or a features-only document that contributes no
+question), or editing a helper (with or without an interview-source edit) is
+served without restarting the worker. Watching the whole questions tree
+over-includes: an unrelated YAML edit in the same workspace merely causes a
+reload, which is preferred to missing a source the interview could read. A
+declared helper is watched when it resolves to a file or package under the
+workspace source tree; helper edits to a declared package directory are watched
 recursively, so an edited or newly added submodule counts. Only workspace
 declared helpers are evicted, so an installed module named in `imports:` keeps
 its identity. A declared module outside the workspace (stdlib or an installed
 docassemble package) is not watched, and neither is a workspace module the
 interview does not declare. Watching, eviction, and bytecode invalidation all
 resolve real paths first, so a workspace symlink that escapes the resolved root
-is not watched, evicted, or unlinked, and an include that resolves outside the
-workspace root is not watched. An unchanged interview stays
+is not watched, evicted, or unlinked, a `__pycache__` symlink pointing outside
+the root does not have its external cache deleted, and a YAML or include that
+resolves outside the workspace root is not watched. An unchanged interview
+stays
 warm and is not recompiled. A reload never touches the Saved session; `reset`
 remains the explicit way to clear it, and a reload that makes the interview
 invalid reports the usual typed `compile` error with the session intact.
