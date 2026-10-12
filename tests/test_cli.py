@@ -39,7 +39,7 @@ def test_json_array_journey_becomes_one_protocol_frame_per_request(
         def __init__(self, *args, **kwargs):
             pass
 
-    def fake_serve(worker, input_stream, output_stream):
+    def fake_serve(worker, input_stream, output_stream, observer=None):
         seen["requests"] = [json.loads(line) for line in input_stream]
         return 0
 
@@ -154,7 +154,7 @@ def test_worker_setup_output_is_not_written_to_protocol(monkeypatch, tmp_path, c
         def __init__(self, *args, **kwargs):
             print("bootstrap output")
 
-    def fake_serve(worker, stream, output):
+    def fake_serve(worker, stream, output, observer=None):
         output.write(json.dumps({"ok": True}) + "\\n")
         return 0
 

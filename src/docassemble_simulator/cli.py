@@ -561,7 +561,8 @@ def cmd_worker(args, root):
                     )
                 else:
                     stream = io.StringIO(contents)
-            return serve(worker, stream, protocol_output)
+            recorder = _worker_journey_recorder(args, root, worker)
+            return serve(worker, stream, protocol_output, observer=recorder)
         finally:
             if handle is not None:
                 handle.close()
@@ -629,21 +630,43 @@ def _trace_operation_context(operation, command):
     }
 
 
-def _record_execution(args, root, execution, operation, payload):
-    """Append operation intent and screen outcomes to a trace sidecar."""
+def _record_execution(
+    args,
+    root,
+    execution,
+    operation,
+    payload,
+    *,
+    record=None,
+    phase=None,
+    command=None,
+):
+    """Append operation intent and screen outcomes to a trace sidecar.
+
+    The one-shot execution path supplies the trace destination and command on
+    ``args``; the worker journey recorder passes the per-request ``record`` and
+    ``phase`` and the request's operation name explicitly. Both paths then
+    share one recording implementation.
+    """
     from docassemble_simulator.execution import Status
     from docassemble_simulator.trace import append_trace, is_screen_outcome
 
-    context = _trace_operation_context(operation, args.command)
+    if record is None:
+        record = args.record
+    if phase is None:
+        phase = getattr(args, "phase", None)
+    if command is None:
+        command = getattr(args, "command", None)
+    context = _trace_operation_context(operation, command)
     result = payload.get("result") if payload.get("ok") else None
     auto_trace = result.get("auto_trace") if isinstance(result, dict) else None
     if auto_trace:
         metadata = _trace_metadata(args, root)
         for index, step in enumerate(auto_trace):
             append_trace(
-                args.record,
+                record,
                 metadata,
-                operation=args.command,
+                operation=command,
                 intent="auto",
                 target=context["target"],
                 # Preserve the seek's activation policy on every automatic
@@ -657,7 +680,7 @@ def _record_execution(args, root, execution, operation, payload):
                 ok=bool(step.get("ok", True)),
                 screen=step.get("screen"),
                 error=step.get("error"),
-                phase=getattr(args, "phase", None),
+                phase=phase,
                 submitted=step.get("submitted") or {},
             )
 
@@ -682,9 +705,9 @@ def _record_execution(args, root, execution, operation, payload):
     # the post-walk outcome and must not re-run the walk during replay.
     final_fresh = context["fresh"] and not auto_trace
     append_trace(
-        args.record,
+        record,
         _trace_metadata(args, root),
-        operation=args.command,
+        operation=command,
         intent=context["intent"],
         target=context["target"],
         fresh=final_fresh,
@@ -693,9 +716,57 @@ def _record_execution(args, root, execution, operation, payload):
         ok=bool(payload.get("ok")),
         screen=screen,
         error=payload.get("error"),
-        phase=getattr(args, "phase", None),
+        phase=phase,
         submitted=context["submitted"],
     )
+
+
+def _worker_journey_recorder(args, root, worker):
+    """Return a ``serve`` observer that records execution responses.
+
+    A recorded worker response has exactly the one-shot payload shape
+    (``ok``/``result``/``error``), so the same scenario recorded through a
+    worker journey is equivalent to recording it one process per operation.
+    The destination comes from the request's optional ``record``/``phase``
+    fields, falling back to the worker command's ``--record PATH --phase
+    NAME`` defaults. Protocol-only requests are skipped, and the worker
+    execution is only touched once a request actually asks to record.
+    """
+    from docassemble_simulator.trace import TraceError
+    from docassemble_simulator.worker import (
+        WorkerProtocolError,
+        operation_from_request,
+    )
+
+    def observe(request, response):
+        record = request.get("record") or getattr(args, "record", None)
+        if not record:
+            return
+        try:
+            operation = operation_from_request(request)
+        except WorkerProtocolError:
+            # ``ping``/``reset``/``shutdown`` and malformed requests are
+            # protocol-only: they never produce a recorded screen outcome.
+            return
+        command = str(
+            request.get("operation", request.get("op", request.get("command")))
+        )
+        command = command.strip().lower().replace("_", "-")
+        try:
+            _record_execution(
+                args,
+                root,
+                worker.execution,
+                operation,
+                response,
+                record=record,
+                phase=request.get("phase", getattr(args, "phase", None)),
+                command=command,
+            )
+        except (TraceError, OSError, RuntimeError, ValueError) as error:
+            print(f"worker trace record failed: {error}", file=sys.stderr)
+
+    return observe
 
 
 def _trace_policy(args):
@@ -1672,6 +1743,22 @@ def build_parser():
             "--timings",
             action="store_true",
             help="include operation and worker-startup timings in responses",
+        )
+        worker.add_argument(
+            "--record",
+            metavar="PATH",
+            help=(
+                "append every execution response's screen outcome to a JSONL "
+                "trace; a request may override this with its own `record` field"
+            ),
+        )
+        worker.add_argument(
+            "--phase",
+            metavar="NAME",
+            help=(
+                "default phase tag for recorded journey entries; a request may "
+                "override this with its own `phase` field"
+            ),
         )
         worker.set_defaults(func=cmd_worker)
     variables = add("vars", help="inspect saved variables without saving")
