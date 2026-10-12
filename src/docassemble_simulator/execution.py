@@ -122,8 +122,9 @@ class ReplayAutomatic:
     Empty assignment tuples retain the recorded browser-default submission;
     non-empty tuples are explicit per-step replay overrides.  Keeping the
     seek and all of its submissions in one operation prevents a non-activated
-    walk from being persisted between adapter calls.  Expected screen facts
-    and prior identity context are immutable trace values, never Working state.
+    walk from being persisted between adapter calls.  Expected screen facts,
+    the trailing post-walk expectation, and prior identity context are
+    immutable trace values, never Working state.
     """
 
     variable: str
@@ -132,6 +133,7 @@ class ReplayAutomatic:
     activate: bool = False
     expectations: tuple[Any, ...] = ()
     identity_context: tuple[tuple[str, str, str | None], ...] = ()
+    trailing: Any = None
 
 
 @dataclass(frozen=True)
@@ -866,6 +868,7 @@ class InterviewExecution:
                     operation.submissions,
                     operation.expectations,
                     operation.identity_context,
+                    operation.trailing,
                 )
             if operation.activate and not outcome.get("replay_divergence"):
                 self._store.save(namespace, outcome, operation.variable)
@@ -1567,6 +1570,48 @@ def _replay_expectation_verdict(expectation, screen, error, ok, context):
     return compare_replay_expectation(expectation, screen, error, ok, context)
 
 
+def _replay_trailing_observation(result):
+    """Shape a finished replay walk the way its public envelope reports it.
+
+    A failure result promotes its typed ``failure_kind`` exactly as the
+    recorded step does, so the trailing verdict compares like with like.
+    """
+    from docassemble_simulator.trace import is_screen_outcome
+
+    if result.get("kind") == "error":
+        return (
+            None,
+            {
+                "kind": result.get("failure_kind") or ErrorKind.EXECUTION,
+                "message": result.get("message", "automatic submission failed"),
+                "details": result,
+            },
+            False,
+        )
+    return (result if is_screen_outcome(result) else None), None, True
+
+
+def _replay_walk_divergence(expectations, attempted, trailing, result, context):
+    """Decide whether a replayed automatic walk may be persisted.
+
+    Only the recorded submissions are attempted, so reaching that boundary is
+    not itself a mismatch: the observed outcome is compared with the recorded
+    trailing record instead.  A walk that ends before every recorded attempt
+    ran is truncated, and the earliest missing expected step is the divergence.
+    """
+    if attempted < len(expectations):
+        return {"phase": "early-end", "seq": expectations[attempted].seq}
+    if trailing is None:
+        return None
+    screen, error, ok = _replay_trailing_observation(result)
+    verdict, _identity, _content = _replay_expectation_verdict(
+        trailing, screen, error, ok, context
+    )
+    if verdict.matched:
+        return None
+    return {"phase": "trailing", "seq": trailing.seq}
+
+
 def _seek_auto(
     interview,
     namespace,
@@ -1576,6 +1621,7 @@ def _seek_auto(
     step_submissions: tuple[tuple[tuple[str, str], ...], ...] | None = None,
     expectations: tuple[Any, ...] = (),
     identity_context: tuple[tuple[str, str, str | None], ...] = (),
+    trailing: Any = None,
 ):
     result = _seek(interview, namespace, status, variable, trace)
     submitted = []
@@ -1583,6 +1629,10 @@ def _seek_auto(
     stop = None
     replay_divergence = None
     replay_context = list(identity_context)
+    # Replay supplies the recorded submissions, so its recorded group is a hard
+    # submission boundary; ordinary auto-seek remains unbounded by expectations.
+    replay = step_submissions is not None
+    attempted = 0
     for index in range(100):
         if result.get("kind") != "question":
             reason = (
@@ -1594,6 +1644,11 @@ def _seek_auto(
             break
         if _variable_is_resolved(namespace, variable):
             stop = {"reason": "sought variable resolved"}
+            break
+        if replay and index >= len(expectations):
+            # Never submit a screen the recording did not authorize: the
+            # unexpected outcome is observed and the trailing verdict reports it.
+            stop = {"reason": "replay boundary"}
             break
         screen = result
         assignments = (
@@ -1623,7 +1678,10 @@ def _seek_auto(
                 auto_trace.append(
                     {
                         "screen": screen,
-                        "submitted": dict(assignments),
+                        # A screen that failed the pre-submission check was
+                        # only observed; its assignments never reached the
+                        # interview, so they are not reported as submitted.
+                        "submitted": {},
                         "ok": expectation.ok,
                         "error": None,
                     }
@@ -1642,6 +1700,7 @@ def _seek_auto(
             screen,
             assignments,
         )
+        attempted += 1
         actual_error = _auto_trace_error(stop)
         actual_ok = stop is None
         # Automatic records describe the screen that was submitted, rather
@@ -1694,6 +1753,15 @@ def _seek_auto(
         result = _seek(interview, namespace, status, variable, trace)
     else:
         stop = {"reason": "auto-advance limit reached", "limit": 100}
+
+    if replay_divergence is None and replay:
+        replay_divergence = _replay_walk_divergence(
+            expectations,
+            attempted,
+            trailing,
+            result,
+            tuple(replay_context),
+        )
 
     result = dict(result)
     result["auto_submitted"] = submitted

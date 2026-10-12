@@ -307,11 +307,18 @@ first identity, field-fact, flow, or rejected-assignment divergence. Automatic
 steps initialize their recorded seek target in one operation-local namespace,
 compare each pre-submission screen, and then apply the recorded transaction;
 a failed automatic submission is therefore not silently replaced by a seek.
-The recorded activation policy is preserved: a non-activated walk does not
-replace the replay session's Saved screen, while an activated walk commits its
-result once. Replay checks identity and field facts before each submission and
-checks flow/error results before continuing; a mismatch stops the operation
-without saving a partly replayed activated walk. Use
+The recorded automatic group is also a hard submission bound: once the recorded
+attempts are exhausted, an unexpected screen is observed and compared with the
+recorded post-walk outcome instead of being submitted, so a changed interview
+cannot authorize extra work or run an unrecorded screen's validation code. The
+recorded activation policy is preserved: a non-activated walk does not replace
+the replay session's Saved screen, while an activated walk commits its result
+once, and only after every recorded attempt and the trailing post-walk outcome
+matched. Replay checks identity and field facts before each submission and
+checks flow/error results before continuing; a walk that ends before every
+recorded attempt ran reports the earliest missing expected step. Any mismatch
+stops the operation without saving, leaving the previous namespace, Saved
+outcome, and Active seek unchanged. Use
 `--override STEP.FIELD=VALUE` to vary one answer without changing the golden.
 Replay validates the interview and configuration
 fingerprint metadata, never writes the golden or the user's Saved session, and

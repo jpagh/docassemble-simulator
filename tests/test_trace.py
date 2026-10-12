@@ -518,6 +518,210 @@ def test_trace_replay_stops_at_first_identity_divergence(tmp_path, monkeypatch, 
     assert payload["error"]["details"]["counts"]["replayed"] == 1
 
 
+def _automatic_group_trace():
+    """A recorded two-submission walk with its trailing post-walk record."""
+    intro = _screen()
+    first = _screen(question_name="ID first automatic")
+    second = _screen(question_name="ID second automatic")
+    trailing = _screen(
+        question_type="deadend",
+        question_name="Question_4",
+        fields=[],
+        sought=None,
+        orig_sought=None,
+    )
+    return (
+        _trace(
+            TraceEntry(
+                1,
+                "start",
+                None,
+                {},
+                True,
+                intro,
+                ScreenIdentity("id:intro", "explicit-id"),
+                screen_content(intro),
+                intent="start",
+            ),
+            TraceEntry(
+                2,
+                "seek",
+                None,
+                {},
+                True,
+                first,
+                ScreenIdentity("id:first automatic", "explicit-id"),
+                screen_content(first),
+                intent="auto",
+                target="target_value",
+                activate=True,
+            ),
+            TraceEntry(
+                3,
+                "seek",
+                None,
+                {},
+                True,
+                second,
+                ScreenIdentity("id:second automatic", "explicit-id"),
+                screen_content(second),
+                intent="auto",
+                target="target_value",
+                activate=True,
+            ),
+            TraceEntry(
+                4,
+                "seek",
+                None,
+                {},
+                True,
+                trailing,
+                ScreenIdentity("screen:question/deadend", "category"),
+                (),
+                intent="seek",
+                target="target_value",
+                activate=True,
+                post_auto=True,
+            ),
+        ),
+        (intro, first, second, trailing),
+    )
+
+
+def test_trace_replay_automatic_group_carries_the_trailing_expectation(
+    tmp_path, monkeypatch, capsys
+):
+    trace, screens = _automatic_group_trace()
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    observed = _screen(question_name="ID extra automatic")
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *arguments, **keywords):
+            pass
+
+        def run(self, operation):
+            from docassemble_simulator.execution import ReplayAutomatic, Start
+
+            operations.append(operation)
+            if isinstance(operation, Start):
+                return SimpleNamespace(ok=True, result=screens[0], error=None)
+            if isinstance(operation, ReplayAutomatic):
+                return SimpleNamespace(
+                    ok=True,
+                    result={
+                        **observed,
+                        "auto_trace": [
+                            {
+                                "screen": screens[1],
+                                "submitted": {},
+                                "ok": True,
+                                "error": None,
+                            },
+                            {
+                                "screen": screens[2],
+                                "submitted": {},
+                                "ok": True,
+                                "error": None,
+                            },
+                        ],
+                        "replay_divergence": {"phase": "trailing", "seq": 4},
+                    },
+                    error=None,
+                )
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    replay_operation = operations[-1]
+    assert [item.seq for item in replay_operation.expectations] == [2, 3]
+    # The trailing post-walk record is execution's own boundary expectation.
+    assert replay_operation.trailing.seq == 4
+    details = payload["error"]["details"]
+    assert [step["match"] for step in details["steps"]] == [True, True, True, False]
+    divergence = details["first_divergence"]
+    assert divergence["step"] == 4
+    assert divergence["identity_match"] is False
+    assert divergence["actual"]["identity"]["key"] == "id:extra automatic"
+    assert divergence["actual"]["submitted"] == {}
+
+
+def test_trace_replay_reports_no_submission_for_a_screen_it_only_observed(
+    tmp_path, monkeypatch, capsys
+):
+    trace, screens = _automatic_group_trace()
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    changed = _screen(question_name="ID first automatic changed")
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *arguments, **keywords):
+            pass
+
+        def run(self, operation):
+            from docassemble_simulator.execution import ReplayAutomatic, Start
+
+            operations.append(operation)
+            if isinstance(operation, Start):
+                return SimpleNamespace(ok=True, result=screens[0], error=None)
+            if isinstance(operation, ReplayAutomatic):
+                return SimpleNamespace(
+                    ok=True,
+                    result={
+                        **changed,
+                        "auto_trace": [
+                            {
+                                "screen": changed,
+                                "submitted": {},
+                                "ok": True,
+                                "error": None,
+                            }
+                        ],
+                        "replay_divergence": {
+                            "phase": "before-submission",
+                            "seq": 2,
+                        },
+                    },
+                    error=None,
+                )
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=["2.first_value=changed"],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    divergence = payload["error"]["details"]["first_divergence"]
+    assert divergence["step"] == 2
+    assert divergence["submitted"] == {"first_value": "changed"}
+    # Nothing was submitted for the observed screen, even though a per-step
+    # override was supplied for the recorded attempt.
+    assert divergence["actual"]["submitted"] == {}
+
+
 def test_trace_replay_rejects_metadata_mismatch_without_running(
     tmp_path, monkeypatch, capsys
 ):
