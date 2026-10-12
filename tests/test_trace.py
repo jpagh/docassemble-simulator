@@ -626,7 +626,23 @@ def test_trace_replay_automatic_group_carries_the_trailing_expectation(
                                 "error": None,
                             },
                         ],
-                        "replay_divergence": {"phase": "trailing", "seq": 4},
+                        "replay_divergence": {
+                            "phase": "trailing",
+                            "seq": 4,
+                            "observation": {
+                                "screen": observed,
+                                "error": None,
+                                "ok": True,
+                            },
+                            "submitted": {},
+                            "verdict": {
+                                "identity_match": False,
+                                "field_facts_match": False,
+                                "flow_match": True,
+                                "error_match": True,
+                                "match": False,
+                            },
+                        },
                     },
                     error=None,
                 )
@@ -655,8 +671,97 @@ def test_trace_replay_automatic_group_carries_the_trailing_expectation(
     divergence = details["first_divergence"]
     assert divergence["step"] == 4
     assert divergence["identity_match"] is False
+    # The recorded trailing identity mismatch is not a flow divergence; the
+    # report keeps execution's own verdict instead of inventing one.
+    assert divergence["flow_match"] is True
+    assert divergence["error_match"] is True
     assert divergence["actual"]["identity"]["key"] == "id:extra automatic"
     assert divergence["actual"]["submitted"] == {}
+
+
+def test_trace_replay_renders_executions_early_end_observation(
+    tmp_path, monkeypatch, capsys
+):
+    """An early-end report shows the walk-ending outcome, not an empty one."""
+    trace, screens = _automatic_group_trace()
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    ending = _screen(
+        kind="continue",
+        question_type=None,
+        question_name=None,
+        fields=[],
+        sought=None,
+        orig_sought=None,
+    )
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *arguments, **keywords):
+            pass
+
+        def run(self, operation):
+            from docassemble_simulator.execution import ReplayAutomatic, Start
+
+            operations.append(operation)
+            if isinstance(operation, Start):
+                return SimpleNamespace(ok=True, result=screens[0], error=None)
+            if isinstance(operation, ReplayAutomatic):
+                return SimpleNamespace(
+                    ok=True,
+                    result={
+                        **ending,
+                        "auto_trace": [
+                            {
+                                "screen": screens[1],
+                                "submitted": {},
+                                "ok": True,
+                                "error": None,
+                            }
+                        ],
+                        "replay_divergence": {
+                            "phase": "early-end",
+                            "seq": 3,
+                            "observation": {
+                                "screen": ending,
+                                "error": None,
+                                "ok": True,
+                            },
+                            "submitted": {},
+                            "verdict": {
+                                "identity_match": False,
+                                "field_facts_match": False,
+                                "flow_match": True,
+                                "error_match": True,
+                                "match": False,
+                            },
+                        },
+                    },
+                    error=None,
+                )
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(cli, "_trace_metadata", lambda args, root: trace.metadata)
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 2
+    payload = json.loads(capsys.readouterr().out)
+    divergence = payload["error"]["details"]["first_divergence"]
+    assert divergence["step"] == 3
+    assert divergence["actual"]["identity"]["key"] == "screen:continue"
+    assert divergence["actual"]["ok"] is True
+    assert divergence["actual"].get("error") is None
+    assert divergence["identity_match"] is False
+    assert divergence["flow_match"] is True
 
 
 def test_trace_replay_reports_no_submission_for_a_screen_it_only_observed(
@@ -694,6 +799,19 @@ def test_trace_replay_reports_no_submission_for_a_screen_it_only_observed(
                         "replay_divergence": {
                             "phase": "before-submission",
                             "seq": 2,
+                            "observation": {
+                                "screen": changed,
+                                "error": None,
+                                "ok": True,
+                            },
+                            "submitted": {},
+                            "verdict": {
+                                "identity_match": False,
+                                "field_facts_match": False,
+                                "flow_match": True,
+                                "error_match": True,
+                                "match": False,
+                            },
                         },
                     },
                     error=None,
