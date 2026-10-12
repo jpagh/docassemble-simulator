@@ -9,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 from collections import Counter
+from collections.abc import Callable
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import fields, is_dataclass
 from pathlib import Path
@@ -631,16 +632,16 @@ def _trace_operation_context(operation, command):
 
 
 def _record_execution(
-    args,
-    root,
-    execution,
-    operation,
-    payload,
+    args: argparse.Namespace,
+    root: str | Path,
+    execution: Any,
+    operation: Any,
+    payload: dict[str, Any],
     *,
-    record=None,
-    phase=None,
-    command=None,
-):
+    record: str | Path | None = None,
+    phase: str | None = None,
+    command: str | None = None,
+) -> None:
     """Append operation intent and screen outcomes to a trace sidecar.
 
     The one-shot execution path supplies the trace destination and command on
@@ -721,7 +722,9 @@ def _record_execution(
     )
 
 
-def _worker_journey_recorder(args, root, worker):
+def _worker_journey_recorder(
+    args: argparse.Namespace, root: str | Path, worker: Any
+) -> Callable[[Any, dict[str, Any]], None]:
     """Return a ``serve`` observer that records execution responses.
 
     A recorded worker response has exactly the one-shot payload shape
@@ -729,18 +732,23 @@ def _worker_journey_recorder(args, root, worker):
     worker journey is equivalent to recording it one process per operation.
     The destination comes from the request's optional ``record``/``phase``
     fields, falling back to the worker command's ``--record PATH --phase
-    NAME`` defaults. Protocol-only requests are skipped, and the worker
-    execution is only touched once a request actually asks to record.
+    NAME`` defaults; an absent or ``null`` field means "use the worker
+    default", and any other non-string value is an input failure. Protocol-only
+    requests are skipped, and the worker execution is only touched once a
+    request actually asks to record. Recording failures are not caught here:
+    ``serve`` isolates them into a typed non-ok response so a truncated trace
+    cannot pass unnoticed.
     """
-    from docassemble_simulator.trace import TraceError
     from docassemble_simulator.worker import (
         WorkerProtocolError,
         operation_from_request,
+        operation_name,
     )
 
-    def observe(request, response):
-        record = request.get("record") or getattr(args, "record", None)
-        if not record:
+    def observe(request: Any, response: dict[str, Any]) -> None:
+        if not isinstance(request, dict):
+            # ``null``, arrays, and strings are rejected by the protocol
+            # handler; there is no request field to record.
             return
         try:
             operation = operation_from_request(request)
@@ -748,23 +756,30 @@ def _worker_journey_recorder(args, root, worker):
             # ``ping``/``reset``/``shutdown`` and malformed requests are
             # protocol-only: they never produce a recorded screen outcome.
             return
-        command = str(
-            request.get("operation", request.get("op", request.get("command")))
+        record = request.get("record") if "record" in request else None
+        if record is None:
+            record = getattr(args, "record", None)
+        if record is None:
+            return
+        if not isinstance(record, str) or not record.strip():
+            raise InputFailure("a journey record destination must be a path string")
+        phase = request.get("phase") if "phase" in request else None
+        if phase is None:
+            phase = getattr(args, "phase", None)
+        if phase is not None and not isinstance(phase, str):
+            raise InputFailure("a journey phase must be a string or null")
+        # The recorded operation is the canonical one-shot command spelling, so
+        # an alias request (``evaluate``) records what ``eval`` records.
+        _record_execution(
+            args,
+            root,
+            worker.execution,
+            operation,
+            response,
+            record=record,
+            phase=phase,
+            command=operation_name(request),
         )
-        command = command.strip().lower().replace("_", "-")
-        try:
-            _record_execution(
-                args,
-                root,
-                worker.execution,
-                operation,
-                response,
-                record=record,
-                phase=request.get("phase", getattr(args, "phase", None)),
-                command=command,
-            )
-        except (TraceError, OSError, RuntimeError, ValueError) as error:
-            print(f"worker trace record failed: {error}", file=sys.stderr)
 
     return observe
 
