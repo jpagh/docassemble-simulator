@@ -423,6 +423,21 @@ def test_trace_compare_worker_rejects_policy_the_cli_refuses(
         cli._trace_compare_worker_request(payload)
 
 
+def test_trace_compare_worker_rejects_an_itemless_declared_phase_order():
+    """``--phases ","`` is still a declaration the CLI refuses without phased."""
+    with pytest.raises(
+        WorkerProtocolError, match="phases is only used with order phased"
+    ):
+        cli._trace_compare_worker_request(
+            {
+                "expected": "g",
+                "actual": "r",
+                "order": "unordered",
+                "phases": ",",
+            }
+        )
+
+
 def test_trace_replay_worker_rejects_the_update_field(tmp_path):
     """``--update`` is the CLI's golden write path; a worker never writes one."""
     worker = _replay_worker(tmp_path)

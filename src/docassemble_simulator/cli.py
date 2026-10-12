@@ -1141,10 +1141,12 @@ def _worker_trace_policy(request):
     if not isinstance(full_text, bool):
         raise InputFailure("trace compare full_text must be a boolean")
     order = choice("order", "ordered")
+    declared = _worker_field(request, "phases")
     phases = _worker_trace_phases(request)
-    if phases is not None and order != "phased":
-        # The one-shot CLI rejects this pairing (``_validate_trace_arguments``);
-        # a worker request must not silently ignore the declared phases.
+    if declared and order != "phased":
+        # The one-shot CLI rejects this pairing (``_validate_trace_arguments``)
+        # and treats an empty ``--phases`` as absent; a worker request must not
+        # silently ignore a declared phase order.
         raise InputFailure(
             "trace compare phases is only used with order phased; "
             "add order phased or drop phases"
