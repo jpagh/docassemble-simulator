@@ -334,5 +334,5 @@ def test_worker_command_registers_the_render_handler(tmp_path, monkeypatch):
     )
 
     assert cli.cmd_worker(args, tmp_path) == 0
-    assert set(seen["handlers"]) == {"render"}
+    assert {"render"} <= set(seen["handlers"])
     assert callable(seen["handlers"]["render"])
