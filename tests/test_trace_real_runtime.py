@@ -1476,8 +1476,13 @@ def test_trace_replay_execution_keeps_divergent_activated_walks_out_of_the_sessi
 
 
 def _record_replay_scenario(journey, record):
-    """Record the linear default/auto/validation scenario both transports replay."""
+    """Record the linear default/auto/validation scenario both transports replay.
+
+    A recorded status response is included so replay's read-only screen
+    observation is exercised on both runtime families (#51).
+    """
     assert _record(journey, "start", record)["ok"]
+    assert _record(journey, "status", record)["ok"]
     assert _record(journey, "answer", record, defaults=True)["ok"]
     for variable in ("optional_one", "optional_two"):
         assert _record(

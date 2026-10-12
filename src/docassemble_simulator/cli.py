@@ -1486,11 +1486,16 @@ def _trace_replay_overrides(raw_overrides, entries):
 
 
 def _trace_replay_operation(entry, submitted):
-    from docassemble_simulator.execution import Answer, Refresh, Seek, Start
+    from docassemble_simulator.execution import Answer, Refresh, Seek, Start, Status
+    from docassemble_simulator.trace import TraceError
 
     intent = entry.intent or entry.operation
     if intent == "start":
         return Start()
+    if intent == "status":
+        # A recorded status response is a screen observation: replaying it
+        # checks the saved screen without submitting anything (#51).
+        return Status()
     if intent == "refresh":
         return Refresh()
     if intent == "answer":
@@ -1508,14 +1513,16 @@ def _trace_replay_operation(entry, submitted):
         if not variable and entry.error:
             variable = (entry.error.get("details") or {}).get("sought_variable")
         if not isinstance(variable, str) or not variable:
-            raise InputFailure(f"trace step {entry.seq} has no seek variable")
+            raise TraceError(f"trace step {entry.seq} has no seek variable")
         return Seek(variable, fresh=entry.fresh, activate=entry.activate)
     if intent == "auto":
         # Automatic records are expanded below so the replay can compare the
         # pre-submission screen and then apply the browser-shaped transaction.
         return Answer(tuple(submitted.items()), defaults=not submitted)
-    raise InputFailure(
-        f"trace step {entry.seq} uses unsupported operation {entry.operation!r}"
+    raise TraceError(
+        f"trace step {entry.seq} records compare-only operation "
+        f"{entry.operation!r}: replay accepts start, status, refresh, answer, "
+        "seek, and automatic records"
     )
 
 
@@ -1818,12 +1825,14 @@ def _trace_replay_report(
     both compute the same ``sim trace replay --json`` report (``golden``,
     ``metadata``, ``clean``, ``steps``, ``first_divergence``, ``counts``) and
     raise the same ``TraceError`` for an unreadable golden, an interview or
-    config mismatch, or a malformed override. ``interview`` is the requested
-    interview (``None`` accepts the golden's own) and ``resolved_configuration``
-    the caller's already-resolved effective configuration, so neither caller has
-    to fabricate a command namespace. ``compile_failure`` is a compile a
-    worker's refresh already paid for: the replay's isolated execution
-    re-raises it, so a source that no longer compiles still produces the
+    config mismatch, a malformed override, or a step that records an operation
+    replay cannot reconstruct (``eval``, ``vars``, ``seed``, or ``exec``).
+    ``interview`` is the requested interview (``None`` accepts the golden's
+    own) and ``resolved_configuration`` the caller's already-resolved effective
+    configuration, so neither caller has to fabricate a command namespace.
+    ``compile_failure`` is a compile a worker's refresh already paid for: the
+    replay's isolated execution re-raises it, so a source that no longer
+    compiles still produces the
     divergence report the one-shot command produces from that failure, at the
     cost of one compile. The replay always runs against its own temporary
     session directory, so it never touches a caller's Saved session and never

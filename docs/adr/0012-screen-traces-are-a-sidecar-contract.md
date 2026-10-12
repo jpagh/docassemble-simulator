@@ -86,6 +86,17 @@ keeps a non-activated walk's mutations for later replayed entries. The recorder
 always writes the marker, so every recorded golden is covered by the hard
 boundary.
 
+Issue #51 fixes the replay vocabulary boundary. A recorded `status` response
+replays as a read-only `Status()` observation, because the sidecar carries all
+the input that operation needs, while `eval`, `vars`, `seed`, and `exec`
+records carry no expression or code and replay cannot reconstruct them. A
+golden containing one of those compare-only records is the typed `input`
+error `trace step N records compare-only operation '<operation>'`, never a
+fault and never a silent skip, and the one-shot CLI and the worker's
+`trace-replay` request report the same message because both consume one shared
+replay-report seam. Resolving a step-level input problem into that typed error
+is part of the shared seam, so the two transports cannot drift.
+
 ## Considered options
 
 1. **Harness-level recording only.** Each test driver wraps the `--json` envelope and writes JSONL itself. Zero simulator changes, but the canonicalizer is duplicated per driver and the identity rule cannot be shared with a server lane.

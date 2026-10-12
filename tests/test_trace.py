@@ -481,6 +481,159 @@ def test_trace_replay_applies_automatic_submission_before_next_seek(
     ]
 
 
+def test_trace_replay_observes_a_recorded_status_step(tmp_path, monkeypatch, capsys):
+    """A recorded status response replays as a read-only screen observation (#51)."""
+    intro = _screen(question_name="ID intro")
+    next_screen = _screen(question_name="ID next", variable="next_value")
+    trace = _trace(
+        TraceEntry(
+            1,
+            "start",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+            intent="start",
+        ),
+        TraceEntry(
+            2,
+            "status",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+            intent="status",
+        ),
+        TraceEntry(
+            3,
+            "answer",
+            None,
+            {"user_name": "Alice"},
+            True,
+            next_screen,
+            ScreenIdentity("id:next", "explicit-id"),
+            screen_content(next_screen),
+            intent="answer",
+        ),
+    )
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, operation):
+            from docassemble_simulator.execution import Answer, Start, Status
+
+            operations.append(type(operation).__name__)
+            if isinstance(operation, Start):
+                return SimpleNamespace(ok=True, result=intro, error=None)
+            if isinstance(operation, Status):
+                return SimpleNamespace(ok=True, result=intro, error=None)
+            if isinstance(operation, Answer):
+                return SimpleNamespace(ok=True, result=next_screen, error=None)
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["clean"] is True
+    assert payload["result"]["counts"]["matched"] == 3
+    assert operations == ["Start", "Status", "Answer"]
+
+
+@pytest.mark.parametrize("operation", ["eval", "vars", "seed", "exec"])
+def test_trace_replay_rejects_a_compare_only_record(
+    tmp_path, monkeypatch, capsys, operation
+):
+    """eval/vars/seed/exec carry no runnable input, so replay rejects them (#51)."""
+    intro = _screen(question_name="ID intro")
+    trace = _trace(
+        TraceEntry(
+            1,
+            "start",
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+            intent="start",
+        ),
+        TraceEntry(
+            2,
+            operation,
+            None,
+            {},
+            True,
+            intro,
+            ScreenIdentity("id:intro", "explicit-id"),
+            screen_content(intro),
+            intent=operation,
+        ),
+    )
+    golden = tmp_path / "golden.trace.jsonl"
+    write_trace(golden, trace)
+    operations = []
+
+    class FakeExecution:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, run_operation):
+            from docassemble_simulator.execution import Start
+
+            operations.append(type(run_operation).__name__)
+            if isinstance(run_operation, Start):
+                return SimpleNamespace(ok=True, result=intro, error=None)
+            raise AssertionError(f"replay must not run {run_operation!r}")
+
+    monkeypatch.setattr(
+        "docassemble_simulator.execution.InterviewExecution", FakeExecution
+    )
+    monkeypatch.setattr(
+        cli,
+        "_trace_metadata",
+        lambda root, interview, resolved_configuration=None: trace.metadata,
+    )
+    args = SimpleNamespace(
+        golden=str(golden),
+        overrides=[],
+        interview=None,
+        json=True,
+        _resolved_configuration=None,
+    )
+
+    assert cli.cmd_trace_replay(args, tmp_path) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["kind"] == "input"
+    assert operation in payload["error"]["message"]
+    assert "compare-only" in payload["error"]["message"]
+    assert operations == ["Start"]
+
+
 def test_trace_replay_stops_at_first_identity_divergence(tmp_path, monkeypatch, capsys):
     intro = _screen(question_name="ID intro")
     expected = _trace(

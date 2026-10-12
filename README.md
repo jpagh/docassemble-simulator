@@ -255,9 +255,10 @@ Unlike the one-shot commands, which accept `--record` only on `start`,
 `refresh`, `answer`, `seek`, and `exec`, the worker accepts a record for any
 execution request, so a journey sidecar can also carry `status` responses and
 `eval`/`vars`/`seed` failures recorded against the unchanged active screen.
-Those extra entries, like a one-shot `exec` record, are compare-only: `trace
-replay` reports the first non-walk step as the typed `input` error `trace step
-N uses unsupported operation '<operation>'`.
+A `status` record replays as a read-only screen observation; the rest, like a
+one-shot `exec` record, are compare-only: `trace replay` reports the first
+compare-only step as the typed `input` error `trace step N records compare-only
+operation '<operation>'`.
 Protocol-only requests (`ping`,
 `reset`, `shutdown`, and malformed frames) are never recorded. A recording
 failure is a typed `input` response (and is logged to stderr), never a silent
@@ -495,8 +496,8 @@ trace and is the only write path. A mismatch exits `2` with the full report in
 the `trace-mismatch` error details.
 
 `trace replay GOLDEN` starts a fresh isolated session, applies each recorded
-walk intent (start, refresh, answer and its browser-defaults variant, seek, and
-expanded automatic submissions), and stops at the
+walk intent (start, status, refresh, answer and its browser-defaults variant,
+seek, and expanded automatic submissions), and stops at the
 first identity, field-fact, flow, or rejected-assignment divergence. Automatic
 steps initialize their recorded seek target in one operation-local namespace,
 compare each pre-submission screen, and then apply the recorded transaction;
@@ -517,13 +518,14 @@ outcome, and Active seek unchanged. Use
 Replay validates the interview and configuration
 fingerprint metadata, never writes the golden or the user's Saved session, and
 exits non-zero on divergence. A replayable golden is a walk recording (start,
-refresh, answer and its browser-defaults variant, seek, and expanded automatic
-submissions). A sidecar that also records another operation is compare-only:
-the worker accepts a record for any execution request (and `exec` is
-one-shot-recordable), so a sidecar can carry `status`, `eval`, `exec`, `vars`,
-or `seed` entries that replay cannot reproduce. Replay reports the first such
-step as the typed `input` error `trace step N uses unsupported operation
-'<operation>'` instead of silently skipping it.
+status, refresh, answer and its browser-defaults variant, seek, and expanded
+automatic submissions); a `status` record is a read-only observation of the
+saved screen. A sidecar can also carry records replay cannot reconstruct — the
+worker accepts a record for any execution request, and `exec` is
+one-shot-recordable — and those `eval`/`vars`/`seed`/`exec` records are
+compare-only: replay reports the first such step as the typed `input` error
+`trace step N records compare-only operation '<operation>'` instead of
+silently skipping it.
 
 The identity rules and the evidence behind them are documented in
 [docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).
