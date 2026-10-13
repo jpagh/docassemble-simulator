@@ -15,6 +15,7 @@ import traceback
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -757,6 +758,19 @@ class InterviewExecution:
                         "active_fields": _active_field_names(screen),
                     },
                 )
+            constraint_errors = (
+                _constraint_errors(namespace, screen) if not operation.partial else []
+            )
+            if constraint_errors:
+                raise ExecutionFailure(
+                    ErrorKind.VALIDATION,
+                    "screen rejected; all answers were discarded",
+                    {
+                        "errors": constraint_errors,
+                        "warnings": [],
+                        "assignments": dispositions,
+                    },
+                )
             validation = (
                 _validate(interview, namespace, screen)
                 if operation.validate
@@ -1379,6 +1393,7 @@ def _assemble(interview, namespace, status):
             "orig_sought": status.orig_sought,
             "question": question,
             "selectcompute": getattr(status, "selectcompute", {}),
+            "extras": getattr(status, "extras", {}),
         }
         return describe_question_result(result, namespace)
     return {
@@ -1486,7 +1501,9 @@ def _auto_submit_screen(
                 ],
                 "screen": screen,
             }
-        validation = _validate(interview, namespace, screen)
+        validation = {"errors": _constraint_errors(namespace, screen), "warnings": []}
+        if not validation["errors"]:
+            validation = _validate(interview, namespace, screen)
         if validation["errors"]:
             _restore_namespace(namespace, snapshot)
             return None, {
@@ -2158,6 +2175,81 @@ def _has_no_selected_option(value) -> bool:
     if isinstance(value, (list, tuple, set)):
         return not value
     return False
+
+
+def _constraint_errors(namespace, screen):
+    """Check rendered form rules, independently of authored validation code."""
+    errors = []
+    targets = _screen_field_targets(screen)
+    for field in screen.get("fields") or []:
+        variable = field.get("variable")
+        if not variable or field.get("visible") is False:
+            continue
+        found, value = _field_value(namespace, variable, targets)
+        if not found or _is_empty_value(value):
+            continue
+        datatype = str(field.get("type", "text")).lower()
+        constraints = field.get("constraints") or {}
+        for key, bound in constraints.items():
+            violated = False
+            if key in {"minlength", "maxlength"}:
+                if datatype in _GROUP_DATATYPES:
+                    elements = getattr(value, "elements", value)
+                    length = (
+                        sum(bool(selected) for selected in elements.values())
+                        if isinstance(elements, dict)
+                        else len(elements)
+                    )
+                else:
+                    # jQuery counts UTF-16 code units and removes carriage returns.
+                    length = (
+                        len(
+                            str(value)
+                            .replace("\r", "")
+                            .encode("utf-16-le", errors="surrogatepass")
+                        )
+                        // 2
+                    )
+                violated = (
+                    length < int(float(bound))
+                    if key == "minlength"
+                    else length > int(float(bound))
+                )
+            elif key in {"min", "max", "step"} and datatype in {
+                "integer",
+                "float",
+                "number",
+                "currency",
+                "range",
+            }:
+                try:
+                    number, limit = Decimal(str(value)), Decimal(str(bound))
+                    if key == "min":
+                        violated = number < limit
+                    elif key == "max":
+                        violated = number > limit
+                    elif datatype != "range" and limit > 0:
+                        # Numeric text inputs use jQuery's zero-based multiple rule.
+                        violated = number % limit != 0
+                except (InvalidOperation, ValueError):
+                    continue
+            elif key in {"min", "max"} and datatype in {
+                "date",
+                "time",
+                "datetime",
+                "datetime-local",
+            }:
+                rendered = (
+                    value.isoformat() if hasattr(value, "isoformat") else str(value)
+                )
+                limit = str(bound)
+                rendered, limit = rendered.replace(" ", "T"), limit.replace(" ", "T")
+                if datatype == "date":
+                    rendered, limit = rendered[:10], limit[:10]
+                violated = rendered < limit if key == "min" else rendered > limit
+            if violated:
+                errors.append(f"field '{variable}' violates {key} constraint ({bound})")
+    return errors
 
 
 def _required_violations(namespace, screen, blank_submissions):

@@ -416,7 +416,10 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         return out
     with _screen_variable_context(result.get("sought") or result.get("orig_sought")):
         out["fields"] = describe_fields(
-            question, user_dict, result.get("selectcompute") or {}
+            question,
+            user_dict,
+            result.get("selectcompute") or {},
+            result.get("extras") or {},
         )
     review_saveas = getattr(question, "review_saveas", None)
     if (
@@ -462,7 +465,10 @@ def _raw_fields(question: Any) -> list[Any]:
 
 
 def describe_fields(
-    question: Any, user_dict: dict, selectcompute: dict | None = None
+    question: Any,
+    user_dict: dict,
+    selectcompute: dict | None = None,
+    extras: dict | None = None,
 ) -> list[dict]:
     """Return the single live field-facts view used by screen callers."""
     fields = []
@@ -473,6 +479,29 @@ def describe_fields(
             if choices is None:
                 choices = selectcompute.get(str(getattr(field, "number", "")))
             described = describe_field(field, user_dict, choices=choices)
+            number = getattr(field, "number", None)
+            constraints = {}
+            for key in (
+                "min",
+                "max",
+                "minlength",
+                "maxlength",
+                "step",
+                "scale",
+                "currency symbol",
+                "field metadata",
+            ):
+                values = (extras or {}).get(key) or {}
+                if number in values:
+                    value = values[number]
+                    constraints[key] = (
+                        value
+                        if isinstance(value, (str, int, float, bool, dict, list))
+                        or value is None
+                        else str(value)
+                    )
+            if constraints:
+                described["constraints"] = constraints
         except (
             ValueError,
             TypeError,

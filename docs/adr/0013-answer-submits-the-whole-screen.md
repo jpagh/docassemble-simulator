@@ -59,3 +59,18 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
 - `sets:` questions are submitted once. Screen traces record one entry per screen presented, so occurrence counts mean "shown again" (loops, validation re-asks) instead of "the flow sought another variable from the same screen". Traces recorded before this change need re-recording.
 - `--partial` preserves compatibility for drivers that intentionally answer a subset of required fields; it is a mode, not a fallback the simulator silently chooses.
 - The screen outcome's `fields` are the source of truth for what was shown. Fields whose visibility or requiredness would change because of the submitted values are handled on the next presentation, mirroring a browser that re-renders with the new state.
+
+## Rendered browser constraints (#62)
+
+Whole-screen submission checks visible fields against the runtime-computed
+min/max and minlength/maxlength facts before authored validation code. Range
+bounds are inclusive. Text length counts JavaScript UTF-16 code units (with
+carriage returns removed); group lengths count selected choices. Optional
+empty inputs remain exempt, like jQuery Validate. Numeric text controls with
+an explicit step enforce jQuery's zero-based multiple rule, not an HTML
+number input's min-based step offset. Slider scale is a rendering mode, not a
+precision constraint; scale and slider step are recorded but not validated.
+Custom datatype parameters are recorded without inventing custom validation.
+`--no-validate` does not bypass this form gate; `--partial` bypasses it, retaining
+its existing authored-validation and required-warning semantics. `exec` is
+unchanged. Constraint facts are debug-only in trace comparison (ADR-0012).

@@ -256,3 +256,96 @@ def test_parse_rejection_reports_missing_required_but_not_defaults_or_hidden_fie
         "optional_date",
         "hidden_value",
     ]
+
+
+class ConstrainedInterview(ScreenInterview):
+    questions_by_name: ClassVar = {}
+    fields = (
+        SimpleNamespace(saveas="amount", datatype="number", number=0),
+        SimpleNamespace(saveas="name", datatype="text", number=1),
+    )
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.extras = {
+            "min": {0: 2},
+            "max": {0: 10},
+            "step": {0: 2},
+            "minlength": {1: 2},
+            "maxlength": {1: 4},
+        }
+
+
+def test_answer_reports_rendered_constraint_facts(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = ConstrainedInterview
+    started = execution.run(Start())
+    assert started.ok
+    assert started.result["fields"][0]["constraints"] == {
+        "min": 2,
+        "max": 10,
+        "step": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "amount,name,constraint",
+    [
+        ("1", "Ada", "min"),
+        ("11", "Ada", "max"),
+        ("2", "A", "minlength"),
+        ("2", "Alice", "maxlength"),
+        ("3", "Ada", "step"),
+        ("2", "😀😀😀", "maxlength"),
+    ],
+)
+@pytest.mark.parametrize("validate", [True, False])
+def test_answer_rejects_browser_constraints_transactionally(
+    answer_execution, amount, name, constraint, validate
+):
+    execution, selected = answer_execution
+    selected["interview"] = ConstrainedInterview
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+    rejected = execution.run(
+        Answer((("amount", amount), ("name", name)), validate=validate)
+    )
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    variable = "name" if "length" in constraint else "amount"
+    assert any(
+        variable in error and constraint in error
+        for error in rejected.error.details["errors"]
+    )
+    assert session_bytes(execution) == before
+
+
+@pytest.mark.parametrize(
+    "amount,name,partial",
+    [("2", "AB", False), ("10", "ABCD", False), ("11", "Alice", True)],
+)
+def test_answer_constraint_boundaries_and_partial_escape(
+    answer_execution, amount, name, partial
+):
+    execution, selected = answer_execution
+    selected["interview"] = ConstrainedInterview
+    assert execution.run(Start()).ok
+    accepted = execution.run(
+        Answer((("amount", amount), ("name", name)), partial=partial)
+    )
+    assert accepted.ok, accepted.error
+
+
+def test_answer_does_not_enforce_hidden_rendered_constraints(answer_execution):
+    class HiddenConstraintInterview(ConstrainedInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="amount", datatype="number", number=0, showif_code="False"
+            ),
+            ConstrainedInterview.fields[1],
+        )
+
+    execution, selected = answer_execution
+    selected["interview"] = HiddenConstraintInterview
+    assert execution.run(Start()).ok
+    assert execution.run(Answer((("amount", "100"), ("name", "AB")))).ok
