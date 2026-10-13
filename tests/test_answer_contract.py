@@ -834,6 +834,36 @@ class GeneratedVisibilityInterview(FieldsCodeInterview):
         }
 
 
+@pytest.mark.parametrize("marker", ["different-interpreter", None])
+def test_answer_rejects_incompatible_captured_visibility(answer_execution, marker):
+    from docassemble_simulator.execution import StateStore
+
+    execution, selected = answer_execution
+    selected["interview"] = GeneratedVisibilityInterview
+    assert execution.run(Start()).ok
+    store = StateStore(execution.scope.root, INTERVIEW)
+    payload = store.load()
+    visibility = payload["outcome"]["fields"][1]["visibility"]
+    if marker is None:
+        visibility.pop("cache_tag", None)
+    else:
+        visibility["cache_tag"] = marker
+    # Invalid bytes prove the guard runs before unmarshalling.
+    visibility["code"] = "bm90IG1hcnNoYWxsZWQgY29kZQ=="
+    store.save(payload["namespace"], payload["outcome"])
+    before = session_bytes(execution)
+
+    answered = execution.run(Answer((("show", "False"),)))
+
+    assert not answered.ok
+    assert answered.error.kind == "state"
+    assert "captured visibility" in answered.error.message
+    assert "interpreter" in answered.error.message
+    assert "refresh" in answered.error.message
+    assert "start" in answered.error.message
+    assert session_bytes(execution) == before
+
+
 def test_generated_fields_follow_submission_visibility(answer_execution):
     execution, selected = answer_execution
     selected["interview"] = GeneratedVisibilityInterview

@@ -10,6 +10,7 @@ import logging
 import marshal
 import math
 import re
+import sys
 from contextlib import contextmanager
 from html import unescape
 from types import CodeType, SimpleNamespace
@@ -142,11 +143,21 @@ def field_visible(
     return True, None
 
 
+class CapturedVisibilityError(Exception):
+    """Saved visibility code cannot be reused by the current interpreter."""
+
+
 def described_field_visible(field: dict, user_dict: dict):
     """Re-evaluate the captured control, never its authored fields-code expansion."""
     visibility = dict(field["visibility"])
     code = visibility.pop("code", None)
     if code is not None:
+        cache_tag = visibility.pop("cache_tag", None)
+        if cache_tag is None or cache_tag != sys.implementation.cache_tag:
+            raise CapturedVisibilityError(
+                "saved captured visibility cannot be reused under this interpreter; "
+                "run `refresh` or `start` again"
+            )
         code = marshal.loads(base64.b64decode(code))
     return field_visible(
         SimpleNamespace(showif_code=code, extras=visibility), user_dict, submission=True
@@ -242,8 +253,8 @@ def describe_field(
     extras = getattr(field, "extras", {}) or {}
     code = getattr(field, "showif_code", None)
     if code is not None or "show_if_var" in extras:
-        # Compiled expressions have no recoverable source. Sessions already
-        # require the same Python runtime; marshal preserves the ask-time code.
+        # Compiled expressions have no recoverable source. Guard the captured
+        # code format before unmarshalling it under a later interpreter.
         visibility = {
             key: value
             for key, value in extras.items()
@@ -255,6 +266,7 @@ def describe_field(
             if not isinstance(code, CodeType):
                 code = compile(code, "<show if>", "eval")
             visibility["code"] = base64.b64encode(marshal.dumps(code)).decode("ascii")
+            visibility["cache_tag"] = sys.implementation.cache_tag
         out["visibility"] = visibility
         out["submission_required"] = required
     if note:
