@@ -132,6 +132,16 @@ def _diagnostic_summary(diagnostics, limit=5):
     }
 
 
+def _simulator_version():
+    """The installed simulator distribution version, or a source fallback."""
+    from importlib import metadata as importlib_metadata
+
+    try:
+        return importlib_metadata.version("docassemble-simulator")
+    except importlib_metadata.PackageNotFoundError:
+        return "unknown"
+
+
 def _emit(payload, as_json):
     payload = _clean(payload)
     if as_json:
@@ -281,6 +291,7 @@ def _info_result(root, config, args):
 
     data = {
         "root": str(root),
+        "simulator_version": _simulator_version(),
         "packages": list_packages(root),
         "interview_count": len(list_interviews(root)),
         "interviews": list_interviews(root),
@@ -1185,17 +1196,12 @@ def _worker_trace_phases(request):
 
 def _trace_metadata(root, interview, resolved_configuration=None):
     """The trace metadata for one interview and resolved configuration."""
-    from importlib import metadata as importlib_metadata
-
     from docassemble_simulator.catalog import InterviewCatalog
     from docassemble_simulator.compatibility import collect_environment
     from docassemble_simulator.trace import TraceMetadata
 
     environment = collect_environment()
-    try:
-        simulator = importlib_metadata.version("docassemble-simulator")
-    except importlib_metadata.PackageNotFoundError:
-        simulator = "unknown"
+    simulator = _simulator_version()
     return TraceMetadata(
         interview=InterviewCatalog(root, interview).identity,
         config_fingerprint=(
@@ -2205,6 +2211,11 @@ def build_parser():
             "DOCX is supported, but PDF conversion/downloads are deployment-only. "
             "JSON uses a stable ok/command/result-or-error envelope."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_simulator_version()}",
     )
     parser.add_argument("--root", default=None)
     parser.add_argument("--interview", default=None)

@@ -82,7 +82,9 @@ that interpreter; native-library failures are reported rather than hidden.
 ## Command model
 
 Run from a directory containing `docassemble/<package>/`, or pass `--root` and
-optionally `--interview`.
+optionally `--interview`. `--version` prints the installed simulator version
+without touching the runtime, and `info --json` reports the same value as
+`simulator_version` beside the detected docassemble runtime.
 
 ```sh
 docassemble-simulator info

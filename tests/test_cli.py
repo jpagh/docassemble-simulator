@@ -972,3 +972,29 @@ def test_answer_screen_submission_flags_are_parsed_and_documented():
     assert "JSON first" in help_text
     assert "checkbox groups" in help_text
     assert "YYYY-MM-" in help_text
+
+
+def test_version_flag_reports_the_installed_simulator_version():
+    import importlib.metadata
+
+    completed = _run_cli("--version")
+
+    assert completed.returncode == 0, completed.stderr
+    assert importlib.metadata.version("docassemble-simulator") in completed.stdout
+
+
+def test_info_json_reports_the_simulator_version(tmp_path, monkeypatch, capsys):
+    import importlib.metadata
+
+    package = tmp_path / "docassemble" / "pkg"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
+    monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda root: {})
+
+    assert cli.main(["--json", "info"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["simulator_version"] == importlib.metadata.version(
+        "docassemble-simulator"
+    )
