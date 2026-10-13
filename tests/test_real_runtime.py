@@ -4492,3 +4492,62 @@ def test_watch_set_covers_features_only_document(family_python, tmp_path):
     assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["reloaded"] is True, (label, observed)
+
+
+SUBMISSION_SHOW_IF_FIXTURE = """\
+---
+mandatory: True
+code: |
+  chain_screen
+  finished
+---
+id: show-if-chain
+question: Same-screen show-if chain
+fields:
+  - A: a
+    datatype: yesnoradio
+  - B: b
+    datatype: yesnoradio
+    show if:
+      code: not defined('a') or a
+  - C: c
+    required: True
+    show if:
+      code: not defined('a') or (a and (not defined('b') or b))
+sets: chain_screen
+---
+id: chain-finished
+event: finished
+question: Finished
+"""
+
+
+def test_answer_submission_time_show_if_chain_across_families(
+    family_python, tmp_path, worker_journey
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    _assert_family_interpreter(case)
+    package = tmp_path / "docassemble" / "screenanswer"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (questions / "main.yml").write_text(SUBMISSION_SHOW_IF_FIXTURE)
+    journey = worker_journey(interpreter, tmp_path, family=case.probe)
+
+    started = journey.start()
+    assert started["ok"], (label, started)
+    assert all(field["visible"] for field in started["result"]["fields"]), label
+    rejected = journey.answer("a=True")
+    assert rejected["error"]["kind"] == "validation", (label, rejected)
+    assert rejected["error"]["details"]["missing_required"] == ["b"], label
+    assert journey.status()["result"]["question_name"] == "ID show-if-chain", label
+
+    accepted = journey.answer("a=False")
+    assert accepted["ok"], (label, accepted)
+    assert accepted["result"]["question_name"] == "ID chain-finished", (label, accepted)
+    undefined = journey.evaluate("not defined('b') and not defined('c')")
+    assert undefined["ok"] and undefined["result"]["value"] == "True", (
+        label,
+        undefined,
+    )

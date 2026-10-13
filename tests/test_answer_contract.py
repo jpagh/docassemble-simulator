@@ -256,3 +256,81 @@ def test_parse_rejection_reports_missing_required_but_not_defaults_or_hidden_fie
         "optional_date",
         "hidden_value",
     ]
+
+
+class ShowIfChainInterview(ScreenInterview):
+    fields = (
+        SimpleNamespace(saveas="a", datatype="boolean", required=True),
+        SimpleNamespace(saveas="b", datatype="boolean", required=True, showif_code="a"),
+        SimpleNamespace(
+            saveas="c", datatype="text", required=False, showif_code="a and b"
+        ),
+    )
+    questions_by_name: ClassVar = {"answer-contract": SimpleNamespace(fields=fields)}
+
+
+def test_answer_hides_show_if_chain_without_defining_dependents(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = ShowIfChainInterview
+    assert execution.run(Start()).ok
+
+    answered = execution.run(Answer((("a", "False"),)))
+
+    assert answered.ok, answered.error
+    assert (
+        execution.run(Evaluate("'b' in globals() or 'c' in globals()")).result["value"]
+        == "False"
+    )
+
+
+def test_answer_still_requires_visible_show_if_dependent(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = ShowIfChainInterview
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+
+    rejected = execution.run(Answer((("a", "True"),)))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    assert rejected.error.details["missing_required"] == ["b"]
+    assert session_bytes(execution) == before
+
+
+def test_early_rejection_excludes_newly_hidden_required_fields(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = ShowIfChainInterview
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+
+    rejected = execution.run(Answer((("a", "False"), ("typo", "1"))))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    assert rejected.error.details["missing_required"] == []
+    assert session_bytes(execution) == before
+
+
+class DefaultShowIfChainInterview(ShowIfChainInterview):
+    fields = (
+        SimpleNamespace(
+            saveas="a", datatype="boolean", required=False, default="False"
+        ),
+        *ShowIfChainInterview.fields[1:],
+    )
+    questions_by_name: ClassVar = {"answer-contract": SimpleNamespace(fields=fields)}
+
+
+def test_answer_default_hides_show_if_chain_before_blanking(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = DefaultShowIfChainInterview
+    assert execution.run(Start()).ok
+
+    answered = execution.run(Answer((), defaults=True))
+
+    assert answered.ok, answered.error
+    assert execution.run(Evaluate("a")).result["value"] == "False"
+    assert (
+        execution.run(Evaluate("'b' in globals() or 'c' in globals()")).result["value"]
+        == "False"
+    )

@@ -50,6 +50,8 @@ from docassemble_simulator.compatibility import (
 from docassemble_simulator.describe import (
     describe_question_result,
     describe_seeking,
+    field_variable,
+    field_visible,
 )
 
 STATE_SCHEMA = 1
@@ -722,6 +724,7 @@ class InterviewExecution:
                             namespace,
                             screen,
                             blank_submissions,
+                            interview,
                         )
                     )
                 finally:
@@ -738,8 +741,12 @@ class InterviewExecution:
             if not operation.partial:
                 # The whole screen is submitted: browser defaults and blanks
                 # for optional fields, then the required gate.
-                _submit_screen_fields(namespace, screen)
-            violations = _required_violations(namespace, screen, blank_submissions)
+                submission_screen = _submit_screen_fields(namespace, screen, interview)
+            else:
+                submission_screen = _submission_screen(interview, namespace, screen)
+            violations = _required_violations(
+                namespace, submission_screen, blank_submissions
+            )
             if violations and not operation.partial:
                 raise ExecutionFailure(
                     ErrorKind.VALIDATION,
@@ -1472,8 +1479,8 @@ def _auto_submit_screen(
                     "assignments": dispositions,
                     "screen": screen,
                 }
-        _submit_screen_fields(namespace, screen)
-        violations = _required_violations(namespace, screen, set())
+        submission_screen = _submit_screen_fields(namespace, screen, interview)
+        violations = _required_violations(namespace, submission_screen, set())
         if violations:
             _restore_namespace(namespace, snapshot)
             return None, {
@@ -2036,40 +2043,45 @@ def _required_message(variable, reason):
         )
     state = "empty" if reason == "empty" else "undefined"
     return (
-        f"required field '{variable}' is {state} "
-        "(the browser would refuse to submit this screen)"
+        f"required field '{variable}' is {state} (required while visible at submission)"
     )
 
 
-def _early_rejection_required_guidance(namespace, screen, blank_submissions):
-    """Assess missing required inputs without running a second submission.
+def _submission_screen(interview, namespace, screen):
+    """Copy field facts with current visibility, preserving the rendered contract."""
+    question = getattr(interview, "questions_by_name", {}).get(
+        screen.get("question_name")
+    )
+    compiled = {
+        field_variable(field): field for field in getattr(question, "fields", ())
+    }
+    fields = []
+    for described in screen.get("fields") or []:
+        field = dict(described)
+        source = compiled.get(field.get("variable"))
+        if source is not None:
+            field["visible"], _note = field_visible(source, namespace)
+        fields.append(field)
+    return {**screen, "fields": fields}
 
-    The assignments already attempted are present in ``namespace`` only for
-    this rejected operation.  Required defaults are applied solely to the
-    same operation-local namespace so a valid default is not reported as
-    missing; validation code and browser blank synthesis are intentionally not
-    run on this early-rejection path.
-    """
-    targets = _screen_field_targets(screen)
-    for field in screen.get("fields") or []:
-        variable = field.get("variable")
-        if (
-            not isinstance(variable, str)
-            or not variable
-            or field.get("visible") is False
-            or field.get("required") is False
-            or str(field.get("type", "")).lower() == "signature"
-            or _rendered_no_object_choices(str(field.get("type", "")).lower(), field)
-            or _field_value(namespace, variable, targets)[0]
-        ):
-            continue
-        default = field.get("default")
-        if not isinstance(default, str) or not default.strip():
-            continue
-        # Use the ordinary field-aware coercion on the operation-local state;
-        # this is default assessment, not a second browser submission.
-        _apply_assignments(namespace, screen, ((variable, default),), False)
 
+def _apply_rendered_defaults(namespace, screen):
+    """Apply prefilled values before evaluating submission-time visibility."""
+    for variable, default, _required, field in _blankable_fields(namespace, screen):
+        if default is not None and str(field.get("type", "")).lower() != "signature":
+            errors = _apply_assignments(
+                namespace, screen, ((variable, default),), False
+            )
+            if errors:
+                logger.debug(
+                    "field default %r could not be applied: %s", variable, errors
+                )
+
+
+def _early_rejection_required_guidance(namespace, screen, blank_submissions, interview):
+    """Assess valid assignments and defaults without validation or blank synthesis."""
+    _apply_rendered_defaults(namespace, screen)
+    screen = _submission_screen(interview, namespace, screen)
     violations = _required_violations(namespace, screen, blank_submissions)
     return {
         "missing_required": [variable for variable, _reason in violations],
@@ -2210,7 +2222,7 @@ def _blankable_fields(namespace, screen):
         yield variable, default, field.get("required") is not False, field
 
 
-def _submit_screen_fields(namespace, screen):
+def _submit_screen_fields(namespace, screen, interview):
     """Define every visible field the browser would submit, like a form POST.
 
     Defaults become the submitted values (the browser prefills them), optional
@@ -2218,9 +2230,11 @@ def _submit_screen_fields(namespace, screen):
     signature fields become ``DAEmpty()`` so documents can still render them.
     Required fields with no value are left for the required gate.
     """
+    _apply_rendered_defaults(namespace, screen)
+    screen = _submission_screen(interview, namespace, screen)
     blanks = []
     targets = _screen_field_targets(screen)
-    for variable, default, required, field in _blankable_fields(namespace, screen):
+    for variable, _default, required, field in _blankable_fields(namespace, screen):
         datatype = str(field.get("type", "")).lower()
         if _rendered_no_object_choices(datatype, field):
             # The browser still posts a group whose choices resolved empty, and
@@ -2234,13 +2248,6 @@ def _submit_screen_fields(namespace, screen):
             )
             continue
         signature = datatype == "signature"
-        if not signature and default is not None:
-            applied = _apply_assignments(
-                namespace, screen, ((variable, default),), False
-            )
-            if not applied:
-                continue
-            logger.debug("field default %r could not be applied: %s", variable, applied)
         if required and not signature:
             continue
         blank = _browser_blank(field)
@@ -2248,6 +2255,7 @@ def _submit_screen_fields(namespace, screen):
             blanks.append((variable, blank))
     for variable, blank in blanks:
         _set_namespace_value(namespace, targets.get(variable, variable), blank)
+    return screen
 
 
 #: A field datatype with no faithful browser blank (for example a custom type
