@@ -369,3 +369,96 @@ def test_answer_default_hides_show_if_chain_before_blanking(answer_execution):
         execution.run(Evaluate("'b' in globals() or 'c' in globals()")).result["value"]
         == "False"
     )
+
+
+class CustomDateInterview(ScreenInterview):
+    questions_by_name: ClassVar = {}
+    fields = (
+        SimpleNamespace(
+            saveas="custom_date", datatype="RegisteredDate", required=False
+        ),
+    )
+
+
+def test_answer_transforms_registered_custom_datatype(answer_execution, monkeypatch):
+    execution, selected = answer_execution
+    selected["interview"] = CustomDateInterview
+
+    class RegisteredDate:
+        @classmethod
+        def call_validate(cls, raw, variable, data):
+            assert variable == "custom_date"
+            assert data == {}
+            return True
+
+        @classmethod
+        def call_transform(cls, raw, variable, data):
+            return datetime.datetime.fromisoformat(raw)
+
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "custom_types",
+        {"RegisteredDate": {"class": RegisteredDate, "is_object": True}},
+        raising=False,
+    )
+    assert execution.run(Start()).ok
+    assert execution.run(Answer((("custom_date", "2020-01-02"),))).ok
+    observed = execution.run(Evaluate("custom_date.isoformat()"))
+    assert observed.ok
+    assert "2020-01-02T00:00:00" in str(observed.result)
+
+
+@pytest.mark.parametrize("failure", ["false", "validation", "transform"])
+def test_answer_rejects_invalid_custom_datatype_atomically(
+    answer_execution, monkeypatch, failure
+):
+    execution, selected = answer_execution
+    selected["interview"] = CustomDateInterview
+
+    class RegisteredDate:
+        @classmethod
+        def call_validate(cls, raw, variable, data):
+            if failure == "validation":
+                raise sys.modules["docassemble.base.error"].DAValidationError(
+                    "bad date"
+                )
+            return failure != "false"
+
+        @classmethod
+        def call_transform(cls, raw, variable, data):
+            raise TypeError("bad date transform")
+
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "custom_types",
+        {"RegisteredDate": {"class": RegisteredDate, "is_object": True}},
+        raising=False,
+    )
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+    rejected = execution.run(Answer((("custom_date", "invalid"),), validate=False))
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    assert "custom_date" in rejected.error.details["errors"][0]
+    assert session_bytes(execution) == before
+
+
+@pytest.mark.parametrize("registry", [{}, {"RegisteredDate": {"class": object}}])
+def test_answer_unregistered_custom_datatype_keeps_plain_value(
+    answer_execution, monkeypatch, registry
+):
+    execution, selected = answer_execution
+    selected["interview"] = CustomDateInterview
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "custom_types",
+        registry,
+        raising=False,
+    )
+    assert execution.run(Start()).ok
+    assert execution.run(Answer((), defaults=True)).ok
+    assert (
+        execution.run(Evaluate("'custom_date' in locals()")).result["value"] == "False"
+    )
+    assert execution.run(Answer((("custom_date", "2020-01-02"),))).ok
+    assert "2020-01-02" in str(execution.run(Evaluate("custom_date")).result)
