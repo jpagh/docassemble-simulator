@@ -50,6 +50,7 @@ from docassemble_simulator.compatibility import (
     require_assemblyline_compatibility,
 )
 from docassemble_simulator.describe import (
+    CapturedVisibilityError,
     describe_question_result,
     describe_seeking,
     described_field_visible,
@@ -2161,7 +2162,10 @@ def _submission_screen(interview, namespace, screen):
         field = dict(described)
         source = compiled.get(field.get("variable"))
         if "visibility" in field:
-            field["visible"], _note = described_field_visible(field, namespace)
+            try:
+                field["visible"], _note = described_field_visible(field, namespace)
+            except CapturedVisibilityError as error:
+                raise ExecutionFailure(ErrorKind.STATE, str(error)) from error
         elif source is not None:
             field["visible"], _note = field_visible(source, namespace, submission=True)
         if "submission_required" in field:

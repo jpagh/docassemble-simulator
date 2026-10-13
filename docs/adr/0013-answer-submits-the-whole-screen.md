@@ -51,6 +51,12 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
   An undefined show-if controller hides its dependents at submission; other
   evaluation errors remain conservative. Generated controls retain their
   ask-time visibility expressions without re-running authored expansion.
+  Captured compiled expressions are marshalled with the producing interpreter's
+  `sys.implementation.cache_tag`. Before unmarshalling, a missing or mismatched
+  tag rejects submission as a typed `state` failure: captured visibility cannot
+  be reused under this interpreter; run `refresh` or `start` again. This guards
+  code-format compatibility, not trust (saved sessions remain trusted pickles).
+  Screens without captured code are unaffected.
   Fields that remain visible keep their ask-time requiredness; computed
   requiredness is not re-evaluated. Early input-rejection guidance uses the
   same updated visibility without committing attempted values. Explicitly

@@ -4560,29 +4560,37 @@ def test_watch_set_covers_features_only_document(family_python, tmp_path):
     assert observed["reloaded"] is True, (label, observed)
 
 
+def _clean_table_row_payload(value):
+    if isinstance(value, dict):
+        return {
+            key: _clean_table_row_payload(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_clean_table_row_payload(item) for item in value]
+    if isinstance(value, str):
+        # Only delimiter rows: preserve text, cell content and alignment.
+        return re.sub(
+            r"(?m)^((?=[^\n]*\|)[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*"
+            r"(?:\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*)$",
+            lambda match: re.sub(r"-+", "---", match.group()),
+            value,
+        )
+    return value
+
+
 def test_table_row_actions_across_families(family_python, real_workspace, monkeypatch):
     """Rendered table buttons and template add links share transactional transport."""
     for key, value in _environment().items():
         monkeypatch.setenv(key, value)
 
-    def clean(value):
-        if isinstance(value, dict):
-            return {key: clean(item) for key, item in value.items() if item is not None}
-        if isinstance(value, list):
-            return [clean(item) for item in value]
-        if isinstance(value, str):
-            # Only delimiter rows: preserve text, cell content and alignment.
-            return re.sub(
-                r"(?m)^([ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-*:?[ \t]*\|?[ \t]*)$",
-                lambda match: re.sub(r"-+", "---", match.group()),
-                value,
-            )
-        return value
-
     _assert_family_interpreter(family_python)
     interpreter = family_python.interpreter
     root = real_workspace
     questions = root / "docassemble" / "regression" / "data" / "questions"
+    # Very short headers can produce invalid <3-hyphen delimiters in the modern
+    # native renderer; use a longer header rather than relaxing payload parity.
     (questions / "row_actions.yml").write_text(
         """---
 objects:
@@ -4602,7 +4610,7 @@ continue button field: reviewed
 table: people_table
 rows: people
 columns:
-  - Name: row_item.name
+  - Person name: row_item.name
 edit:
   - name
 delete buttons: True
@@ -4692,18 +4700,20 @@ code: |
         offline=True,
         timeout=30,
     ) as runner:
-        assert clean(runner.start().result) == clean(started["result"])
-        assert clean(runner.row_action("add", "people").result) == clean(
-            added["result"]
-        )
+        assert _clean_table_row_payload(
+            runner.start().result
+        ) == _clean_table_row_payload(started["result"])
+        assert _clean_table_row_payload(
+            runner.row_action("add", "people").result
+        ) == _clean_table_row_payload(added["result"])
         # Native Markdown table-separator widths vary between processes;
         # that pre-existing rendering behavior is outside row-action parity.
-        assert clean(runner.answer({"people[0].name": "Ada"}).result) == clean(
-            answered["result"]
-        )
-        assert clean(runner.row_action("delete", "people", row=0).result) == clean(
-            deleted["result"]
-        )
+        assert _clean_table_row_payload(
+            runner.answer({"people[0].name": "Ada"}).result
+        ) == _clean_table_row_payload(answered["result"])
+        assert _clean_table_row_payload(
+            runner.row_action("delete", "people", row=0).result
+        ) == _clean_table_row_payload(deleted["result"])
         before = runner.status().result
         assert not runner.row_action("delete", "people", row=0).ok
         assert runner.status().result == before
