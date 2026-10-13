@@ -4492,3 +4492,51 @@ def test_watch_set_covers_features_only_document(family_python, tmp_path):
     assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["reloaded"] is True, (label, observed)
+
+
+@pytest.mark.parametrize("datatype", ["ThreePartsDate", "BirthDate"])
+def test_custom_datatype_plain_answer_across_families(
+    family_python, real_workspace, datatype
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "custom-date.yml").write_text(
+        "---\nmodules:\n  - docassemble.ALToolbox.ThreePartsDate\n"
+        "---\nmandatory: True\ncode: |\n  custom_date\n"
+        "---\nid: custom-date\nquestion: Date\nfields:\n"
+        f"  - Date: custom_date\n    datatype: {datatype}\n"
+        "validation code: |\n"
+        "  if custom_date > as_datetime('2025-01-01'):\n"
+        "    validation_error('Date must be in the past', field='custom_date')\n"
+        "---\nmandatory: True\nquestion: Date accepted\n"
+        "subquestion: ${ custom_date.format('yyyy-MM-dd') }\n"
+    )
+    started = _run(interpreter, root, "start", "--interview", "custom-date.yml")
+    assert started["ok"], label
+    rejected = _run(
+        interpreter,
+        root,
+        "answer",
+        "custom_date=not-a-date",
+        "--interview",
+        "custom-date.yml",
+        expected_code=2,
+    )
+    assert not rejected["ok"], label
+    assert rejected["error"]["kind"] == "validation", label
+    assert "custom_date" in json.dumps(rejected["error"]), label
+    assert "validation code crashed" not in json.dumps(rejected["error"]), label
+    accepted = _run(
+        interpreter,
+        root,
+        "answer",
+        "custom_date=2020-01-02",
+        "--interview",
+        "custom-date.yml",
+    )
+    assert accepted["ok"], label
+    assert accepted["result"]["question_text"] == "Date accepted", label
+    assert "2020-01-02" in accepted["result"]["subquestion_text"], label

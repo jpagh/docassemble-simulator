@@ -731,7 +731,9 @@ class InterviewExecution:
                     # Working state or let them reach persistence.
                     _restore_namespace(namespace, submission_snapshot)
                 raise ExecutionFailure(
-                    ErrorKind.ANSWER_INPUT,
+                    ErrorKind.VALIDATION
+                    if any(d["disposition"] == "validation error" for d in dispositions)
+                    else ErrorKind.ANSWER_INPUT,
                     "one or more answers could not be applied",
                     details,
                 )
@@ -1466,7 +1468,9 @@ def _auto_submit_screen(
             if errors:
                 _restore_namespace(namespace, snapshot)
                 return None, {
-                    "reason": "answer failed",
+                    "reason": "validation failed"
+                    if any(d["disposition"] == "validation error" for d in dispositions)
+                    else "answer failed",
                     "submitted": False,
                     "errors": errors,
                     "assignments": dispositions,
@@ -2407,7 +2411,15 @@ def _apply_assignments(
                 continue
             value = parse_value(raw)
             datatype = field_types.get(variable, "")
-            if datatype == "date":
+            target = targets.get(variable, variable)
+            custom_hook = _custom_datatype_hook(
+                (field_specs.get(variable) or {}).get("type", "")
+            )
+            if custom_hook is not None:
+                value = _coerce_custom_datatype(
+                    custom_hook, raw, target, field_specs.get(variable) or {}
+                )
+            elif datatype == "date":
                 value = _coerce_date(raw, value)
             elif raw.strip() == "":
                 # An empty input is a browser submission too: numeric fields
@@ -2428,7 +2440,6 @@ def _apply_assignments(
                         }
                     )
                     continue
-            target = targets.get(variable, variable)
             if datatype in {
                 "object",
                 "object_radio",
@@ -2444,6 +2455,16 @@ def _apply_assignments(
                 _set_namespace_value(namespace, target, value)
             dispositions.append(
                 {"variable": variable, "input": raw, "disposition": "applied"}
+            )
+        except ExecutionFailure as error:
+            errors.append(f"{variable}: {error}")
+            dispositions.append(
+                {
+                    "variable": variable,
+                    "input": raw,
+                    "disposition": "validation error",
+                    "error": str(error),
+                }
             )
         except (
             ValueError,
@@ -2468,6 +2489,53 @@ def _apply_assignments(
                 }
             )
     return errors
+
+
+def _custom_datatype_hook(datatype):
+    # Older runtimes and unregistered datatypes keep ordinary assignment semantics.
+    try:
+        from docassemble.base.functions import custom_types
+    except ImportError:
+        return None
+    info = custom_types.get(datatype) or {}
+    hook = info.get("class")
+    if all(
+        callable(getattr(hook, name, None))
+        for name in ("call_validate", "call_transform")
+    ):
+        return hook
+    return None
+
+
+def _coerce_custom_datatype(hook, raw, target, field):
+    data = {
+        key: field[key]
+        for key in (
+            "min",
+            "max",
+            "minlength",
+            "maxlength",
+            "step",
+            "scale",
+            "currency symbol",
+            "field metadata",
+        )
+        if key in field
+    }
+    for key in (
+        "custom_parameters",
+        "custom_parameters_code",
+        "custom_parameters_mako",
+    ):
+        data.update(field.get(key) or {})
+    try:
+        if not hook.call_validate(raw, target, data):
+            raise ValueError("You need to enter a valid value.")
+        return hook.call_transform(raw, target, data)
+    except Exception as error:
+        raise ExecutionFailure(
+            ErrorKind.VALIDATION, str(error) or "invalid value"
+        ) from error
 
 
 def _coerce_date(raw, parsed):
