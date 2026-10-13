@@ -416,7 +416,7 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         return out
     with _screen_variable_context(result.get("sought") or result.get("orig_sought")):
         out["fields"] = describe_fields(
-            question, user_dict, result.get("selectcompute") or {}
+            question, user_dict, result.get("selectcompute") or {}, ask_result=result
         )
     review_saveas = getattr(question, "review_saveas", None)
     if (
@@ -426,11 +426,11 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         and not any(field.get("variable") == review_saveas for field in out["fields"])
     ):
         out["fields"].append(_review_continue_field(review_saveas))
-    # A ``fields: code`` block can compile as an answerable screen while its
-    # browser fields are constructed by authored code at runtime. Do not
-    # invent those controls: label the honest boundary so a project runner can
-    # choose the explicit state-seeding escape hatch instead.
-    if qtype == "fields" and not out["fields"]:
+    # Unexpanded code fields retain an honest boundary, including the error.
+    if qtype == "fields" and (
+        not out["fields"]
+        or any(field.get("type") == "fields_code" for field in out["fields"])
+    ):
         out["dynamic_fields"] = True
         out["field_source"] = "code"
     else:
@@ -462,17 +462,71 @@ def _raw_fields(question: Any) -> list[Any]:
 
 
 def describe_fields(
-    question: Any, user_dict: dict, selectcompute: dict | None = None
+    question: Any,
+    user_dict: dict,
+    selectcompute: dict | None = None,
+    *,
+    ask_result: dict | None = None,
 ) -> list[dict]:
     """Return the single live field-facts view used by screen callers."""
     fields = []
     selectcompute = selectcompute or {}
+    ask_result = ask_result or {}
+    extras = ask_result.get("extras") or {}
+    live_fields = []
     for field in _raw_fields(question):
+        if "fields_code" not in (getattr(field, "extras", {}) or {}):
+            live_fields.append((field, False, None))
+            continue
+        try:
+            # Prefer the exact controls ask() rendered, without evaluating
+            # authored code a second time (it may depend on mutable state).
+            sub_fields = (extras.get("sub_fields") or {}).get(field.number)
+            if sub_fields is None:
+                generated = question.get_question_for_field_with_sub_fields(
+                    field, user_dict
+                )
+                sub_fields = _raw_fields(generated)
+                for sub_field in sub_fields:
+                    sub_field.number = f"{field.number}_{sub_field.number}"
+            if not isinstance(sub_fields, list) or not sub_fields:
+                raise ValueError("fields code produced no usable fields")
+            live_fields.extend((sub_field, True, None) for sub_field in sub_fields)
+        except Exception as err:  # noqa: BLE001 - authored expansion can raise any exception
+            live_fields.append(
+                (
+                    field,
+                    False,
+                    f"could not expand fields code: {type(err).__name__}: {err}",
+                )
+            )
+    for field, expanded, expansion_error in live_fields:
         try:
             choices = selectcompute.get(getattr(field, "number", None))
             if choices is None:
                 choices = selectcompute.get(str(getattr(field, "number", "")))
             described = describe_field(field, user_dict, choices=choices)
+            if expansion_error:
+                described["error"] = expansion_error
+            if expanded:
+                number = getattr(field, "number", None)
+                if number in (extras.get("ok") or {}):
+                    described["visible"] = bool(extras["ok"][number])
+                    described.pop("visibility_note", None)
+                if number in (extras.get("required") or {}):
+                    described["required"] = bool(extras["required"][number])
+                if described["visible"] is False:
+                    described["required"] = False
+                if number in (ask_result.get("defaults") or {}):
+                    described["default"] = ask_result["defaults"][number]
+                if number in (ask_result.get("labels") or {}):
+                    described["label"] = re.sub(
+                        r"<[^>]+>", "", ask_result["labels"][number]
+                    ).strip()
+                described["example"] = _assignment_example(described)
+                described.pop("blank_example", None)
+                if described.get("variable") and described["required"] is False:
+                    described["blank_example"] = f"{described['variable']}="
         except (
             ValueError,
             TypeError,

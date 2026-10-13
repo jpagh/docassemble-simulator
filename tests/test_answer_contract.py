@@ -256,3 +256,76 @@ def test_parse_rejection_reports_missing_required_but_not_defaults_or_hidden_fie
         "optional_date",
         "hidden_value",
     ]
+
+
+class FieldsCodeInterview(ScreenInterview):
+    questions_by_name: ClassVar = {}
+
+    fields = (
+        SimpleNamespace(
+            number=0, datatype="fields_code", extras={"fields_code": "address_fields()"}
+        ),
+    )
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.extras = {
+            "sub_fields": {
+                0: [
+                    SimpleNamespace(
+                        number="0_0", saveas="address", datatype="text", required=True
+                    ),
+                    SimpleNamespace(
+                        number="0_1", saveas="unit", datatype="text", required=True
+                    ),
+                ]
+            },
+            "ok": {"0_0": True, "0_1": False},
+            "required": {"0_0": False, "0_1": True},
+        }
+
+
+def test_fields_code_screen_describes_and_accepts_ask_time_sub_fields(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = FieldsCodeInterview
+    started = execution.run(Start())
+    assert started.ok
+    fields = started.result["fields"]
+    assert [(f["variable"], f["visible"], f["required"]) for f in fields] == [
+        ("address", True, False),
+        ("unit", False, False),
+    ]
+    answered = execution.run(Answer((("address", "123 Main St"),)))
+    assert answered.ok
+    assert execution.run(Evaluate("address")).result["value"] == "'123 Main St'"
+
+
+def unavailable_address_fields(field, namespace):
+    raise RuntimeError("authored address expansion failed")
+
+
+class UnavailableFieldsCodeInterview(ScreenInterview):
+    fields = FieldsCodeInterview.fields
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.question.get_question_for_field_with_sub_fields = (
+            unavailable_address_fields
+        )
+
+
+def test_fields_code_screen_retains_boundary_and_authored_expansion_error(
+    answer_execution,
+):
+    execution, selected = answer_execution
+    selected["interview"] = UnavailableFieldsCodeInterview
+    started = execution.run(Start())
+    assert started.ok
+    assert started.result["dynamic_fields"] is True
+    assert started.result["field_source"] == "code"
+    (placeholder,) = started.result["fields"]
+    assert placeholder["type"] == "fields_code"
+    assert "variable" not in placeholder
+    assert placeholder["error"] == (
+        "could not expand fields code: RuntimeError: authored address expansion failed"
+    )

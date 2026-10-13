@@ -4492,3 +4492,70 @@ def test_watch_set_covers_features_only_document(family_python, tmp_path):
     assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["reloaded"] is True, (label, observed)
+
+
+def test_generic_fields_code_address_describes_and_accepts_sub_fields(
+    family_python, real_workspace
+):
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    if not _assemblyline_available(interpreter):
+        pytest.skip(f"AssemblyLine is not provisioned for {label}")
+    _assert_family_interpreter(case)
+    root = real_workspace
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "fields-code-address.yml").write_text(
+        "---\nmodules:\n  - docassemble.base.util\n  - docassemble.AssemblyLine.al_general\n"
+        "---\nobjects:\n  - home: ALAddress\n"
+        "---\nmandatory: True\ncode: |\n"
+        "  home.address_label = 'Street address'\n  home.unit_label = 'Unit'\n"
+        "  home.city_label = 'City'\n  home.state_label = 'State'\n"
+        "  home.zip_label = 'ZIP'\n  home.county_label = 'County'\n"
+        "  home.address\n  address_done\n"
+        "---\nid: generic address\ngeneric object: ALAddress\n"
+        "question: Address\nfields:\n"
+        "  - code: x.address_fields(country_code='US', default_state='MA', show_county=True)\n"
+        "---\nquestion: Done\nfield: address_done\n"
+    )
+    started = _run(interpreter, root, "start", "--interview", "fields-code-address.yml")
+    assert started["ok"], (label, started)
+    screen = started["result"]
+    assert screen["dynamic_fields"] is False, (label, screen)
+    fields = {f["variable"]: f for f in screen["fields"]}
+    assert set(fields) == {
+        "home.address",
+        "home.unit",
+        "home.city",
+        "home.state",
+        "home.zip",
+        "home.county",
+    }, (label, fields)
+    assert all(f["visible"] is True for f in fields.values()), (label, fields)
+    assert {v for v, f in fields.items() if f["required"]} == {
+        "home.address",
+        "home.city",
+        "home.state",
+    }, (label, fields)
+    assert fields["home.state"]["default"] == "MA", (label, fields)
+    assert "MA" in {c.get("value") for c in fields["home.state"]["choices"]}, (
+        label,
+        fields,
+    )
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "home.address=123 Main St",
+        "home.unit=2",
+        "home.city=Boston",
+        "home.state=MA",
+        "home.zip=02108",
+        "home.county=Suffolk",
+        "--interview",
+        "fields-code-address.yml",
+    )
+    assert answered["ok"], (label, answered)
+    assert answered["result"]["fields"][0]["variable"] == "address_done", (
+        label,
+        answered,
+    )
