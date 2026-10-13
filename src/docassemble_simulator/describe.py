@@ -9,7 +9,9 @@ import json
 import logging
 import re
 from contextlib import contextmanager
+from html import unescape
 from typing import Any
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +373,49 @@ def _screen_variable_context(variable: str | None):
         yield
 
 
+def _row_actions(result: dict) -> list[dict[str, Any]]:
+    """Decode rendered browser controls, including table item_actions links."""
+    actions = []
+    for key in ("question_text", "subquestion_text"):
+        text = unescape(str(result.get(key) or ""))
+        for encoded in re.findall(r"[?&]action=([^&\s\"'<>\)]+)", text):
+            try:
+                encoded = unquote(encoded)
+                payload = json.loads(
+                    base64.b64decode(encoded + "=" * (-len(encoded) % 4))
+                )
+                kind = {"_da_list_add": "add", "_da_list_remove": "delete"}.get(
+                    payload.get("action")
+                )
+                arguments = payload.get("arguments", {})
+                target = arguments.get("list")
+                # Generic-object and nested rows are a separate capability (#63).
+                if (
+                    kind is None
+                    or not isinstance(target, str)
+                    or not target.isidentifier()
+                ):
+                    continue
+                action = {"kind": kind, "target": target}
+                if kind == "delete":
+                    row = int(arguments["item"])
+                    if row < 0 or str(row) != str(arguments["item"]):
+                        continue
+                    action["row"] = row
+                if action not in actions:
+                    actions.append(action)
+            except (
+                ValueError,
+                TypeError,
+                KeyError,
+                AttributeError,
+                binascii.Error,
+                UnicodeDecodeError,
+            ):
+                continue
+    return actions
+
+
 def describe_question_result(result: dict, user_dict: dict) -> dict:
     """Flatten an askfor()/assemble() result dict into a screen description."""
     question = result.get("question")
@@ -386,6 +431,7 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         "subquestion_text": result.get("subquestion_text"),
         "continue_label": result.get("continue_label"),
         "fields": [],
+        "row_actions": _row_actions(result),
     }
     if qtype in YESNO_TYPES:
         seen: set[str] = set()

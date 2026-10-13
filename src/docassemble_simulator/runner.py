@@ -567,6 +567,9 @@ class SimulatorRunner:
             options["assignments"] = assignments
         return self.request("answer", **options)
 
+    def row_action(self, kind: str, target: str, *, row: int | None = None):
+        return self.request("row-action", kind=kind, target=target, row=row)
+
     def seek(self, variable: str, **options):
         return self.request("seek", variable=variable, **options)
 

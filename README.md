@@ -150,6 +150,19 @@ docassemble-simulator seek M.family --activate
 - `exec` assembles and saves by default. `--no-assemble` performs a state-only
   commit after successful Python execution.
 
+Table/review screens expose `row_actions`, an array of rendered controls such as
+`{"kind": "add", "target": "people"}` and
+`{"kind": "delete", "target": "people", "row": 0}` (zero-based rows).
+`kind` is an open string vocabulary; currently only add and delete are supported.
+Press them with `row-action add people` or `row-action delete people --row 0`.
+The operation accepts only controls on the saved screen, uses docassemble's own
+list action dispatch, and saves the resulting screen only on success. Editing
+and nested/generic-object rows are not supported. The worker accepts
+`{"operation": "row-action", "kind": "delete", "target": "people", "row": 0}`;
+Python callers use `runner.row_action("delete", "people", row=0)`.
+These additive screen facts are debug-only in screen traces, not field-fact
+comparison inputs; older traces remain readable.
+
 `answer` parses JSON, then Python literals, then plain text. Its JSON result
 reports each assignment as `applied`, `unknown field`, or `parse error`, and
 rejections include the active fields, closest-name suggestions, and missing

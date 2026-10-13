@@ -108,6 +108,13 @@ class Answer:
 
 
 @dataclass(frozen=True)
+class RowAction:
+    kind: str
+    target: str
+    row: int | None = None
+
+
+@dataclass(frozen=True)
 class Seek:
     variable: str
     fresh: bool = False
@@ -205,6 +212,7 @@ Operation = (
     | Status
     | Refresh
     | Answer
+    | RowAction
     | Seek
     | ReplayAutomatic
     | Evaluate
@@ -541,6 +549,8 @@ class InterviewExecution:
                     outcome = self._mutate(lambda: self._refresh())
                 elif isinstance(operation, Answer):
                     outcome = self._mutate(lambda: self._answer(operation))
+                elif isinstance(operation, RowAction):
+                    outcome = self._mutate(lambda: self._row_action(operation))
                 elif isinstance(operation, Seek):
                     outcome = self._seek_operation(operation)
                 elif isinstance(operation, ReplayAutomatic):
@@ -685,6 +695,44 @@ class InterviewExecution:
                 else _assemble(interview, namespace, status)
             )
         self._store.save(namespace, outcome, active)
+        return outcome
+
+    def _row_action(self, operation: RowAction):
+        payload = self._store.load()
+        screen = payload.get("outcome") or {}
+        requested = {"kind": operation.kind, "target": operation.target}
+        if operation.row is not None:
+            requested["row"] = operation.row
+        valid_row = (
+            operation.row is None
+            if operation.kind == "add"
+            else (type(operation.row) is int and operation.row >= 0)
+        )
+        if (
+            operation.kind not in {"add", "delete"}
+            or not valid_row
+            or requested not in screen.get("row_actions", [])
+        ):
+            raise ExecutionFailure(
+                ErrorKind.ANSWER_INPUT,
+                "row action is not available on the saved screen",
+            )
+        namespace = payload["namespace"]
+        with self._prepared_operation(namespace) as (interview, status):
+            arguments = {"list": operation.target}
+            if operation.kind == "delete":
+                arguments["item"] = str(operation.row)
+            status.current_info.update(
+                {
+                    "action": "_da_list_add"
+                    if operation.kind == "add"
+                    else "_da_list_remove",
+                    "arguments": arguments,
+                }
+            )
+            outcome = _assemble(interview, namespace, status)
+        if outcome.get("kind") != "error":
+            self._store.save(namespace, outcome)
         return outcome
 
     def _answer(self, operation: Answer):
@@ -3183,6 +3231,7 @@ __all__ = [
     "Refresh",
     "RenderSource",
     "ReplayAutomatic",
+    "RowAction",
     "SavedSessionSource",
     "SeedState",
     "Seek",

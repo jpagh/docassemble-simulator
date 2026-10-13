@@ -29,6 +29,7 @@ from docassemble_simulator.execution import (
     Evaluate,
     Execute,
     Refresh,
+    RowAction,
     SeedState,
     Seek,
     Start,
@@ -174,6 +175,19 @@ def operation_from_request(request: dict[str, Any]):
             bool(request.get("partial", False)),
             bool(request.get("defaults", False)),
         )
+    if name == "row-action":
+        kind, target, row = (
+            request.get("kind"),
+            request.get("target"),
+            request.get("row"),
+        )
+        if kind not in ("add", "delete") or not isinstance(target, str):
+            raise WorkerProtocolError(
+                "row-action requires kind add/delete and a target"
+            )
+        if row is not None and type(row) is not int:
+            raise WorkerProtocolError("row-action row must be an integer")
+        return RowAction(kind, target, row)
     if name == "seek":
         variable = request.get("variable", request.get("sought"))
         if not isinstance(variable, str) or not variable.strip():
