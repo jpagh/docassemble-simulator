@@ -110,3 +110,13 @@ is part of the shared seam, so the two transports cannot drift.
 - Identity is intentionally not uniqueness. Multiplicity, phases, and a driver that keys answers on identity are what make re-asks and per-element loops comparable.
 - The `ID ` prefix and the `sought`/`orig_sought` pairing are compiler behavior, not simulator behavior; storing the identity rule with each key makes a future docassemble change visible as a rule change in a diff instead of a silent mismatch.
 - Screen identity is a weak fallback for screens with no target and no fields; the category rule's ordinal disambiguation is positional, documented, and exercised by the identity study.
+
+## Rendered constraint facts (#62)
+
+Screen fields also record the runtime-computed `constraints` (min/max,
+minlength/maxlength, step, scale, currency symbol, and field metadata). These
+are debug-only facts: the compared field-fact projection remains variable,
+type, visibility, requiredness, and choice values. Constraint changes do not
+change identity or comparison, even with `--full-text`. Existing schema-4
+traces without constraints remain readable and comparable; no golden needs
+re-recording for this additive description.

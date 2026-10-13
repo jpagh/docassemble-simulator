@@ -464,7 +464,11 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         return out
     with _screen_variable_context(result.get("sought") or result.get("orig_sought")):
         out["fields"] = describe_fields(
-            question, user_dict, result.get("selectcompute") or {}, ask_result=result
+            question,
+            user_dict,
+            result.get("selectcompute") or {},
+            result.get("extras") or {},
+            ask_result=result,
         )
     if qtype == "review":
         _append_continue_field(out["fields"], getattr(question, "review_saveas", None))
@@ -517,6 +521,7 @@ def describe_fields(
     question: Any,
     user_dict: dict,
     selectcompute: dict | None = None,
+    extras: dict | None = None,
     *,
     ask_result: dict | None = None,
 ) -> list[dict]:
@@ -524,7 +529,7 @@ def describe_fields(
     fields = []
     selectcompute = selectcompute or {}
     ask_result = ask_result or {}
-    extras = ask_result.get("extras") or {}
+    extras = extras or ask_result.get("extras") or {}
     live_fields = []
     for field in _raw_fields(question):
         if "fields_code" not in (getattr(field, "extras", {}) or {}):
@@ -579,6 +584,30 @@ def describe_fields(
                 described.pop("blank_example", None)
                 if described.get("variable") and described["required"] is False:
                     described["blank_example"] = f"{described['variable']}="
+
+            number = getattr(field, "number", None)
+            constraints = {}
+            for key in (
+                "min",
+                "max",
+                "minlength",
+                "maxlength",
+                "step",
+                "scale",
+                "currency symbol",
+                "field metadata",
+            ):
+                values = (extras or {}).get(key) or {}
+                if number in values:
+                    value = values[number]
+                    constraints[key] = (
+                        value
+                        if isinstance(value, (str, int, float, bool, dict, list))
+                        or value is None
+                        else str(value)
+                    )
+            if constraints:
+                described["constraints"] = constraints
         except (
             ValueError,
             TypeError,

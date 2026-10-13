@@ -78,3 +78,23 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
   field facts continue to describe the presentation, not the attempted POST.
   Existing trace schemas remain readable. Goldens whose formerly rejected
   submissions now hide their dependents must be re-recorded.
+
+
+
+## Rendered browser constraints (#62)
+
+Whole-screen submission checks fields visible under the post-submission
+show-if state described above against the runtime-computed min/max and
+minlength/maxlength facts before authored validation code. Fields hidden by
+submitted assignments or rendered defaults are not blanked, required, or
+constrained. Range
+bounds are inclusive. Text length counts JavaScript UTF-16 code units (with
+carriage returns removed); group lengths count selected choices. Optional
+empty inputs remain exempt, like jQuery Validate. Numeric text controls with
+an explicit step enforce jQuery's zero-based multiple rule, not an HTML
+number input's min-based step offset. Slider scale is a rendering mode, not a
+precision constraint; scale and slider step are recorded but not validated.
+Custom datatype parameters are recorded without inventing custom validation.
+`--no-validate` does not bypass this form gate; `--partial` bypasses it, retaining
+its existing authored-validation and required-warning semantics. `exec` is
+unchanged. Constraint facts are debug-only in trace comparison (ADR-0012).

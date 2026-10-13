@@ -1589,3 +1589,17 @@ def test_append_trace_records_an_error_outcome_as_a_failure(tmp_path):
     assert entry.identity == ScreenIdentity("error:unresolved:clients[i].name", "error")
     assert entry.screen is None
     assert entry.error == outcome
+
+
+def test_rendered_constraints_are_recorded_but_debug_only_for_comparison(tmp_path):
+    old_screen = _screen()
+    new_screen = _screen(
+        fields=[{**old_screen["fields"][0], "constraints": {"maxlength": 4}}]
+    )
+    old = _trace(_entry(1, "id:intro", screen=old_screen))
+    new = _trace(_entry(1, "id:intro", screen=new_screen))
+    path = tmp_path / "constraints.jsonl"
+    write_trace(path, new)
+    loaded = load_trace(path)
+    assert loaded.entries[0].screen["fields"][0]["constraints"] == {"maxlength": 4}
+    assert compare_traces(old, loaded).matched

@@ -4873,3 +4873,64 @@ def test_generic_fields_code_address_describes_and_accepts_sub_fields(
         label,
         answered,
     )
+
+
+def test_browser_constraints_and_authored_validation_across_families(
+    family_python, real_workspace
+):
+    case = family_python
+    _assert_family_interpreter(case)
+    root = real_workspace
+    question = (
+        root / "docassemble" / "regression" / "data" / "questions" / "constraints.yml"
+    )
+    question.write_text(
+        "---\nmandatory: True\ncode: |\n  amount\n  label\n---\n"
+        "id: constraints\nquestion: Browser constrained\nfields:\n"
+        "  - Amount: amount\n    datatype: number\n    min: 2\n    max: 10\n    step: 2\n"
+        "  - Label: label\n    minlength: 2\n    maxlength: 4\n"
+        "validation code: |\n  if label == 'NO':\n    validation_error('Authored rejection')\n"
+        "---\nmandatory: True\nquestion: Done\n"
+    )
+
+    def run(*arguments, expected_code=0):
+        return _run(
+            case.interpreter,
+            root,
+            *arguments,
+            "--interview",
+            "constraints.yml",
+            expected_code=expected_code,
+        )
+
+    started = run("start")
+    fields = started["result"]["fields"]
+    assert fields[0]["constraints"] == {"min": 2, "max": 10, "step": 2}, case.label
+    assert fields[1]["constraints"] == {"minlength": 2, "maxlength": 4}, case.label
+    for amount, label, constraint in [
+        (1, "AB", "min"),
+        (11, "AB", "max"),
+        (3, "AB", "step"),
+        (2, "A", "minlength"),
+        (2, "ABCDE", "maxlength"),
+    ]:
+        for flags in [(), ("--no-validate",)]:
+            rejected = run(
+                "answer", f"amount={amount}", f"label={label}", *flags, expected_code=2
+            )
+            assert rejected["error"]["kind"] == "validation", (case.label, rejected)
+            variable = "label" if "length" in constraint else "amount"
+            assert any(
+                variable in error and constraint in error
+                for error in rejected["error"]["details"]["errors"]
+            ), rejected
+    authored = run("answer", "amount=2", "label=NO", expected_code=2)
+    assert authored["error"]["details"]["errors"] == ["Authored rejection"], authored
+    assert run("answer", "amount=2", "label=NO", "--no-validate")["ok"]
+    for amount, label in [(2, "AB"), (10, "ABCD")]:
+        run("start")
+        assert run("answer", f"amount={amount}", f"label={label}")["ok"]
+    # No authored range/length check: permissive partial submission exposes the
+    # interview gap that the browser-shaped path above prevents.
+    run("start")
+    assert run("answer", "amount=11", "label=ABCDE", "--partial")["ok"]

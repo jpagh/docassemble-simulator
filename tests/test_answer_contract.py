@@ -535,3 +535,162 @@ def test_fields_code_screen_retains_boundary_and_authored_expansion_error(
     assert placeholder["error"] == (
         "could not expand fields code: RuntimeError: authored address expansion failed"
     )
+
+
+class ConstrainedInterview(ScreenInterview):
+    questions_by_name: ClassVar = {}
+    fields = (
+        SimpleNamespace(saveas="amount", datatype="number", number=0),
+        SimpleNamespace(saveas="name", datatype="text", number=1),
+    )
+
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.extras = {
+            "min": {0: 2},
+            "max": {0: 10},
+            "step": {0: 2},
+            "minlength": {1: 2},
+            "maxlength": {1: 4},
+        }
+
+
+def test_answer_reports_rendered_constraint_facts(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = ConstrainedInterview
+    started = execution.run(Start())
+    assert started.ok
+    assert started.result["fields"][0]["constraints"] == {
+        "min": 2,
+        "max": 10,
+        "step": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "amount,name,constraint",
+    [
+        ("1", "Ada", "min"),
+        ("11", "Ada", "max"),
+        ("2", "A", "minlength"),
+        ("2", "Alice", "maxlength"),
+        ("3", "Ada", "step"),
+        ("2", "😀😀😀", "maxlength"),
+    ],
+)
+@pytest.mark.parametrize("validate", [True, False])
+def test_answer_rejects_browser_constraints_transactionally(
+    answer_execution, amount, name, constraint, validate
+):
+    execution, selected = answer_execution
+    selected["interview"] = ConstrainedInterview
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+    rejected = execution.run(
+        Answer((("amount", amount), ("name", name)), validate=validate)
+    )
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    variable = "name" if "length" in constraint else "amount"
+    assert any(
+        variable in error and constraint in error
+        for error in rejected.error.details["errors"]
+    )
+    assert session_bytes(execution) == before
+
+
+@pytest.mark.parametrize(
+    "amount,name,partial",
+    [("2", "AB", False), ("10", "ABCD", False), ("11", "Alice", True)],
+)
+def test_answer_constraint_boundaries_and_partial_escape(
+    answer_execution, amount, name, partial
+):
+    execution, selected = answer_execution
+    selected["interview"] = ConstrainedInterview
+    assert execution.run(Start()).ok
+    accepted = execution.run(
+        Answer((("amount", amount), ("name", name)), partial=partial)
+    )
+    assert accepted.ok, accepted.error
+
+
+def test_answer_does_not_enforce_hidden_rendered_constraints(answer_execution):
+    class HiddenConstraintInterview(ConstrainedInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="amount", datatype="number", number=0, showif_code="False"
+            ),
+            ConstrainedInterview.fields[1],
+        )
+
+    execution, selected = answer_execution
+    selected["interview"] = HiddenConstraintInterview
+    assert execution.run(Start()).ok
+    assert execution.run(Answer((("amount", "100"), ("name", "AB")))).ok
+
+
+@pytest.mark.parametrize("validate", [True, False])
+@pytest.mark.parametrize("defaults", [True, False])
+def test_constraints_use_post_submission_visibility(
+    answer_execution, validate, defaults
+):
+    class SubmissionConstraintInterview(ScreenInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="show_amount",
+                datatype="boolean",
+                number=0,
+                required=True,
+                default="False",
+            ),
+            SimpleNamespace(
+                saveas="amount",
+                datatype="number",
+                number=1,
+                required=True,
+                showif_code="show_amount",
+            ),
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.extras = {"min": {1: 2}}
+
+    execution, selected = answer_execution
+    selected["interview"] = SubmissionConstraintInterview
+    assert execution.run(Start()).ok
+    # An already assigned invalid value must not constrain a newly hidden field.
+    assignments = (
+        (("amount", "1"),) if defaults else (("show_amount", "False"), ("amount", "1"))
+    )
+    accepted = execution.run(Answer(assignments, defaults=defaults, validate=validate))
+    assert accepted.ok, accepted.error
+
+
+def test_constraints_still_apply_to_newly_visible_fields(answer_execution):
+    class SubmissionConstraintInterview(ConstrainedInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="amount",
+                datatype="number",
+                number=0,
+                showif_code="name == 'AB'",
+            ),
+            ConstrainedInterview.fields[1],
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+    execution, selected = answer_execution
+    selected["interview"] = SubmissionConstraintInterview
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+    rejected = execution.run(Answer((("amount", "1"), ("name", "AB")), validate=False))
+    assert not rejected.ok
+    assert any("min" in error for error in rejected.error.details["errors"])
+    assert session_bytes(execution) == before
