@@ -18,6 +18,33 @@ def safeid(name: str) -> str:
     return base64.b64encode(name.encode()).decode()
 
 
+def test_review_question_describes_its_continue_button_field():
+    """A review's Continue button is an answerable field, not an omission (#55)."""
+    question = SimpleNamespace(
+        question_type="review",
+        name="structured review",
+        validation_code=None,
+        review_saveas="review_ok",
+        fields=[],
+    )
+
+    described = describe_question_result(
+        {"question": question, "sought": "review_ok", "orig_sought": "review_ok"},
+        {},
+    )
+
+    assert described["question_type"] == "review"
+    assert described["fields"] == [
+        {
+            "variable": "review_ok",
+            "type": "settrue",
+            "visible": True,
+            "required": False,
+            "example": "review_ok=True",
+        }
+    ]
+
+
 def test_field_variable_decodes_saveas_once():
     assert field_variable(SimpleNamespace(saveas=safeid("M.value"))) == "M.value"
     assert field_variable(SimpleNamespace(saveas=None)) == ""

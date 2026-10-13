@@ -333,7 +333,7 @@ class BadDefaultDateInterview(MixedRequirementInterview):
 
 
 class CheckboxGroupInterview(FakeInterview):
-    """A required checkbox group beside an optional one on the same screen."""
+    """Required and optional checkbox groups beside an optional multiselect."""
 
     CHOICES: ClassVar[list[dict]] = [
         {"key": "housing", "label": "Housing"},
@@ -362,6 +362,12 @@ class CheckboxGroupInterview(FakeInterview):
                 SimpleNamespace(
                     saveas="x.optional_topics",
                     datatype="checkboxes",
+                    required=False,
+                    choices=self.CHOICES,
+                ),
+                SimpleNamespace(
+                    saveas="x.multi_topics",
+                    datatype="multiselect",
                     required=False,
                     choices=self.CHOICES,
                 ),
@@ -2049,6 +2055,7 @@ def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stu
             (
                 ("x.service_type", "Electronic"),
                 ("x.topics", '{"housing": true}'),
+                ("x.multi_topics", '{"housing": true}'),
             )
         )
     )
@@ -2056,11 +2063,74 @@ def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stu
     assert accepted.ok, accepted.error
     topics_value = execution.run(Evaluate("rav.topics.elements"))
     assert topics_value.ok, topics_value.error
-    assert topics_value.result["value"] == "{'housing': True}"
+    # The submission omits ``benefits``; a browser posts it unticked, so the
+    # group carries an explicit False rather than an undefined key.
+    assert topics_value.result["value"] == "{'housing': True, 'benefits': False}"
+    multi_value = execution.run(Evaluate("rav.multi_topics.elements"))
+    assert multi_value.ok, multi_value.error
+    assert multi_value.result["value"] == "{'housing': True, 'benefits': False}"
     # The optional group still takes its all-false browser blank.
     optional_value = execution.run(Evaluate("rav.optional_topics.elements"))
     assert optional_value.ok, optional_value.error
     assert optional_value.result["value"] == ("{'housing': False, 'benefits': False}")
+
+
+class ReviewInterview(FakeInterview):
+    """A review whose continue button is the only way to the next screen."""
+
+    def assemble(self, namespace, interview_status):
+        if namespace.get("review_ok"):
+            interview_status.question = SimpleNamespace(
+                question_type="fields",
+                name="done",
+                validation_code=None,
+                fields=[],
+            )
+            interview_status.question_text = "Done"
+        else:
+            interview_status.question = SimpleNamespace(
+                question_type="review",
+                name="structured review",
+                validation_code=None,
+                review_saveas="review_ok",
+                fields=[],
+            )
+            interview_status.question_text = "Review"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = None
+        interview_status.orig_sought = None
+        interview_status.selectcompute = {}
+
+
+def test_review_continue_field_is_answerable_and_defaultable(
+    tmp_path, monkeypatch, da_stubs
+):
+    """The continue button answers True, and --defaults presses it (#55)."""
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, ReviewInterview)
+
+    started = execution.run(Start())
+    assert started.ok, started.error
+    assert started.result["question_type"] == "review", started.result
+    assert started.result["fields"] == [
+        {
+            "variable": "review_ok",
+            "type": "settrue",
+            "visible": True,
+            "required": False,
+            "example": "review_ok=True",
+        }
+    ], started.result["fields"]
+
+    answered = execution.run(Answer((("review_ok", "True"),)))
+    assert answered.ok, answered.error
+    assert answered.result["question_text"] == "Done", answered.result
+
+    execution.reset()
+    assert execution.run(Start()).ok
+    defaults = execution.run(Answer((), defaults=True))
+    assert defaults.ok, defaults.error
+    assert defaults.result["question_text"] == "Done", defaults.result
 
 
 def test_object_checkbox_append_runs_inside_the_interview_namespace(

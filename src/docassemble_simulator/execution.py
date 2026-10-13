@@ -1970,6 +1970,19 @@ def _field_types(screen, targets):
     return types
 
 
+def _field_specs(screen, targets):
+    """Field metadata by variable, including resolved generic targets."""
+    specs = {
+        field.get("variable"): field
+        for field in screen.get("fields") or []
+        if isinstance(field.get("variable"), str)
+    }
+    for variable, target in targets.items():
+        if variable in specs:
+            specs.setdefault(target, specs[variable])
+    return specs
+
+
 def _answerable_fields(screen):
     """Field names a submission may set, including resolved generic targets."""
     fields = screen.get("fields")
@@ -2273,6 +2286,9 @@ def _browser_blank(field):
         if input_type in _RADIO_BOOLEAN_INPUT_TYPES:
             return None
         return input_type.startswith("noyes")
+    if datatype == "settrue":
+        # A continue button submits True; there is no unchecked state.
+        return True
     if datatype in {"threestate", "object", "object_radio", "file"}:
         return None
     if datatype in _OBJECT_GROUP_DATATYPES:
@@ -2280,16 +2296,9 @@ def _browser_blank(field):
         # object could corrupt interview logic, so leave it undefined.
         return _NO_BLANK
     if datatype in _CHECKBOX_GROUP_DATATYPES:
-        values = [
-            choice.get("value")
-            for choice in field.get("choices") or []
-            if "value" in choice
-        ]
-        if not values:
+        if not any("value" in choice for choice in field.get("choices") or []):
             return None
-        from docassemble.base.util import DADict
-
-        return DADict(elements={str(value): False for value in values})
+        return _checkbox_group_elements(field, {})
     if datatype in {
         "text",
         "email",
@@ -2304,6 +2313,27 @@ def _browser_blank(field):
     }:
         return ""
     return _NO_BLANK
+
+
+def _checkbox_group_elements(field, submitted):
+    """The browser's posted state for one checkbox group.
+
+    docassemble's formatter registers every rendered choice in the hidden
+    ``_checkboxes`` state as ``False``, so a choice an explicit submission
+    omits is a definite ``False`` rather than an undefined key. The blank path
+    (``_browser_blank``) and the explicit-submission path both build their
+    group value here, so the two cannot drift. Keys the screen did not render
+    keep whatever the submission provided.
+    """
+    elements = {
+        str(choice["value"]): False
+        for choice in field.get("choices") or []
+        if "value" in choice
+    }
+    elements.update({str(key): item for key, item in submitted.items()})
+    from docassemble.base.util import DADict
+
+    return DADict(elements=elements)
 
 
 #: Namespace slots the simulator uses to carry a Python value into an exec'd
@@ -2356,6 +2386,7 @@ def _apply_assignments(
     dispositions = dispositions if dispositions is not None else []
     targets = _screen_field_targets(screen)
     field_types = _field_types(screen, targets)
+    field_specs = _field_specs(screen, targets)
     for variable, raw in assignments:
         if allowed is not None and variable not in allowed:
             errors.append(f"{variable}: not a field on the active screen")
@@ -2406,10 +2437,10 @@ def _apply_assignments(
             }:
                 _apply_object(namespace, variable, target, datatype, value)
             else:
-                if datatype == "checkboxes" and isinstance(value, dict):
-                    from docassemble.base.util import DADict
-
-                    value = DADict(elements=value)
+                if datatype in _CHECKBOX_GROUP_DATATYPES and isinstance(value, dict):
+                    value = _checkbox_group_elements(
+                        field_specs.get(variable) or {}, value
+                    )
                 _set_namespace_value(namespace, target, value)
             dispositions.append(
                 {"variable": variable, "input": raw, "disposition": "applied"}

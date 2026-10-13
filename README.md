@@ -112,7 +112,11 @@ docassemble-simulator seek M.family --activate
   dates, `0`/`0.0` for numeric fields, `None` for radio/maybe/object
   selections, the unchecked value for checkbox-style `yesno`/`noyes`, and an
   all-false dictionary for checkbox groups), so the same `sets:` question is
-  not re-asked for each variable. Visible required fields left blank, or
+  not re-asked for each variable. A submitted `checkboxes`/`multiselect`
+  dictionary is completed the same way: a browser posts every rendered choice,
+  so an omitted choice is defined `False` rather than left undefined. A
+  review's continue button is described as an answerable `True` submission,
+  and `--defaults` presses it. Visible required fields left blank, or
   explicitly emptied (`field=` or `field=None`), reject the submission, and a
   required checkbox group needs at least one true selection.
   Hidden `show if` fields are neither assigned nor required, and signature

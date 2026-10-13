@@ -2773,6 +2773,147 @@ def test_assemblyline_bundle_pdf_requests_skip_to_docx(family_python, real_works
     assert ".docx" in files and ".zip" in files, label
 
 
+def test_checkbox_group_submission_defines_unselected_choices(
+    family_python, real_workspace
+):
+    """A browser posts every checkbox choice, so an omitted one is False (#54).
+
+    The next question's text indexes the unselected choice directly. Without
+    the browser-shaped completion docassemble seeks the missing key, re-asks
+    the checkbox screen, and never reaches the second question.
+    """
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "checkbox-group.yml").write_text(
+        "---\n"
+        "question: Topics\n"
+        "fields:\n"
+        "  - label: no label\n"
+        "    field: topics\n"
+        "    datatype: checkboxes\n"
+        "    choices:\n"
+        "      - Housing: housing\n"
+        "      - Benefits: benefits\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: ${ 'benefits is false' if topics['benefits'] is False else 'wrong' }\n"
+    )
+
+    started = _run(interpreter, root, "start", "--interview", "checkbox-group.yml")
+    assert started["ok"], label
+    assert started["result"]["question_text"] == "Topics", (label, started)
+
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        'topics={"housing":true}',
+        "--interview",
+        "checkbox-group.yml",
+    )
+    assert answered["ok"], (label, answered)
+    assert answered["result"]["question_text"] == "benefits is false", (
+        label,
+        answered["result"],
+    )
+
+
+def test_review_continue_button_field_is_answerable(family_python, real_workspace):
+    """A review's continue button is the browser's ``True`` submission (#55)."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "review-continue.yml").write_text(
+        "---\n"
+        "id: intro\n"
+        "mandatory: True\n"
+        "question: Your name\n"
+        "fields:\n"
+        "  - Name: user_name\n"
+        "---\n"
+        "id: structured review\n"
+        "mandatory: True\n"
+        "question: Review\n"
+        "review:\n"
+        "  - label: Name\n"
+        "    field: user_name\n"
+        "continue button field: review_ok\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Done\n"
+        "subquestion: |\n"
+        "  Reached the next screen.\n"
+    )
+
+    started = _run(interpreter, root, "start", "--interview", "review-continue.yml")
+    assert started["ok"], label
+    assert started["result"]["question_name"] == "ID intro", (label, started)
+
+    review = _run(
+        interpreter,
+        root,
+        "answer",
+        "user_name=Alice",
+        "--interview",
+        "review-continue.yml",
+    )
+    assert review["ok"], (label, review)
+    assert review["result"]["question_type"] == "review", (label, review)
+    continue_fields = [
+        field
+        for field in review["result"]["fields"]
+        if field.get("variable") == "review_ok"
+    ]
+    assert continue_fields == [
+        {
+            "variable": "review_ok",
+            "type": "settrue",
+            "visible": True,
+            "required": False,
+            "example": "review_ok=True",
+        }
+    ], (label, review["result"]["fields"])
+
+    done = _run(
+        interpreter,
+        root,
+        "answer",
+        "review_ok=True",
+        "--interview",
+        "review-continue.yml",
+    )
+    assert done["ok"], (label, done)
+    assert done["result"]["question_text"] == "Done", (label, done["result"])
+
+    # ``--defaults`` presses Continue like the browser's button would.
+    restarted = _run(interpreter, root, "start", "--interview", "review-continue.yml")
+    assert restarted["ok"], label
+    answered = _run(
+        interpreter,
+        root,
+        "answer",
+        "user_name=Alice",
+        "--interview",
+        "review-continue.yml",
+    )
+    assert answered["ok"], (label, answered)
+    defaults = _run(
+        interpreter,
+        root,
+        "answer",
+        "--defaults",
+        "--interview",
+        "review-continue.yml",
+    )
+    assert defaults["ok"], (label, defaults)
+    assert defaults["result"]["question_text"] == "Done", (label, defaults["result"])
+
+
 def test_real_date_answer_formats_and_rejections_roll_back(
     family_python, real_workspace
 ):

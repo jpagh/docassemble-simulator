@@ -418,6 +418,14 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         out["fields"] = describe_fields(
             question, user_dict, result.get("selectcompute") or {}
         )
+    review_saveas = getattr(question, "review_saveas", None)
+    if (
+        qtype == "review"
+        and isinstance(review_saveas, str)
+        and review_saveas
+        and not any(field.get("variable") == review_saveas for field in out["fields"])
+    ):
+        out["fields"].append(_review_continue_field(review_saveas))
     # A ``fields: code`` block can compile as an answerable screen while its
     # browser fields are constructed by authored code at runtime. Do not
     # invent those controls: label the honest boundary so a project runner can
@@ -429,6 +437,24 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
         out["dynamic_fields"] = False
         out["field_source"] = "compiled"
     return out
+
+
+def _review_continue_field(variable: str) -> dict[str, Any]:
+    """The review Continue button as an answerable field.
+
+    docassemble compiles a review's ``continue button field`` into
+    ``Question.review_saveas`` and renders it as
+    ``<button name="..." value="True">`` rather than a ``Field``, so no field
+    facts describe it. The browser posts the button as ``True``; model that
+    value so ``answer`` can press Continue and ``--defaults`` can advance.
+    """
+    return {
+        "variable": variable,
+        "type": "settrue",
+        "visible": True,
+        "required": False,
+        "example": f"{variable}=True",
+    }
 
 
 def _raw_fields(question: Any) -> list[Any]:
