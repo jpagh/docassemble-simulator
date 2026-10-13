@@ -563,6 +563,7 @@ def cmd_execution(args, root):
         Evaluate,
         Execute,
         Refresh,
+        RowAction,
         SeedState,
         Seek,
         Start,
@@ -586,6 +587,8 @@ def cmd_execution(args, root):
             args.partial,
             args.defaults,
         )
+    elif args.command == "row-action":
+        operation = RowAction(args.kind, args.target, args.row)
     elif args.command == "seek":
         operation = Seek(
             args.variable, args.fresh, args.activate, args.trace, args.auto
@@ -2367,6 +2370,13 @@ def build_parser():
             epilog=recording_epilog,
         )
     ).set_defaults(func=cmd_execution)
+    row_action = add(
+        "row-action", help="press an add or delete control on the saved screen"
+    )
+    row_action.add_argument("kind", choices=("add", "delete"))
+    row_action.add_argument("target")
+    row_action.add_argument("--row", type=int)
+    row_action.set_defaults(func=cmd_execution)
     answer = add_recording(
         add(
             "answer",

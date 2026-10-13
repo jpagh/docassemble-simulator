@@ -256,3 +256,38 @@ def test_parse_rejection_reports_missing_required_but_not_defaults_or_hidden_fie
         "optional_date",
         "hidden_value",
     ]
+
+
+class RowActionInterview(ScreenInterview):
+    def assemble(self, namespace, interview_status):
+        from test_row_actions import action_link
+
+        action = interview_status.current_info.get("action")
+        if action:
+            namespace["pressed"] = action
+            if namespace.get("fail_action"):
+                raise ValueError("authored action failed")
+        super().assemble(namespace, interview_status)
+        interview_status.subquestion_text = action_link("_da_list_add", list="people")
+
+
+def test_row_action_commits_only_successful_post_action_screen(answer_execution):
+    from docassemble_simulator.execution import Execute, RowAction, Status
+
+    execution, selected = answer_execution
+    selected["interview"] = RowActionInterview
+    assert execution.run(Start()).ok
+    rejected = execution.run(RowAction("delete", "people", 0))
+    assert rejected.error.kind == "answer-input"
+    added = execution.run(RowAction("add", "people"))
+    assert added.ok
+    assert execution.run(Evaluate("pressed")).result["value"] == "'_da_list_add'"
+    assert execution.run(Execute("fail_action = True")).ok
+    before = session_bytes(execution)
+    saved = execution.run(Status()).result
+    failed = execution.run(RowAction("add", "people"))
+    assert not failed.ok
+    assert failed.error.kind == "execution"
+    assert "authored action failed" in failed.error.message
+    assert session_bytes(execution) == before
+    assert execution.run(Status()).result == saved

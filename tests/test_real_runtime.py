@@ -4492,3 +4492,145 @@ def test_watch_set_covers_features_only_document(family_python, tmp_path):
     assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["reloaded"] is True, (label, observed)
+
+
+def test_table_row_actions_across_families(family_python, real_workspace, monkeypatch):
+    """Rendered table buttons and template add links share transactional transport."""
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+
+    def clean(value):
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items() if item is not None}
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+
+    _assert_family_interpreter(family_python)
+    interpreter = family_python.interpreter
+    root = real_workspace
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "row_actions.yml").write_text(
+        """---
+objects:
+  - people: DAList.using(object_type=DAObject, auto_gather=False)
+---
+code: |
+  people.gathered = True
+---
+mandatory: True
+question: Review people
+subquestion: |
+  ${ people_table }
+
+  ${ people.add_action() }
+continue button field: reviewed
+---
+table: people_table
+rows: people
+columns:
+  - Name: row_item.name
+edit:
+  - name
+delete buttons: True
+---
+question: New person
+fields:
+  - Name: people[i].name
+---
+code: |
+  people[i].complete = people[i].name
+"""
+    )
+    from docassemble_simulator import SimulatorRunner
+
+    started = _run(interpreter, root, "--interview", "row_actions.yml", "start")
+    assert started["result"]["row_actions"] == [{"kind": "add", "target": "people"}]
+    added = _run(
+        interpreter,
+        root,
+        "--interview",
+        "row_actions.yml",
+        "row-action",
+        "add",
+        "people",
+    )
+    assert added["result"]["question_text"] == "New person"
+    answered = _run(
+        interpreter,
+        root,
+        "--interview",
+        "row_actions.yml",
+        "answer",
+        "people[0].name=Ada",
+    )
+    assert {"kind": "delete", "target": "people", "row": 0} in answered["result"][
+        "row_actions"
+    ]
+    deleted = _run(
+        interpreter,
+        root,
+        "--interview",
+        "row_actions.yml",
+        "row-action",
+        "delete",
+        "people",
+        "--row",
+        "0",
+    )
+    assert deleted["result"]["row_actions"] == [{"kind": "add", "target": "people"}]
+    assert (
+        _run(
+            interpreter,
+            root,
+            "--interview",
+            "row_actions.yml",
+            "eval",
+            "len(people.elements)",
+        )["result"]["value"]
+        == "0"
+    )
+    saved = _run(interpreter, root, "--interview", "row_actions.yml", "status")[
+        "result"
+    ]
+    rejected = _run(
+        interpreter,
+        root,
+        "--interview",
+        "row_actions.yml",
+        "row-action",
+        "delete",
+        "people",
+        "--row",
+        "0",
+        expected_code=2,
+    )
+    assert rejected["error"]["kind"] == "answer-input"
+    assert (
+        _run(interpreter, root, "--interview", "row_actions.yml", "status")["result"]
+        == saved
+    )
+
+    with SimulatorRunner(
+        root,
+        interview="row_actions.yml",
+        python=interpreter,
+        isolate=False,
+        offline=True,
+        timeout=30,
+    ) as runner:
+        assert clean(runner.start().result) == started["result"]
+        assert clean(runner.row_action("add", "people").result) == added["result"]
+        # Native Markdown table-separator widths vary between processes;
+        # that pre-existing rendering behavior is outside row-action parity.
+        assert (
+            runner.answer({"people[0].name": "Ada"}).result["row_actions"]
+            == answered["result"]["row_actions"]
+        )
+        assert (
+            clean(runner.row_action("delete", "people", row=0).result)
+            == deleted["result"]
+        )
+        before = runner.status().result
+        assert not runner.row_action("delete", "people", row=0).ok
+        assert runner.status().result == before
