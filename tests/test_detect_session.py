@@ -2133,6 +2133,72 @@ def test_review_continue_field_is_answerable_and_defaultable(
     assert defaults.result["question_text"] == "Done", defaults.result
 
 
+class ContinueButtonInterview(FakeInterview):
+    question_type = "fields"
+
+    def assemble(self, namespace, interview_status):
+        interview_status.question = SimpleNamespace(
+            question_type=self.question_type,
+            name="consent",
+            validation_code=None,
+            fields_saveas="consent_ok",
+            fields=[
+                SimpleNamespace(saveas="consent", datatype="yesno", required=False)
+            ],
+        )
+        interview_status.question_text = (
+            "Done" if namespace.get("consent_ok") else "Consent"
+        )
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "consent_ok"
+        interview_status.orig_sought = "consent_ok"
+        interview_status.selectcompute = {}
+
+
+@pytest.mark.parametrize(
+    "question_type",
+    ["fields", "yesno", "noyes", "yesnomaybe", "noyesmaybe", "signature"],
+)
+def test_continue_button_is_answerable_and_defaultable(
+    tmp_path, monkeypatch, da_stubs, question_type
+):
+    monkeypatch.setattr(ContinueButtonInterview, "question_type", question_type)
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, ContinueButtonInterview
+    )
+    started = execution.run(Start())
+    assert started.ok, started.error
+    assert started.result["fields"][-1] == {
+        "variable": "consent_ok",
+        "type": "settrue",
+        "visible": True,
+        "required": False,
+        "example": "consent_ok=True",
+    }
+    partial = execution.run(Answer((("consent", "True"),), partial=True))
+    assert partial.ok, partial.error
+    assert partial.result["question_text"] != "Done"
+    undefined = execution.run(Evaluate("'consent_ok' in locals()"))
+    assert undefined.ok, undefined.error
+    assert undefined.result["value"] == "False"
+    explicit = execution.run(Answer((("consent_ok", "True"),)))
+    assert explicit.ok, explicit.error
+    assert explicit.result["question_text"] == "Done"
+
+    execution.reset()
+    assert execution.run(Start()).ok
+    ordinary = execution.run(Answer((("consent", "True"),)))
+    assert ordinary.ok, ordinary.error
+    assert ordinary.result["question_text"] == "Done"
+
+    execution.reset()
+    assert execution.run(Start()).ok
+    defaults = execution.run(Answer((), defaults=True))
+    assert defaults.ok, defaults.error
+    assert defaults.result["question_text"] == "Done"
+
+
 def test_object_checkbox_append_runs_inside_the_interview_namespace(
     tmp_path, monkeypatch, da_stubs, legacy_frame_resolution
 ):
