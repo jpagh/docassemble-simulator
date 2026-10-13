@@ -5,6 +5,8 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 from docassemble_simulator.execution import ExplainResolution, InterviewExecution, Start
 
 
@@ -142,3 +144,63 @@ def test_resolution_explanation_prepares_saved_state_without_committing(
     assert outcome.result["conflict"] is True
     assert outcome.result["winner"] is None
     assert _session_bytes(execution) == before
+
+
+@pytest.mark.parametrize("refresh_before_operation", [False, True])
+def test_compile_warning_is_attributed_once_across_operations(
+    tmp_path, monkeypatch, da_stubs, capsys, refresh_before_operation
+):
+    execution = _execution(tmp_path, monkeypatch, da_stubs, guards=["True"])
+    cache = sys.modules["docassemble.base.interview_cache"]
+    original = cache.get_interview
+    parse = sys.modules["docassemble.base.parse"]
+    exec(  # noqa: S102 - controlled compiler double with real warning frames
+        "def compile_validation(self):\n"
+        "    compile(\"value = '\\\\q'\", '<validate code>', 'exec')\n",
+        parse.__dict__,
+    )
+    question = _question(tmp_path / "main.yml", identifier="warning", guard="True")
+
+    def get_interview(identity):
+        parse.compile_validation(question)
+        return original(identity)
+
+    monkeypatch.setattr(cache, "get_interview", get_interview)
+    if refresh_before_operation:
+        assert execution.ensure_current() is None
+    first = execution.run(ExplainResolution("shared"))
+    second = execution.run(ExplainResolution("shared"))
+    warnings = [item for item in first.diagnostics if item.kind == "compile-warning"]
+    assert len(warnings) == 1
+    assert warnings[0].details["interview"] == execution.scope.interview
+    assert warnings[0].details["source_file"] == question.from_source.path
+    assert warnings[0].details["line"] == 1
+    assert warnings[0].details["question"] == "warning"
+    assert not [item for item in second.diagnostics if item.kind == "compile-warning"]
+    assert "SyntaxWarning" not in capsys.readouterr().err
+
+
+def test_clean_interview_has_no_compile_warning(tmp_path, monkeypatch, da_stubs):
+    execution = _execution(tmp_path, monkeypatch, da_stubs, guards=["True"])
+    outcome = execution.run(ExplainResolution("shared"))
+    assert outcome.ok
+    assert not [item for item in outcome.diagnostics if item.kind == "compile-warning"]
+
+
+def test_non_compile_library_warning_keeps_its_warning_channel(
+    tmp_path, monkeypatch, da_stubs
+):
+    import warnings
+
+    execution = _execution(tmp_path, monkeypatch, da_stubs, guards=["True"])
+    cache = sys.modules["docassemble.base.interview_cache"]
+    original = cache.get_interview
+
+    def get_interview(identity):
+        warnings.warn("library warning", UserWarning)
+        return original(identity)
+
+    monkeypatch.setattr(cache, "get_interview", get_interview)
+    with pytest.warns(UserWarning, match="library warning"):
+        outcome = execution.run(ExplainResolution("shared"))
+    assert not [item for item in outcome.diagnostics if item.kind == "compile-warning"]

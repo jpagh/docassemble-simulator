@@ -493,6 +493,18 @@ def _catalog_failure(request: _CatalogRequest, result):
 
 
 def _catalog_payload(request: _CatalogRequest):
+    from docassemble_simulator._diagnostics import capture_diagnostics, is_collecting
+
+    if request.command == "why" or is_collecting():
+        return _catalog_payload_impl(request)
+    with capture_diagnostics() as diagnostics:
+        built = _catalog_payload_impl(request)
+    if diagnostics:
+        built.envelope["diagnostics"] = _clean(diagnostics)
+    return built
+
+
+def _catalog_payload_impl(request: _CatalogRequest):
     """Build one read-only catalog command's envelope without emitting it.
 
     Shared by :func:`cmd_catalog` and the worker's catalog adapter so both
@@ -780,14 +792,20 @@ def _catalog_worker_request(worker, request, *, command):
     """Map one worker catalog request onto the shared catalog payload."""
     verb = _CATALOG_VERBS[command]
     fields = _catalog_worker_fields(verb, command, request)
-    built = _catalog_payload(
-        verb.request(
-            command,
-            catalog=lambda: _worker_catalog_source(worker),
-            execution=lambda: worker.execution,
-            **fields,
+    from docassemble_simulator._diagnostics import capture_diagnostics
+
+    with capture_diagnostics() as diagnostics:
+        built = _catalog_payload(
+            verb.request(
+                command,
+                catalog=lambda: _worker_catalog_source(worker),
+                execution=lambda: worker.execution,
+                **fields,
+            )
         )
-    )
+    if diagnostics:
+        built.envelope["diagnostics"] = _clean(diagnostics)
+
     return _catalog_worker_outcome(built.envelope)
 
 
