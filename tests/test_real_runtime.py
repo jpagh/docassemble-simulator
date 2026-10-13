@@ -4974,3 +4974,204 @@ def test_compile_warning_is_attributed_once_across_worker_operations(
     journey.close()
     assert "SyntaxWarning" not in journey.stderr_text()
     assert "invalid escape sequence" not in journey.stderr_text()
+
+
+NESTED_ROW_ACTIONS_FIXTURE = """\
+---
+modules:
+  - docassemble.AssemblyLine.al_general
+---
+objects:
+  - children: ALPeopleList.using(auto_gather=False)
+---
+mandatory: True
+code: |
+  initialized_rows
+  reviewed
+---
+code: |
+  parent = children.appendObject()
+  parent.name.first = "Ada"
+  parent.initializeAttribute("grandchildren", ALPeopleList, auto_gather=False)
+  parent.grandchildren.gathered = True
+  children.gathered = True
+  initialized_rows = True
+---
+question: Review family
+subquestion: |
+  ${ children_table }
+
+  ${ children[0].grandchildren_table }
+
+  ${ children[0].grandchildren.add_action() }
+continue button field: reviewed
+---
+table: children_table
+rows: children
+columns:
+  - Name: row_item.name.first
+edit:
+  - name.first
+---
+generic object: ALIndividual
+table: x.grandchildren_table
+rows: x.grandchildren
+columns:
+  - Name: row_item.name.first
+edit:
+  - name.first
+---
+question: Edit child
+fields:
+  - First name: children[i].name.first
+---
+generic object: ALIndividual
+question: Edit grandchild
+fields:
+  - First name: x.name.first
+---
+code: |
+  children[i].complete = children[i].name.first
+---
+generic object: ALIndividual
+code: |
+  x.complete = x.name.first
+---
+generic object: ALIndividual
+code: |
+  x.grandchildren.gathered = True
+"""
+
+
+def test_edit_and_nested_row_actions_across_families(
+    family_python, real_workspace, monkeypatch
+):
+    """Native table edit and nested ALPeopleList add/edit use either transport."""
+    from docassemble_simulator import SimulatorRunner
+
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+    _assert_family_interpreter(family_python)
+    interpreter = family_python.interpreter
+    root = real_workspace
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "nested_row_actions.yml").write_text(NESTED_ROW_ACTIONS_FIXTURE)
+
+    def run(*arguments, **options):
+        return _run(
+            interpreter,
+            root,
+            "--interview",
+            "nested_row_actions.yml",
+            *arguments,
+            **options,
+        )
+
+    started = run("start")["result"]
+    assert started["row_actions"] == [
+        {"kind": "edit", "target": "children", "row": 0},
+        {"kind": "delete", "target": "children", "row": 0},
+        {"kind": "add", "target": "children[0].grandchildren"},
+    ]
+    child_edit = run("row-action", "edit", "children", "--row", "0")["result"]
+    assert child_edit["question_text"] == "Edit child"
+    assert child_edit["orig_sought"] == "children[0].name.first"
+    pending = run(
+        "eval",
+        "[(item['action'], item['arguments']) for item in _internal['event_stack']['dasimulator']]",
+    )["result"]["value"]
+    rejected_answer = run("answer", "children[0].name.first=", expected_code=2)
+    assert rejected_answer["error"]["kind"] == "validation"
+    assert (
+        run(
+            "eval",
+            "[(item['action'], item['arguments']) for item in _internal['event_stack']['dasimulator']]",
+        )["result"]["value"]
+        == pending
+    )
+    assert run("status")["result"] == child_edit
+    assert (
+        run("answer", "children[0].name.first=Grace")["result"]["question_text"]
+        == "Review family"
+    )
+    added = run("row-action", "add", "children[0].grandchildren")["result"]
+    assert added["question_text"] == "Edit grandchild"
+    assert added["orig_sought"] == "children[0].grandchildren[0].name.first"
+    reviewed = run("answer", "children[0].grandchildren[0].name.first=Lin")["result"]
+    assert {
+        "kind": "edit",
+        "target": "children[0].grandchildren",
+        "row": 0,
+    } in reviewed["row_actions"]
+    edited = run("row-action", "edit", "children[0].grandchildren", "--row", "0")[
+        "result"
+    ]
+    assert edited["question_text"] == "Edit grandchild"
+    assert edited["orig_sought"] == "children[0].grandchildren[0].name.first"
+    run("answer", "children[0].grandchildren[0].name.first=Lee")
+    saved = run("status")["result"]
+    rejected = run(
+        "row-action", "edit", "children[0].grandchildren", "--row", "1", expected_code=2
+    )
+    assert rejected["error"]["kind"] == "answer-input"
+    assert run("status")["result"] == saved
+    assert (
+        run("eval", "children[0].grandchildren[0].name.first")["result"]["value"]
+        == "'Lee'"
+    )
+
+    def screen_facts(screen):
+        return {
+            key: screen.get(key)
+            for key in (
+                "kind",
+                "question_text",
+                "sought",
+                "orig_sought",
+                "fields",
+                "row_actions",
+            )
+        }
+
+    with SimulatorRunner(
+        root,
+        interview="nested_row_actions.yml",
+        python=interpreter,
+        isolate=False,
+        offline=True,
+        timeout=30,
+    ) as runner:
+        assert runner.start().ok
+        assert screen_facts(
+            runner.row_action("edit", "children", row=0).result
+        ) == screen_facts(child_edit)
+        pending = runner.evaluate(
+            "[(item['action'], item['arguments']) for item in _internal['event_stack']['dasimulator']]"
+        ).result["value"]
+        assert not runner.answer({"children[0].name.first": ""}).ok
+        assert (
+            runner.evaluate(
+                "[(item['action'], item['arguments']) for item in _internal['event_stack']['dasimulator']]"
+            ).result["value"]
+            == pending
+        )
+        assert runner.status().result["question_text"] == "Edit child"
+        assert (
+            runner.answer({"children[0].name.first": "Grace"}).result["question_text"]
+            == "Review family"
+        )
+        assert screen_facts(
+            runner.row_action("add", "children[0].grandchildren").result
+        ) == screen_facts(added)
+        assert runner.answer({"children[0].grandchildren[0].name.first": "Lin"}).ok
+        assert screen_facts(
+            runner.row_action("edit", "children[0].grandchildren", row=0).result
+        ) == screen_facts(edited)
+        assert runner.answer({"children[0].grandchildren[0].name.first": "Lee"}).ok
+        before = runner.status().result
+        assert not runner.row_action("edit", "children[0].grandchildren", row=1).ok
+        assert runner.status().result == before
+        assert (
+            runner.evaluate("children[0].grandchildren[0].name.first").result["value"]
+            == "'Lee'"
+        )

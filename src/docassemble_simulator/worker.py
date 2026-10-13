@@ -181,9 +181,9 @@ def operation_from_request(request: dict[str, Any]):
             request.get("target"),
             request.get("row"),
         )
-        if kind not in ("add", "delete") or not isinstance(target, str):
+        if kind not in ("add", "delete", "edit") or not isinstance(target, str):
             raise WorkerProtocolError(
-                "row-action requires kind add/delete and a target"
+                "row-action requires kind add/delete/edit and a target"
             )
         if row is not None and type(row) is not int:
             raise WorkerProtocolError("row-action row must be an integer")

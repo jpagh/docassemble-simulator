@@ -2391,7 +2391,7 @@ def build_parser():
     row_action = add(
         "row-action", help="press an add or delete control on the saved screen"
     )
-    row_action.add_argument("kind", choices=("add", "delete"))
+    row_action.add_argument("kind", choices=("add", "delete", "edit"))
     row_action.add_argument("target")
     row_action.add_argument("--row", type=int)
     row_action.set_defaults(func=cmd_execution)

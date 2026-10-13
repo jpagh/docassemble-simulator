@@ -373,7 +373,7 @@ def _screen_variable_context(variable: str | None):
         yield
 
 
-def _row_actions(result: dict) -> list[dict[str, Any]]:
+def rendered_row_controls(result: dict) -> list[tuple[dict[str, Any], dict]]:
     """Decode rendered browser controls, including table item_actions links."""
     actions = []
     for key in ("question_text", "subquestion_text"):
@@ -384,16 +384,40 @@ def _row_actions(result: dict) -> list[dict[str, Any]]:
                 payload = json.loads(
                     base64.b64decode(encoded + "=" * (-len(encoded) % 4))
                 )
-                kind = {"_da_list_add": "add", "_da_list_remove": "delete"}.get(
-                    payload.get("action")
-                )
+                kind = {
+                    "_da_list_add": "add",
+                    "_da_list_remove": "delete",
+                    "_da_list_edit": "edit",
+                }.get(payload.get("action"))
                 arguments = payload.get("arguments", {})
                 target = arguments.get("list")
-                # Generic-object and nested rows are a separate capability (#63).
+                row = None
+                if kind == "edit":
+                    follow_up = arguments["items"][0]["follow up"][0]
+                    match = re.fullmatch(
+                        r"([A-Za-z_]\w*(?:\[\d+\]|\.[A-Za-z_]\w*)*)\[(\d+)\](?:\.[A-Za-z_]\w*(?:\[\d+\]|\.[A-Za-z_]\w*)*)?",
+                        follow_up,
+                    )
+                    if match is None:
+                        continue
+                    target, row = match.group(1), int(match.group(2))
+                    # Completion names the actual list even when the edited
+                    # attribute itself contains indexed objects.
+                    for item in arguments["items"]:
+                        if item.get("action") == "_da_list_ensure_complete":
+                            target = item["arguments"]["group"]
+                            anchored = re.match(
+                                re.escape(target) + r"\[(\d+)\](?:\.|$)", follow_up
+                            )
+                            if anchored is None:
+                                raise ValueError("edit follow-up is outside its list")
+                            row = int(anchored.group(1))
+                            break
                 if (
                     kind is None
                     or not isinstance(target, str)
-                    or not target.isidentifier()
+                    or re.fullmatch(r"[A-Za-z_]\w*(?:\[\d+\]|\.[A-Za-z_]\w*)*", target)
+                    is None
                 ):
                     continue
                 action = {"kind": kind, "target": target}
@@ -402,18 +426,25 @@ def _row_actions(result: dict) -> list[dict[str, Any]]:
                     if row < 0 or str(row) != str(arguments["item"]):
                         continue
                     action["row"] = row
-                if action not in actions:
-                    actions.append(action)
+                if row is not None:
+                    action["row"] = row
+                if not any(fact == action for fact, _ in actions):
+                    actions.append((action, payload))
             except (
                 ValueError,
                 TypeError,
                 KeyError,
+                IndexError,
                 AttributeError,
                 binascii.Error,
                 UnicodeDecodeError,
             ):
                 continue
     return actions
+
+
+def _row_actions(result: dict) -> list[dict[str, Any]]:
+    return [fact for fact, _ in rendered_row_controls(result)]
 
 
 def describe_question_result(result: dict, user_dict: dict) -> dict:
