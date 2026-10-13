@@ -137,3 +137,97 @@ __all__ = [
     "record_seeking",
     "set_capture_enabled",
 ]
+
+
+_SEEN_COMPILE_WARNINGS: set[tuple[Any, ...]] = set()
+_PENDING_COMPILE_WARNINGS: dict[str, dict[tuple[Any, ...], Diagnostic]] = {}
+
+
+@contextmanager
+def capture_compile_warnings(interview: str):
+    """Attribute Python compiler warnings only from authored docassemble code.
+
+    The compiler uses synthetic filenames, so provenance comes from the active
+    parser question rather than treating that filename as an interview path.
+    All other warnings retain the caller's warning handler and filters.
+    """
+    import sys
+    import warnings
+
+    collected = _ACTIVE.get()
+    if collected is not None:
+        for key, event in _PENDING_COMPILE_WARNINGS.pop(interview, {}).items():
+            if key not in _SEEN_COMPILE_WARNINGS:
+                collected.append(event)
+                _SEEN_COMPILE_WARNINGS.add(key)
+
+    with warnings.catch_warnings():
+        previous = warnings.showwarning
+
+        def showwarning(message, category, filename, lineno, file=None, line=None):
+            question = None
+            if filename.startswith("<") and (
+                issubclass(category, SyntaxWarning)
+                or (
+                    issubclass(category, DeprecationWarning)
+                    and "invalid escape sequence" in str(message)
+                )
+            ):
+                frame = sys._getframe(1)
+                try:
+                    while frame is not None:
+                        if frame.f_globals.get("__name__") == "docassemble.base.parse":
+                            candidate = frame.f_locals.get(
+                                "question"
+                            ) or frame.f_locals.get("self")
+                            if getattr(candidate, "from_source", None) is not None:
+                                question = candidate
+                                break
+                        frame = frame.f_back
+                finally:
+                    del frame
+            if question is None:
+                previous(message, category, filename, lineno, file=file, line=line)
+                return
+            source = question.from_source
+            details = {
+                "interview": interview,
+                "source_file": str(getattr(source, "path", None) or interview),
+                "line": getattr(question, "line_number", None),
+                "question": str(
+                    getattr(question, "name", "")
+                    or (f"ID {question.id}" if getattr(question, "id", None) else "")
+                ),
+                "category": category.__name__,
+                "compile_filename": filename,
+                "compile_line": lineno,
+            }
+            text = str(message)[:1000]
+            key = (
+                interview,
+                getattr(source, "filepath", None),
+                *details.values(),
+                text,
+            )
+            collected = _ACTIVE.get()
+            if collected is None and key not in _SEEN_COMPILE_WARNINGS:
+                pending = _PENDING_COMPILE_WARNINGS.setdefault(interview, {})
+                if len(pending) < 20:
+                    pending[key] = Diagnostic("compile-warning", text, details)
+            if (
+                collected is not None
+                and key not in _SEEN_COMPILE_WARNINGS
+                and sum(event.kind == "compile-warning" for event in collected) < 20
+            ):
+                collected.append(Diagnostic("compile-warning", text, details))
+                _SEEN_COMPILE_WARNINGS.add(key)
+
+        warnings.showwarning = showwarning
+        warnings.filterwarnings("always", category=SyntaxWarning, module=r"^<")
+        warnings.filterwarnings(
+            "always",
+            message=".*invalid escape sequence.*",
+            category=DeprecationWarning,
+            module=r"^<",
+        )
+        yield

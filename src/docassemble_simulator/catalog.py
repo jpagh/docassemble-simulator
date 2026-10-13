@@ -444,6 +444,8 @@ class InterviewCatalog:
         would otherwise surface as an authored-looking label error. Authored
         parse errors after a passing probe keep their compile-error behavior.
         """
+        from docassemble_simulator._diagnostics import capture_compile_warnings
+
         selected = identity or self.identity
         failure = self._compile_failure
         if failure is not None and failure.identity == selected:
@@ -466,7 +468,7 @@ class InterviewCatalog:
         saved_argv = list(sys.argv)
         sys.argv[:] = ["docassemble-simulator", selected]
         try:
-            with runtime_context():
+            with runtime_context(), capture_compile_warnings(selected):
                 interview = get_interview(selected)
         finally:
             sys.argv[:] = saved_argv

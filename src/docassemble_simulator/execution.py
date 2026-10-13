@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 from docassemble_simulator._artifacts import capture_published_attachments
 from docassemble_simulator._diagnostics import (
+    capture_compile_warnings,
     capture_diagnostics,
     is_capture_enabled,
     record_culprit,
@@ -528,6 +529,7 @@ class InterviewExecution:
     def run(self, operation: Operation) -> ExecutionOutcome:
         with (
             capture_diagnostics() as diagnostics,
+            capture_compile_warnings(self._identity),
             capture_published_attachments() as attachments,
         ):
             try:
@@ -1083,6 +1085,7 @@ class InterviewExecution:
         """Invoke render's private action while prepared context remains active."""
         with (
             capture_diagnostics() as diagnostics,
+            capture_compile_warnings(self._identity),
             capture_published_attachments() as attachments,
         ):
             outcome = self._with_render_state_impl(preparation, action)

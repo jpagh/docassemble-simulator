@@ -4492,3 +4492,43 @@ def test_watch_set_covers_features_only_document(family_python, tmp_path):
     assert observed["start_ok"] and observed["refresh_ok"], (label, observed)
     assert observed["compiled"] is True, (label, observed)
     assert observed["reloaded"] is True, (label, observed)
+
+
+def test_compile_warning_is_attributed_once_across_worker_operations(
+    family_python, real_workspace, worker_journey
+):
+    case = family_python
+    _assert_family_interpreter(case)
+    root = real_workspace
+    source = (
+        root
+        / "docassemble"
+        / "regression"
+        / "data"
+        / "questions"
+        / "compile_warning.yml"
+    )
+    source.write_text(
+        "---\nmandatory: True\ncode: |\n  value\n"
+        "---\nid: warning-field\nquestion: Value\nfields:\n  - Value: value\n"
+        'validation code: |\n  pattern = "\\q"\n'
+    )
+    interview = "docassemble.regression:data/questions/compile_warning.yml"
+    journey = worker_journey(
+        case.interpreter, root, family=case.probe, interview=interview
+    )
+    first = journey.start()
+    second = journey.request("refresh")
+    assert first["ok"] and second["ok"], (case.label, first, second)
+    diagnostics = first.get("diagnostics", []) + second.get("diagnostics", [])
+    warnings = [item for item in diagnostics if item["kind"] == "compile-warning"]
+    assert len(warnings) == 1, (case.label, diagnostics)
+    details = warnings[0]["details"]
+    assert details["interview"] == interview
+    assert details["source_file"] == interview
+    assert details["line"] > 0
+    assert details["question"] == "ID warning-field"
+    assert details["compile_filename"].startswith("<validation code")
+    journey.close()
+    assert "SyntaxWarning" not in journey.stderr_text()
+    assert "invalid escape sequence" not in journey.stderr_text()
