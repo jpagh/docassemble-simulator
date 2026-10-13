@@ -2914,6 +2914,71 @@ def test_review_continue_button_field_is_answerable(family_python, real_workspac
     assert defaults["result"]["question_text"] == "Done", (label, defaults["result"])
 
 
+def test_fields_continue_button_submits_framework_consent(
+    family_python, real_workspace
+):
+    """Whole-screen submission presses Continue; partial input does not (#59)."""
+    case = family_python
+    label, interpreter = case.label, case.interpreter
+    root = real_workspace
+    _assert_family_interpreter(case)
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "consent-continue.yml").write_text(
+        "---\n"
+        "mandatory: True\n"
+        "code: |\n"
+        "  consent_ok\n"
+        "---\n"
+        "id: framework consent\n"
+        "question: Consent\n"
+        "fields:\n"
+        "  - note: Please agree before continuing.\n"
+        "  - I agree: consent\n"
+        "    datatype: yesno\n"
+        "    default: True\n"
+        "continue button field: consent_ok\n"
+        "validation code: |\n"
+        "  if not consent:\n"
+        "    validation_error('You must agree.')\n"
+        "---\n"
+        "mandatory: True\n"
+        "question: Done\n"
+    )
+
+    def run(*args):
+        return _run(interpreter, root, *args, "--interview", "consent-continue.yml")
+
+    started = run("start")
+    assert started["ok"], (label, started)
+    assert started["result"]["fields"][-1] == {
+        "variable": "consent_ok",
+        "type": "settrue",
+        "visible": True,
+        "required": False,
+        "example": "consent_ok=True",
+    }, (label, started)
+
+    partial = run("answer", "consent=true", "--partial")
+    assert partial["ok"], (label, partial)
+    assert partial["result"]["question_text"] == "Consent", (label, partial)
+    undefined = run("eval", "'consent_ok' in locals()")
+    assert undefined["ok"], (label, undefined)
+    assert undefined["result"]["value"] == "False", (label, undefined)
+    explicit = run("answer", "consent_ok=true")
+    assert explicit["ok"], (label, explicit)
+    assert explicit["result"]["question_text"] == "Done", (label, explicit)
+
+    assert run("start")["ok"], label
+    ordinary = run("answer", "consent=true")
+    assert ordinary["ok"], (label, ordinary)
+    assert ordinary["result"]["question_text"] == "Done", (label, ordinary)
+
+    assert run("start")["ok"], label
+    defaults = run("answer", "--defaults")
+    assert defaults["ok"], (label, defaults)
+    assert defaults["result"]["question_text"] == "Done", (label, defaults)
+
+
 def test_real_date_answer_formats_and_rejections_roll_back(
     family_python, real_workspace
 ):

@@ -453,25 +453,21 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
                 if note:
                     entry["visibility_note"] = note
                 out["fields"].append(entry)
+        _append_continue_field(out["fields"], getattr(question, "fields_saveas", None))
         return out
     if qtype == "signature":
         fields = describe_fields(question, user_dict)
         for f in fields:
             f["type"] = "signature"
         out["fields"] = fields
+        _append_continue_field(out["fields"], getattr(question, "fields_saveas", None))
         return out
     with _screen_variable_context(result.get("sought") or result.get("orig_sought")):
         out["fields"] = describe_fields(
             question, user_dict, result.get("selectcompute") or {}
         )
-    review_saveas = getattr(question, "review_saveas", None)
-    if (
-        qtype == "review"
-        and isinstance(review_saveas, str)
-        and review_saveas
-        and not any(field.get("variable") == review_saveas for field in out["fields"])
-    ):
-        out["fields"].append(_review_continue_field(review_saveas))
+    if qtype == "review":
+        _append_continue_field(out["fields"], getattr(question, "review_saveas", None))
     # A ``fields: code`` block can compile as an answerable screen while its
     # browser fields are constructed by authored code at runtime. Do not
     # invent those controls: label the honest boundary so a project runner can
@@ -482,17 +478,27 @@ def describe_question_result(result: dict, user_dict: dict) -> dict:
     else:
         out["dynamic_fields"] = False
         out["field_source"] = "compiled"
+    _append_continue_field(out["fields"], getattr(question, "fields_saveas", None))
     return out
 
 
-def _review_continue_field(variable: str) -> dict[str, Any]:
-    """The review Continue button as an answerable field.
+def _append_continue_field(fields: list[dict[str, Any]], variable: Any) -> None:
+    if (
+        isinstance(variable, str)
+        and variable
+        and not any(field.get("variable") == variable for field in fields)
+    ):
+        fields.append(_continue_field(variable))
 
-    docassemble compiles a review's ``continue button field`` into
-    ``Question.review_saveas`` and renders it as
-    ``<button name="..." value="True">`` rather than a ``Field``, so no field
-    facts describe it. The browser posts the button as ``True``; model that
-    value so ``answer`` can press Continue and ``--defaults`` can advance.
+
+def _continue_field(variable: str) -> dict[str, Any]:
+    """The Continue button as an answerable field.
+
+    docassemble compiles ``continue button field`` into
+    ``Question.fields_saveas`` (or ``review_saveas`` for reviews). The formatter
+    posts it as ``True`` via a named button or a hidden input, rather than a
+    compiled ``Field``. Model that value so whole-screen ``answer`` and
+    ``--defaults`` press Continue; ``--partial`` only applies explicit input.
     """
     return {
         "variable": variable,
