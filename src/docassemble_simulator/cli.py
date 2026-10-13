@@ -2389,7 +2389,7 @@ def build_parser():
         )
     ).set_defaults(func=cmd_execution)
     row_action = add(
-        "row-action", help="press an add or delete control on the saved screen"
+        "row-action", help="press an add, delete, or edit control on the saved screen"
     )
     row_action.add_argument("kind", choices=("add", "delete", "edit"))
     row_action.add_argument("target")

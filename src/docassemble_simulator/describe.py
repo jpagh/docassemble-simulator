@@ -7,9 +7,12 @@ import base64
 import binascii
 import json
 import logging
+import marshal
+import math
 import re
 from contextlib import contextmanager
 from html import unescape
+from types import CodeType, SimpleNamespace
 from typing import Any
 from urllib.parse import unquote
 
@@ -64,7 +67,9 @@ def _text_of(obj: Any, user_dict: dict) -> Any:
         return repr(obj)
 
 
-def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]:
+def field_visible(
+    field: Any, user_dict: dict, *, submission: bool = False
+) -> tuple[bool | None, str | None]:
     """Evaluate a field's show/hide condition exactly like Question.ask() does.
 
     Two compiled forms exist:
@@ -96,6 +101,10 @@ def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]
             LookupError,
             OSError,
         ) as err:
+            if submission and isinstance(
+                err, (NameError, AttributeError, KeyError, IndexError)
+            ):
+                return False, None
             return None, f"show-if not evaluable ({type(err).__name__}: {err})"
         # show_if_sign_code == 0 marks a "hide if" condition.
         return ((not result) if sign0 else result), None
@@ -117,6 +126,10 @@ def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]
             LookupError,
             OSError,
         ) as err:
+            if submission and isinstance(
+                err, (NameError, AttributeError, KeyError, IndexError)
+            ):
+                return False, None
             return None, f"show-if not evaluable ({type(err).__name__}: {err})"
         if "show_if_val" in extras:
             target = _text_of(extras["show_if_val"], user_dict)
@@ -127,6 +140,17 @@ def field_visible(field: Any, user_dict: dict) -> tuple[bool | None, str | None]
         return ((not equal) if hide else equal), None
 
     return True, None
+
+
+def described_field_visible(field: dict, user_dict: dict):
+    """Re-evaluate the captured control, never its authored fields-code expansion."""
+    visibility = dict(field["visibility"])
+    code = visibility.pop("code", None)
+    if code is not None:
+        code = marshal.loads(base64.b64decode(code))
+    return field_visible(
+        SimpleNamespace(showif_code=code, extras=visibility), user_dict, submission=True
+    )
 
 
 def field_required(field: Any, user_dict: dict) -> bool:
@@ -213,13 +237,32 @@ def describe_field(
         out["label"] = rendered
 
     visible, note = field_visible(field, user_dict)
+    required = field_required(field, user_dict)
     out["visible"] = visible
+    extras = getattr(field, "extras", {}) or {}
+    code = getattr(field, "showif_code", None)
+    if code is not None or "show_if_var" in extras:
+        # Compiled expressions have no recoverable source. Sessions already
+        # require the same Python runtime; marshal preserves the ask-time code.
+        visibility = {
+            key: value
+            for key, value in extras.items()
+            if key in {"show_if_var", "show_if_sign", "show_if_sign_code"}
+        }
+        if "show_if_val" in extras:
+            visibility["show_if_val"] = _text_of(extras["show_if_val"], user_dict)
+        if code is not None:
+            if not isinstance(code, CodeType):
+                code = compile(code, "<show if>", "eval")
+            visibility["code"] = base64.b64encode(marshal.dumps(code)).decode("ascii")
+        out["visibility"] = visibility
+        out["submission_required"] = required
     if note:
         out["visibility_note"] = note
     if visible is False:
         out["required"] = False  # hidden fields cannot be answered
     else:
-        out["required"] = field_required(field, user_dict)
+        out["required"] = required
 
     choices = describe_choices(field, user_dict, choices=choices)
     if choices:
@@ -603,6 +646,8 @@ def describe_fields(
                     described.pop("visibility_note", None)
                 if number in (extras.get("required") or {}):
                     described["required"] = bool(extras["required"][number])
+                    if "visibility" in described:
+                        described["submission_required"] = described["required"]
                 if described["visible"] is False:
                     described["required"] = False
                 if number in (ask_result.get("defaults") or {}):
@@ -631,6 +676,21 @@ def describe_fields(
                 values = (extras or {}).get(key) or {}
                 if number in values:
                     value = values[number]
+                    if key in {
+                        "min",
+                        "max",
+                        "step",
+                        "minlength",
+                        "maxlength",
+                    } and isinstance(value, str):
+                        try:
+                            numeric = float(value)
+                            if math.isfinite(numeric):
+                                value = (
+                                    int(numeric) if numeric.is_integer() else numeric
+                                )
+                        except ValueError:
+                            pass
                     constraints[key] = (
                         value
                         if isinstance(value, (str, int, float, bool, dict, list))
@@ -639,6 +699,15 @@ def describe_fields(
                     )
             if constraints:
                 described["constraints"] = constraints
+            custom_parameters = (getattr(field, "extras", {}) or {}).get(
+                "custom_parameters"
+            )
+            if custom_parameters:
+                described["custom_parameters"] = custom_parameters
+            for key in ("custom_parameters_code", "custom_parameters_mako"):
+                parameters = (extras.get(key) or {}).get(number)
+                if parameters:
+                    described[key] = parameters
         except (
             ValueError,
             TypeError,

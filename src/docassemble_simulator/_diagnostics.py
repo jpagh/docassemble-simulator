@@ -203,10 +203,15 @@ def capture_compile_warnings(interview: str):
                 "compile_line": lineno,
             }
             text = str(message)[:1000]
+            # Recompiles and AST scans can use another filepath or <unknown>;
+            # warning identity belongs to the authored block, not that wrapper.
             key = (
                 interview,
-                getattr(source, "filepath", None),
-                *details.values(),
+                details["source_file"],
+                details["line"],
+                details["question"],
+                details["category"],
+                details["compile_line"],
                 text,
             )
             collected = _ACTIVE.get()

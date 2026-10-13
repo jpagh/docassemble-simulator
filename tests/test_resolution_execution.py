@@ -150,18 +150,26 @@ def test_resolution_explanation_prepares_saved_state_without_committing(
 def test_compile_warning_is_attributed_once_across_operations(
     tmp_path, monkeypatch, da_stubs, capsys, refresh_before_operation
 ):
+    monkeypatch.setattr(
+        "docassemble_simulator._diagnostics._SEEN_COMPILE_WARNINGS", set()
+    )
     execution = _execution(tmp_path, monkeypatch, da_stubs, guards=["True"])
     cache = sys.modules["docassemble.base.interview_cache"]
     original = cache.get_interview
     parse = sys.modules["docassemble.base.parse"]
     exec(  # noqa: S102 - controlled compiler double with real warning frames
         "def compile_validation(self):\n"
-        "    compile(\"value = '\\\\q'\", '<validate code>', 'exec')\n",
+        "    compile(\"value = '\\\\q'\", getattr(self, 'compile_filename', '<validate code>'), 'exec')\n",
         parse.__dict__,
     )
     question = _question(tmp_path / "main.yml", identifier="warning", guard="True")
 
     def get_interview(identity):
+        # Prepared source files can be recreated at a different physical path.
+        question.from_source.filepath += ".recompiled"
+        question.compile_filename = (
+            "<unknown>" if hasattr(question, "compile_filename") else "<validate code>"
+        )
         parse.compile_validation(question)
         return original(identity)
 

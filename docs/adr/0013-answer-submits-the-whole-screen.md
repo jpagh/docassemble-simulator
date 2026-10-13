@@ -40,11 +40,18 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
 
   **Amendment (issue #58).** The simulator still deliberately leaves omitted
   hidden fields undefined rather than synthesizing their posted blank values.
-  Visibility is now evaluated against the submitted namespace after explicit
-  assignments and rendered defaults, before blank synthesis and the required
-  gate. This mirrors show-if interaction and jQuery Validate's default
+  Visibility is evaluated after explicit assignments, then omitted rendered
+  defaults are resolved against that visibility. Defaults may reveal further
+  defaults or hide earlier ones: visibility and defaults settle in at most
+  twice the field count plus one rounds, rejecting an unstable cycle without
+  saving. Defaults applied in this operation are removed if their fields become
+  hidden; explicit assignments and pre-existing values are never removed.
+  Blank synthesis and the required gate use the settled visibility. This mirrors show-if interaction and jQuery Validate's default
   `ignore: ":hidden"`: a field hidden by the current submission is not required.
-  Fields that remain visible keep their described requiredness; computed
+  An undefined show-if controller hides its dependents at submission; other
+  evaluation errors remain conservative. Generated controls retain their
+  ask-time visibility expressions without re-running authored expansion.
+  Fields that remain visible keep their ask-time requiredness; computed
   requiredness is not re-evaluated. Early input-rejection guidance uses the
   same updated visibility without committing attempted values. Explicitly
   supplied field assignments still take precedence, even when they hide a
@@ -94,7 +101,14 @@ empty inputs remain exempt, like jQuery Validate. Numeric text controls with
 an explicit step enforce jQuery's zero-based multiple rule, not an HTML
 number input's min-based step offset. Slider scale is a rendering mode, not a
 precision constraint; scale and slider step are recorded but not validated.
-Custom datatype parameters are recorded without inventing custom validation.
+Time and datetime controls do not receive lexical min/max checks: their
+text/widget inputs accept informal values for which string ordering is not a
+browser rule. Date controls retain calendar-date bounds. Registered custom
+datatypes receive their native validation/transform hooks with rendered
+constraints and resolved custom parameters. An explicitly submitted empty
+string still runs those hooks: webapp `views.py` only uses `skip_if_empty` /
+`empty()` when `set_to_empty` comes from `_empties`, not when `raw_data == ""`.
+No custom empty value is fabricated for omitted controls.
 `--no-validate` does not bypass this form gate; `--partial` bypasses it, retaining
 its existing authored-validation and required-warning semantics. `exec` is
 unchanged. Constraint facts are debug-only in trace comparison (ADR-0012).

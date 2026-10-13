@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shlex
 import signal
 import subprocess
@@ -4569,6 +4570,13 @@ def test_table_row_actions_across_families(family_python, real_workspace, monkey
             return {key: clean(item) for key, item in value.items() if item is not None}
         if isinstance(value, list):
             return [clean(item) for item in value]
+        if isinstance(value, str):
+            # Only delimiter rows: preserve text, cell content and alignment.
+            return re.sub(
+                r"(?m)^([ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-*:?[ \t]*\|?[ \t]*)$",
+                lambda match: re.sub(r"-+", "---", match.group()),
+                value,
+            )
         return value
 
     _assert_family_interpreter(family_python)
@@ -4684,17 +4692,17 @@ code: |
         offline=True,
         timeout=30,
     ) as runner:
-        assert clean(runner.start().result) == started["result"]
-        assert clean(runner.row_action("add", "people").result) == added["result"]
+        assert clean(runner.start().result) == clean(started["result"])
+        assert clean(runner.row_action("add", "people").result) == clean(
+            added["result"]
+        )
         # Native Markdown table-separator widths vary between processes;
         # that pre-existing rendering behavior is outside row-action parity.
-        assert (
-            runner.answer({"people[0].name": "Ada"}).result["row_actions"]
-            == answered["result"]["row_actions"]
+        assert clean(runner.answer({"people[0].name": "Ada"}).result) == clean(
+            answered["result"]
         )
-        assert (
-            clean(runner.row_action("delete", "people", row=0).result)
-            == deleted["result"]
+        assert clean(runner.row_action("delete", "people", row=0).result) == clean(
+            deleted["result"]
         )
         before = runner.status().result
         assert not runner.row_action("delete", "people", row=0).ok
@@ -4720,8 +4728,8 @@ fields:
   - C: c
     required: True
     show if:
-      code: not defined('a') or (a and (not defined('b') or b))
-sets: chain_screen
+      code: not defined('a') or (a and b)
+continue button field: chain_screen
 ---
 id: chain-finished
 event: finished
@@ -4799,7 +4807,7 @@ def test_custom_datatype_plain_answer_across_families(
         interpreter,
         root,
         "answer",
-        "custom_date=2020-01-02",
+        "custom_date=01/02/2020",
         "--interview",
         "custom-date.yml",
     )
@@ -4827,6 +4835,7 @@ def test_generic_fields_code_address_describes_and_accepts_sub_fields(
         "  home.zip_label = 'ZIP'\n  home.county_label = 'County'\n"
         "  home.address\n  address_done\n"
         "---\nid: generic address\ngeneric object: ALAddress\n"
+        "sets: [x.address, x.unit, x.city, x.state, x.zip, x.county]\n"
         "question: Address\nfields:\n"
         "  - code: x.address_fields(country_code='US', default_state='MA', show_county=True)\n"
         "---\nquestion: Done\nfield: address_done\n"

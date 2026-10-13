@@ -803,3 +803,417 @@ def test_constraints_still_apply_to_newly_visible_fields(answer_execution):
     assert not rejected.ok
     assert any("min" in error for error in rejected.error.details["errors"])
     assert session_bytes(execution) == before
+
+
+class GeneratedVisibilityInterview(FieldsCodeInterview):
+    def assemble(self, namespace, interview_status):
+        super().assemble(namespace, interview_status)
+        interview_status.extras = {
+            "sub_fields": {
+                0: [
+                    SimpleNamespace(
+                        number="0_0", saveas="show", datatype="boolean", required=True
+                    ),
+                    SimpleNamespace(
+                        number="0_1",
+                        saveas="dependent",
+                        datatype="text",
+                        required=True,
+                        showif_code=compile("show", "<show if>", "eval"),
+                    ),
+                    SimpleNamespace(
+                        number="0_2",
+                        saveas="amount",
+                        datatype="integer",
+                        required=False,
+                        showif_code=compile("show", "<show if>", "eval"),
+                    ),
+                ]
+            },
+            "min": {"0_2": 10},
+        }
+
+
+def test_generated_fields_follow_submission_visibility(answer_execution):
+    execution, selected = answer_execution
+    selected["interview"] = GeneratedVisibilityInterview
+    assert execution.run(Start()).ok
+    answered = execution.run(Answer((("show", "False"), ("amount", "1"))))
+    assert answered.ok, answered.error
+    assert (
+        execution.run(Evaluate("'dependent' in globals()")).result["value"] == "False"
+    )
+
+
+@pytest.mark.parametrize(
+    "initial, submitted, explicit, expected",
+    [
+        (True, False, False, "False"),
+        (False, True, False, "'prefilled'"),
+        (True, False, True, "'explicit'"),
+    ],
+)
+def test_rendered_defaults_use_submitted_visibility(
+    answer_execution, initial, submitted, explicit, expected
+):
+    class DefaultDependentInterview(ScreenInterview):
+        fields = (
+            SimpleNamespace(saveas="show", datatype="boolean", required=True),
+            SimpleNamespace(
+                saveas="dependent",
+                datatype="text",
+                required=True,
+                default="prefilled",
+                showif_code="show",
+            ),
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+        def assemble(self, namespace, interview_status):
+            namespace.setdefault("show", initial)
+            super().assemble(namespace, interview_status)
+
+    execution, selected = answer_execution
+    selected["interview"] = DefaultDependentInterview
+    assert execution.run(Start()).ok
+    assignments = [("show", str(submitted))]
+    if explicit:
+        assignments.append(("dependent", "explicit"))
+    answered = execution.run(Answer(tuple(assignments)))
+    assert answered.ok, answered.error
+    expression = "dependent" if submitted or explicit else "'dependent' in globals()"
+    assert execution.run(Evaluate(expression)).result["value"] == expected
+
+
+def test_default_reveals_further_rendered_default(answer_execution):
+    class DefaultChainInterview(ScreenInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="dependent",
+                datatype="text",
+                required=True,
+                default="prefilled",
+                showif_code="show",
+            ),
+            SimpleNamespace(
+                saveas="show", datatype="boolean", required=False, default="True"
+            ),
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+    execution, selected = answer_execution
+    selected["interview"] = DefaultChainInterview
+    assert execution.run(Start()).ok
+    answered = execution.run(Answer((), defaults=True))
+    assert answered.ok, answered.error
+    assert execution.run(Evaluate("dependent")).result["value"] == "'prefilled'"
+
+
+def test_custom_datatype_receives_rendered_constraints_and_parameters(
+    answer_execution, monkeypatch
+):
+    class CustomParametersInterview(CustomDateInterview):
+        fields = (
+            SimpleNamespace(
+                number=0,
+                saveas="custom_date",
+                datatype="RegisteredDate",
+                required=False,
+                extras={"custom_parameters": {"prefix": "configured"}},
+            ),
+        )
+
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.extras = {
+                "min": {0: 7},
+                "custom_parameters_code": {0: {"computed": 8}},
+                "custom_parameters_mako": {0: {"rendered": "nine"}},
+            }
+
+    class Hook:
+        @staticmethod
+        def call_validate(raw, variable, data):
+            return int(raw) >= data["min"]
+
+        @staticmethod
+        def call_transform(raw, variable, data):
+            return f"{data['prefix']}:{data['computed']}:{data['rendered']}:{raw}"
+
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "custom_types",
+        {"RegisteredDate": {"class": Hook}},
+        raising=False,
+    )
+    execution, selected = answer_execution
+    selected["interview"] = CustomParametersInterview
+    assert execution.run(Start()).ok
+    answered = execution.run(Answer((("custom_date", "7"),)))
+    assert answered.ok, answered.error
+    assert (
+        execution.run(Evaluate("custom_date")).result["value"]
+        == "'configured:8:nine:7'"
+    )
+    before = session_bytes(execution)
+    assert not execution.run(Answer((("custom_date", "6"),))).ok
+    assert session_bytes(execution) == before
+
+
+def test_explicit_custom_datatype_blank_uses_transform_not_empty(
+    answer_execution, monkeypatch
+):
+    class Hook:
+        @staticmethod
+        def empty():
+            pytest.fail("explicit text input is not a webapp _empties entry")
+
+        @staticmethod
+        def call_validate(raw, variable, data):
+            assert raw == ""
+            return True
+
+        @staticmethod
+        def call_transform(raw, variable, data):
+            assert raw == ""
+            return "transformed blank"
+
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "custom_types",
+        {"RegisteredDate": {"class": Hook, "skip_if_empty": True, "is_object": False}},
+        raising=False,
+    )
+    execution, selected = answer_execution
+    selected["interview"] = CustomDateInterview
+    assert execution.run(Start()).ok
+    assert execution.run(Answer((("custom_date", ""),))).ok
+    assert (
+        execution.run(Evaluate("custom_date")).result["value"] == "'transformed blank'"
+    )
+
+
+@pytest.mark.parametrize(
+    "datatype, default, expected",
+    [
+        ("integer", 7, "7"),
+        ("float", 7.5, "7.5"),
+        ("boolean", True, "True"),
+        ("text", "prefilled", "'prefilled'"),
+    ],
+)
+def test_generated_required_scalar_default_applies(
+    answer_execution, datatype, default, expected
+):
+    class GeneratedDefaultInterview(FieldsCodeInterview):
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.extras = {
+                "sub_fields": {
+                    0: [
+                        SimpleNamespace(
+                            number="0_0",
+                            saveas="value",
+                            datatype=datatype,
+                            required=True,
+                        )
+                    ]
+                }
+            }
+            interview_status.defaults = {"0_0": default}
+
+    execution, selected = answer_execution
+    selected["interview"] = GeneratedDefaultInterview
+    assert execution.run(Start()).ok
+    answered = execution.run(Answer((), defaults=True))
+    assert answered.ok, answered.error
+    assert execution.run(Evaluate("value")).result["value"] == expected
+
+
+@pytest.mark.parametrize(
+    "datatype, value, minimum, maximum",
+    [
+        ("time", "9:00 am", "08:00", "11:00"),
+        ("datetime", "January 2, 2026 9:00 am", "2026-01-01T08:00", "2026-01-03T11:00"),
+    ],
+)
+def test_text_time_controls_do_not_compare_bounds_lexically(
+    answer_execution, datatype, value, minimum, maximum
+):
+    class TimeInterview(ScreenInterview):
+        questions_by_name: ClassVar = {}
+        fields = (
+            SimpleNamespace(number=0, saveas="value", datatype=datatype, required=True),
+        )
+
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.extras = {"min": {0: minimum}, "max": {0: maximum}}
+
+    execution, selected = answer_execution
+    selected["interview"] = TimeInterview
+    assert execution.run(Start()).ok
+    answered = execution.run(Answer((("value", value),)))
+    assert answered.ok, answered.error
+
+
+def test_failed_post_edit_assembly_preserves_saved_stack(answer_execution, monkeypatch):
+    from docassemble.base.functions import this_thread
+
+    from docassemble_simulator.execution import RowAction, Status
+
+    class FailingEditInterview(ForcedEditInterview):
+        def assemble(self, namespace, interview_status):
+            if namespace.get("name") == "Ada":
+                raise ValueError("post-edit assembly failed")
+            super().assemble(namespace, interview_status)
+
+    def native_pop(variable):
+        stack = this_thread.current_dict["_internal"]["event_stack"]["dasimulator"]
+        if stack and stack[0]["action"] == variable:
+            stack.pop(0)
+
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "pop_event_stack",
+        native_pop,
+        raising=False,
+    )
+    execution, selected = answer_execution
+    selected["interview"] = FailingEditInterview
+    assert execution.run(Start()).ok
+    assert execution.run(RowAction("edit", "people", 0)).ok
+    before = session_bytes(execution)
+    saved = execution.run(Status()).result
+    failed = execution.run(Answer((("name", "Ada"),)))
+    assert not failed.ok
+    assert "post-edit assembly failed" in failed.error.message
+    assert session_bytes(execution) == before
+    assert execution.run(Status()).result == saved
+    assert (
+        execution.run(Evaluate("_internal['event_stack']['dasimulator']")).result[
+            "value"
+        ]
+        == "[{'action': 'name', 'arguments': {}}]"
+    )
+
+
+def test_undefined_controller_cascade_is_hidden_at_submission(answer_execution):
+    class RequiredChainInterview(ShowIfChainInterview):
+        fields = (
+            ShowIfChainInterview.fields[0],
+            ShowIfChainInterview.fields[1],
+            SimpleNamespace(
+                saveas="c", datatype="text", required=True, showif_code="b"
+            ),
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+    execution, selected = answer_execution
+    selected["interview"] = RequiredChainInterview
+    started = execution.run(Start())
+    assert started.ok
+    assert started.result["fields"][2]["visible"] is None
+    rejected = execution.run(Answer((("a", "True"),)))
+    assert not rejected.ok
+    assert rejected.error.details["missing_required"] == ["b"]
+
+
+def test_rendered_numeric_constraints_have_one_shape(answer_execution):
+    class StringConstraintsInterview(ScreenInterview):
+        questions_by_name: ClassVar = {}
+        fields = (
+            SimpleNamespace(
+                number=0, saveas="amount", datatype="number", required=True
+            ),
+        )
+
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.extras = {
+                key: {0: value}
+                for key, value in {
+                    "min": "2",
+                    "max": "10.5",
+                    "step": "0.5",
+                    "minlength": "2",
+                    "maxlength": "4",
+                    "scale": "2",
+                    "currency symbol": "$",
+                    "field metadata": {"key": "value"},
+                }.items()
+            }
+
+    execution, selected = answer_execution
+    selected["interview"] = StringConstraintsInterview
+    started = execution.run(Start())
+    assert started.ok
+    assert started.result["fields"][0]["constraints"] == {
+        "min": 2,
+        "max": 10.5,
+        "step": 0.5,
+        "minlength": 2,
+        "maxlength": 4,
+        "scale": "2",
+        "currency symbol": "$",
+        "field metadata": {"key": "value"},
+    }
+
+
+def test_default_that_hides_an_earlier_default_leaves_it_undefined(answer_execution):
+    class HidingDefaultInterview(ScreenInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="dependent",
+                datatype="text",
+                required=True,
+                default="prefilled",
+                showif_code="globals().get('show', True)",
+            ),
+            SimpleNamespace(
+                saveas="show", datatype="boolean", required=False, default="False"
+            ),
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+    execution, selected = answer_execution
+    selected["interview"] = HidingDefaultInterview
+    assert execution.run(Start()).ok
+    assert execution.run(Answer((), defaults=True)).ok
+    assert (
+        execution.run(Evaluate("'dependent' in globals()")).result["value"] == "False"
+    )
+
+
+def test_default_visibility_cycle_rejects_without_saving(answer_execution):
+    class CyclicDefaultInterview(ScreenInterview):
+        fields = (
+            SimpleNamespace(
+                saveas="value",
+                datatype="boolean",
+                required=False,
+                default="False",
+                showif_code="globals().get('value', True)",
+            ),
+        )
+        questions_by_name: ClassVar = {
+            "answer-contract": SimpleNamespace(fields=fields)
+        }
+
+    execution, selected = answer_execution
+    selected["interview"] = CyclicDefaultInterview
+    assert execution.run(Start()).ok
+    before = session_bytes(execution)
+    rejected = execution.run(Answer((), defaults=True))
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    assert "unstable visibility" in rejected.error.message
+    assert session_bytes(execution) == before
