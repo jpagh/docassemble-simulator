@@ -52,6 +52,7 @@ from docassemble_simulator.compatibility import (
 from docassemble_simulator.describe import (
     describe_question_result,
     describe_seeking,
+    described_field_visible,
     field_variable,
     field_visible,
     rendered_row_controls,
@@ -862,11 +863,12 @@ class InterviewExecution:
                 .get("event_stack", {})
                 .get(status.current_info["user"]["session_uid"], [])
             )
-            if (
+            advanced_forced_action = bool(
                 screen.get("orig_sought")
                 and pending
                 and pending[0].get("action") == screen["orig_sought"]
-            ):
+            )
+            if advanced_forced_action:
                 from docassemble.base.functions import pop_event_stack
 
                 # The browser advances the forced action only after accepting
@@ -877,7 +879,8 @@ class InterviewExecution:
             outcome["assignments"] = dispositions
         if validation["warnings"]:
             outcome["warnings"] = validation["warnings"]
-        self._store.save(namespace, outcome)
+        if not (advanced_forced_action and outcome.get("kind") == "error"):
+            self._store.save(namespace, outcome)
         return outcome
 
     def _seek_operation(self, operation: Seek):
@@ -2157,29 +2160,57 @@ def _submission_screen(interview, namespace, screen):
     for described in screen.get("fields") or []:
         field = dict(described)
         source = compiled.get(field.get("variable"))
-        if source is not None:
-            field["visible"], _note = field_visible(source, namespace)
+        if "visibility" in field:
+            field["visible"], _note = described_field_visible(field, namespace)
+        elif source is not None:
+            field["visible"], _note = field_visible(source, namespace, submission=True)
+        if "submission_required" in field:
+            field["required"] = field["submission_required"]
         fields.append(field)
     return {**screen, "fields": fields}
 
 
-def _apply_rendered_defaults(namespace, screen):
-    """Apply prefilled values before evaluating submission-time visibility."""
-    for variable, default, _required, field in _blankable_fields(namespace, screen):
-        if default is not None and str(field.get("type", "")).lower() != "signature":
-            errors = _apply_assignments(
-                namespace, screen, ((variable, default),), False
-            )
-            if errors:
-                logger.debug(
-                    "field default %r could not be applied: %s", variable, errors
+def _apply_rendered_defaults(namespace, screen, interview):
+    """Resolve omitted defaults against submitted visibility, with a finite bound."""
+    applied = set()
+    targets = _screen_field_targets(screen)
+    for _round in range(2 * len(screen.get("fields") or []) + 1):
+        current = _submission_screen(interview, namespace, screen)
+        changed = False
+        for field in current.get("fields") or []:
+            variable = field.get("variable")
+            if variable in applied and field.get("visible") is False:
+                _exec_in_namespace(namespace, f"del {targets.get(variable, variable)}")
+                applied.remove(variable)
+                changed = True
+        current = _submission_screen(interview, namespace, screen)
+        for variable, default, _required, field in _blankable_fields(
+            namespace, current
+        ):
+            if (
+                default is not None
+                and str(field.get("type", "")).lower() != "signature"
+            ):
+                errors = _apply_assignments(
+                    namespace, screen, ((variable, default),), False
                 )
+                if not errors:
+                    applied.add(variable)
+                    changed = True
+                else:
+                    logger.debug(
+                        "field default %r could not be applied: %s", variable, errors
+                    )
+        if not changed:
+            return current
+    raise ExecutionFailure(
+        ErrorKind.VALIDATION, "rendered defaults have unstable visibility"
+    )
 
 
 def _early_rejection_required_guidance(namespace, screen, blank_submissions, interview):
     """Assess valid assignments and defaults without validation or blank synthesis."""
-    _apply_rendered_defaults(namespace, screen)
-    screen = _submission_screen(interview, namespace, screen)
+    screen = _apply_rendered_defaults(namespace, screen, interview)
     violations = _required_violations(namespace, screen, blank_submissions)
     return {
         "missing_required": [variable for variable, _reason in violations],
@@ -2326,12 +2357,7 @@ def _constraint_errors(namespace, screen):
                         violated = number % limit != 0
                 except (InvalidOperation, ValueError):
                     continue
-            elif key in {"min", "max"} and datatype in {
-                "date",
-                "time",
-                "datetime",
-                "datetime-local",
-            }:
+            elif key in {"min", "max"} and datatype == "date":
                 rendered = (
                     value.isoformat() if hasattr(value, "isoformat") else str(value)
                 )
@@ -2390,7 +2416,9 @@ def _blankable_fields(namespace, screen):
         if _field_value(namespace, variable, targets)[0]:
             continue
         default = field.get("default")
-        if not isinstance(default, str) or not default.strip():
+        if isinstance(default, (int, float, bool)):
+            default = str(default)
+        elif not isinstance(default, str) or not default.strip():
             default = None
         yield variable, default, field.get("required") is not False, field
 
@@ -2403,8 +2431,7 @@ def _submit_screen_fields(namespace, screen, interview):
     signature fields become ``DAEmpty()`` so documents can still render them.
     Required fields with no value are left for the required gate.
     """
-    _apply_rendered_defaults(namespace, screen)
-    screen = _submission_screen(interview, namespace, screen)
+    screen = _apply_rendered_defaults(namespace, screen, interview)
     blanks = []
     targets = _screen_field_targets(screen)
     for variable, _default, required, field in _blankable_fields(namespace, screen):
@@ -2685,20 +2712,7 @@ def _custom_datatype_hook(datatype):
 
 
 def _coerce_custom_datatype(hook, raw, target, field):
-    data = {
-        key: field[key]
-        for key in (
-            "min",
-            "max",
-            "minlength",
-            "maxlength",
-            "step",
-            "scale",
-            "currency symbol",
-            "field metadata",
-        )
-        if key in field
-    }
+    data = dict(field.get("constraints") or {})
     for key in (
         "custom_parameters",
         "custom_parameters_code",

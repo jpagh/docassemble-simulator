@@ -998,3 +998,9 @@ def test_info_json_reports_the_simulator_version(tmp_path, monkeypatch, capsys):
     assert payload["result"]["simulator_version"] == importlib.metadata.version(
         "docassemble-simulator"
     )
+
+
+def test_row_action_help_includes_edit():
+    result = _run_cli("--help")
+    assert result.returncode == 0
+    assert "add, delete, or edit" in result.stdout

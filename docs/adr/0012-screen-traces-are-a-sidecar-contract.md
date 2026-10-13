@@ -120,3 +120,8 @@ type, visibility, requiredness, and choice values. Constraint changes do not
 change identity or comparison, even with `--full-text`. Existing schema-4
 traces without constraints remain readable and comparable; no golden needs
 re-recording for this additive description.
+
+Numeric min/max/step and minlength/maxlength facts use numbers when the
+rendered value parses numerically; nonnumeric bounds and scale, currency
+symbol, and field metadata retain their rendered values. Captured submission
+visibility expressions and requiredness do not enter trace comparison.
