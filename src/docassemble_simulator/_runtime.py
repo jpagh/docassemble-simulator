@@ -1460,10 +1460,7 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
                 getattr(question, "action", None)
             )
         return SimulatorTask(
-            error=RuntimeError(
-                "background action did not finish with background_response(); "
-                "worker-only behavior is not supported by the simulator"
-            )
+            error=RuntimeError(_unfinished_background_action_message(action, result))
         )
     except BaseException as error:
         if isinstance(error, OperationTimeout):
@@ -1474,6 +1471,47 @@ def _foreground_background_action(action, ui_notification=None, **arguments):
         for key in ("action", "arguments"):
             info.pop(key, None)
         info.update(old)
+
+
+def _unfinished_background_action_message(action, result):
+    """Describe why a foreground background action did not finish.
+
+    A named action can end without a ``background_response`` for several
+    different reasons: it hit an error, or it re-entered the interview and
+    received an interactive screen back. Naming that terminal result is what
+    makes the failure diagnosable, so only a result with no question at all
+    falls back to the worker-only boundary wording (#56).
+    """
+    question = result.get("question") if isinstance(result, dict) else None
+    if question is None:
+        return (
+            f"background action {action!r} did not finish with "
+            "background_response(); the action returned no question, so "
+            "worker-only behavior is not supported by the simulator"
+        )
+    details = []
+    question_type = getattr(question, "question_type", None)
+    if question_type is not None:
+        details.append(f"type {question_type!r}")
+    name = getattr(question, "name", None)
+    if name:
+        details.append(f"name {name!r}")
+    if isinstance(result, dict):
+        sought = result.get("sought") or result.get("orig_sought")
+        if sought:
+            details.append(f"sought {sought!r}")
+        text = result.get("question_text")
+        if isinstance(text, str) and text.strip():
+            collapsed = " ".join(text.split())
+            details.append(f"text {collapsed[:120]!r}")
+    error = getattr(question, "error", None)
+    if error is not None:
+        details.append(f"error {error!r}")
+    described = ", ".join(details) if details else "no describable fields"
+    return (
+        f"background action {action!r} did not finish with "
+        f"background_response(); it returned a question ({described})"
+    )
 
 
 def _patch_background_dispatch(functions, util) -> None:

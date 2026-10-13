@@ -865,6 +865,65 @@ class TestForegroundBackgroundActions:
         assert task.get() == 7
         assert thread.current_info == {}
 
+    def test_foreground_action_names_a_reentrant_question(self, monkeypatch, tmp_path):
+        """A non-response result names the screen the action re-entered (#56)."""
+        from docassemble_simulator import _runtime as runtime_module
+
+        thread = types.SimpleNamespace(
+            current_dict={},
+            current_info={},
+            interview_status=object(),
+            interview=types.SimpleNamespace(
+                askfor=lambda *args, **kwargs: {
+                    "question": types.SimpleNamespace(
+                        question_type="fields", name="structured review"
+                    ),
+                    "sought": "x.poa_general_authorities['real_property']",
+                    "question_text": "Which general authorities should Alice grant?",
+                }
+            ),
+        )
+        functions, _ = _stub_legacy_without_background(monkeypatch, this_thread=thread)
+        with runtime_module.SimulatorRuntime().activate(
+            tmp_path, background_action_mode="foreground"
+        ):
+            runtime_module._install_background_action_fallback("foreground")
+            task = functions.server.bg_action("al_user_bundle.create_downloads")
+
+        assert task.failed()
+        with pytest.raises(RuntimeError) as error:
+            task.get()
+        message = str(error.value)
+        assert "al_user_bundle.create_downloads" in message
+        assert "fields" in message
+        assert "structured review" in message
+        assert "x.poa_general_authorities['real_property']" in message
+        assert "Which general authorities should Alice grant?" in message
+
+    def test_foreground_action_without_a_question_keeps_the_boundary(
+        self, monkeypatch, tmp_path
+    ):
+        """No usable result still reports the worker-only boundary (#56)."""
+        from docassemble_simulator import _runtime as runtime_module
+
+        thread = types.SimpleNamespace(
+            current_dict={},
+            current_info={},
+            interview_status=object(),
+            interview=types.SimpleNamespace(askfor=lambda *args, **kwargs: {}),
+        )
+        functions, _ = _stub_legacy_without_background(monkeypatch, this_thread=thread)
+        with runtime_module.SimulatorRuntime().activate(
+            tmp_path, background_action_mode="foreground"
+        ):
+            runtime_module._install_background_action_fallback("foreground")
+            task = functions.server.bg_action("event")
+
+        assert task.failed()
+        with pytest.raises(RuntimeError) as error:
+            task.get()
+        assert "worker-only behavior" in str(error.value)
+
     def test_callable_background_response_becomes_completed_task(
         self, monkeypatch, tmp_path
     ):
