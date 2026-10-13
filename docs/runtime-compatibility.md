@@ -89,6 +89,39 @@ security tab is not reachable while the matrix exists. The accepted-risk
 decision, with the measured effect of each alternative, is recorded in
 [ADR-0015](adr/0015-compatibility-matrix-alerts-are-accepted.md).
 
+## Legacy namespace shims and setuptools
+
+Some installed Interview packages still ship a `docassemble/__init__.py`
+containing `__import__('pkg_resources').declare_namespace(__name__)` (or the
+separate import/call equivalent). `setuptools>=81` no longer provides
+`pkg_resources`; docassemble-base/webapp releases that pin setuptools 83.x
+can therefore satisfy their dependency pins while every docassemble import
+fails at that legacy shim. This is a packaging conflict, not a missing core
+runtime or native-library problem.
+
+Preflight identifies this failure from the import traceback and the installed
+distribution's RECORD, reports the shim owner and installed setuptools version,
+and leaves the environment unchanged. To recover reproducibly in a uv-managed
+target project, add an explicit override to that project's `pyproject.toml`:
+
+```toml
+[tool.uv]
+override-dependencies = ["setuptools<81"]
+```
+
+Merge the constraint into any existing override list, then run `uv lock` and
+`uv sync` in the target project and retry `sim check --json`. This deliberately
+overrides upstream's exact setuptools pin; it is a target-project recovery,
+not a change to the simulator's tested compatibility lanes. A manual downgrade
+alone is not durable: a plain environment sync restores the lock's exact pin
+and can remove `pkg_resources` again. Alternatively, rebuild/reinstall the
+identified shim distribution using native namespaces (without the legacy
+`docassemble/__init__.py`). Do not edit the installed shim in place.
+
+A missing `pkg_resources` outside an installed namespace shim remains an
+ordinary broken-import error with its underlying cause; preflight does not
+prescribe this override for unrelated failures.
+
 ## What the simulator verifies
 
 At bootstrap the simulator mirrors the docassemble webapp's startup import
@@ -164,6 +197,7 @@ documents, downloads — free of database access.
 | Condition | Command result | What to do |
 | --- | --- | --- |
 | Missing `docassemble-base`/`webapp` | `input` error, exit 1 | Let preflight acquire them, or install into the target interpreter; `--offline` refuses acquisition |
+| Installed legacy namespace shim imports missing `pkg_resources` | `input` error, exit 1 naming the shim distribution and setuptools version | Override `setuptools<81` in the target project or rebuild the shim for native namespaces |
 | Installed runtime fails to import (native library, broken dep) | `input` error, exit 1 naming the native-library boundary | Fix the interpreter's native libraries; this is not a missing-package problem |
 | Missing include (`docassemble.AssemblyLine:...`) | `compile` error, exit 2 with the definition and include path | Fix the authored include or install a package that provides it |
 | Authored Interview syntax error | `compile` error, exit 2 | Fix the Interview definition; the simulator does not downgrade or rewrite it |

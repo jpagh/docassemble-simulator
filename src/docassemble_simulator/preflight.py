@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
+import importlib.metadata
 import re
 import shutil
 import subprocess
@@ -21,6 +23,55 @@ def _import_error(module_name: str):
         return error
     except ImportError as error:
         return error
+    return None
+
+
+def _namespace_shim_failure(error: ImportError) -> str | None:
+    """Identify an installed legacy namespace shim on the failed import stack."""
+    if error.name != "pkg_resources":
+        return None
+    traceback = error.__traceback__
+    while traceback is not None:
+        path = Path(traceback.tb_frame.f_code.co_filename)
+        traceback = traceback.tb_next
+        if path.name != "__init__.py" or path.parent.name != "docassemble":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeError):
+            continue
+        if not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "declare_namespace"
+            for node in ast.walk(tree)
+        ):
+            continue
+        owners = {
+            distribution.metadata["Name"]
+            for distribution in importlib.metadata.distributions()
+            for file in distribution.files or ()
+            if str(file).replace("\\", "/") == "docassemble/__init__.py"
+            and Path(distribution.locate_file(file)).resolve() == path.resolve()
+        }
+        if not owners:
+            continue
+        try:
+            setuptools = importlib.metadata.version("setuptools")
+        except importlib.metadata.PackageNotFoundError:
+            setuptools = "not installed"
+        return (
+            "error: docassemble namespace packaging conflict: installed "
+            f"distribution(s) {', '.join(sorted(owners))} ship the legacy "
+            "docassemble/__init__.py namespace shim that imports pkg_resources. "
+            f"Installed setuptools: {setuptools}; setuptools>=81 no longer "
+            "provides pkg_resources. In the target project's pyproject.toml, "
+            'set [tool.uv] override-dependencies = ["setuptools<81"], then '
+            "re-lock and sync; or rebuild the shim package for native namespaces. "
+            "A plain environment sync can undo a manual setuptools downgrade "
+            "because docassemble's exact pin is restored. "
+            f"(underlying error: {error})"
+        )
     return None
 
 
@@ -106,6 +157,9 @@ def ensure_importable(
     broken = [(name, error) for name, error in broken if error not in (None, "missing")]
     if broken:
         name, error = broken[0]
+        namespace_failure = _namespace_shim_failure(error)
+        if namespace_failure:
+            raise SystemExit(namespace_failure)
         raise SystemExit(
             f"error: {name} is installed but failed to import; this is not a "
             "missing-package problem. Check native libraries and the target "
@@ -128,6 +182,10 @@ def ensure_importable(
         (name, error) for name, error in failures if error not in (None, "missing")
     ]
     if still_missing or failures:
+        for _, error in failures:
+            namespace_failure = _namespace_shim_failure(error)
+            if namespace_failure:
+                raise SystemExit(namespace_failure)
         detail = ", ".join(
             still_missing or [f"{name}: {error}" for name, error in failures]
         )
