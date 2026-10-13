@@ -252,6 +252,17 @@ def _screen(**overrides):
     return screen
 
 
+def test_row_actions_remain_debug_only_screen_facts():
+    before = _screen(
+        row_actions=[{"kind": "add", "target": "children[0].grandchildren"}]
+    )
+    after = _screen(
+        row_actions=[{"kind": "edit", "target": "children[0].grandchildren", "row": 0}]
+    )
+    assert screen_identity(before) == screen_identity(after)
+    assert screen_content(before) == screen_content(after)
+
+
 def test_replay_verdict_compares_identity_facts_flow_and_error_in_trace_module():
     expected_screen = _screen(question_name="ID expected")
     actual_screen = _screen(question_name="ID actual")

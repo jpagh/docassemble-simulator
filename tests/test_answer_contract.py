@@ -258,6 +258,115 @@ def test_parse_rejection_reports_missing_required_but_not_defaults_or_hidden_fie
     ]
 
 
+class NestedEditInterview(ScreenInterview):
+    def assemble(self, namespace, interview_status):
+        from test_row_actions import action_link
+
+        if interview_status.current_info.get("action"):
+            namespace["pressed_arguments"] = interview_status.current_info["arguments"]
+            namespace["pressed"] = interview_status.current_info["action"]
+            if namespace.get("fail_action"):
+                raise ValueError("authored edit failed")
+        super().assemble(namespace, interview_status)
+        interview_status.subquestion_text = action_link(
+            "_da_list_edit",
+            items=[
+                {"follow up": ["children[0].grandchildren[0].name"]},
+                {
+                    "action": "_da_list_ensure_complete",
+                    "arguments": {"group": "children[0].grandchildren"},
+                },
+            ],
+        )
+
+
+def test_nested_edit_replays_rendered_control_transactionally(answer_execution):
+    from docassemble_simulator.execution import Execute, RowAction, Status
+
+    execution, selected = answer_execution
+    selected["interview"] = NestedEditInterview
+    started = execution.run(Start())
+    assert started.result["row_actions"] == [
+        {"kind": "edit", "target": "children[0].grandchildren", "row": 0}
+    ]
+    assert execution.run(RowAction("edit", "children[0].grandchildren", 0)).ok
+    assert execution.run(Evaluate("pressed")).result["value"] == "'_da_list_edit'"
+    assert execution.run(Evaluate("pressed_arguments['items']")).result["value"] == (
+        "[{'follow up': ['children[0].grandchildren[0].name']}, "
+        "{'action': '_da_list_ensure_complete', 'arguments': {'group': 'children[0].grandchildren'}}]"
+    )
+    assert execution.run(Execute("fail_action = True")).ok
+    saved = execution.run(Status()).result
+    before = session_bytes(execution)
+    assert not execution.run(RowAction("edit", "children[0].grandchildren", 0)).ok
+    assert session_bytes(execution) == before
+    assert execution.run(Status()).result == saved
+
+
+class ForcedEditInterview(ScreenInterview):
+    questions_by_name: ClassVar = {}
+    fields = (SimpleNamespace(saveas="name", datatype="text", required=True),)
+
+    def assemble(self, namespace, interview_status):
+        from test_row_actions import action_link
+
+        if interview_status.current_info.get("action"):
+            namespace["_internal"]["event_stack"] = {
+                "dasimulator": [{"action": "name", "arguments": {}}]
+            }
+        super().assemble(namespace, interview_status)
+        pending = namespace["_internal"].get("event_stack", {}).get("dasimulator", [])
+        interview_status.orig_sought = "name" if pending else None
+        interview_status.question_text = "Edit row" if pending else "Review rows"
+        interview_status.subquestion_text = action_link(
+            "_da_list_edit", items=[{"follow up": ["people[0].name"]}]
+        )
+
+
+def test_forced_edit_advances_only_after_successful_answer(
+    answer_execution, monkeypatch
+):
+    from docassemble.base.functions import this_thread
+
+    from docassemble_simulator.execution import RowAction, Status
+
+    def native_pop(variable):
+        namespace = this_thread.current_dict
+        stack = namespace["_internal"]["event_stack"]["dasimulator"]
+        if stack and stack[0]["action"] == variable:
+            stack.pop(0)
+
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.functions"],
+        "pop_event_stack",
+        native_pop,
+        raising=False,
+    )
+    execution, selected = answer_execution
+    selected["interview"] = ForcedEditInterview
+    assert execution.run(Start()).ok
+    assert execution.run(RowAction("edit", "people", 0)).ok
+    before = session_bytes(execution)
+    assert not execution.run(Answer((("name", ""),))).ok
+    assert session_bytes(execution) == before
+    assert (
+        execution.run(
+            Evaluate("_internal['event_stack']['dasimulator'][0]['action']")
+        ).result["value"]
+        == "'name'"
+    )
+    assert execution.run(Status()).result["question_text"] == "Edit row"
+    answered = execution.run(Answer((("name", "Ada"),)))
+    assert answered.ok
+    assert answered.result["question_text"] == "Review rows"
+    assert (
+        execution.run(Evaluate("_internal['event_stack']['dasimulator']")).result[
+            "value"
+        ]
+        == "[]"
+    )
+
+
 class RowActionInterview(ScreenInterview):
     def assemble(self, namespace, interview_status):
         from test_row_actions import action_link

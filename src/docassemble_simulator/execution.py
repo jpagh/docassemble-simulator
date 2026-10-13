@@ -54,6 +54,7 @@ from docassemble_simulator.describe import (
     describe_seeking,
     field_variable,
     field_visible,
+    rendered_row_controls,
 )
 
 STATE_SCHEMA = 1
@@ -713,8 +714,17 @@ class InterviewExecution:
             if operation.kind == "add"
             else (type(operation.row) is int and operation.row >= 0)
         )
+        control = next(
+            (
+                payload
+                for fact, payload in rendered_row_controls(screen)
+                if fact == requested
+            ),
+            None,
+        )
         if (
-            operation.kind not in {"add", "delete"}
+            operation.kind not in {"add", "delete", "edit"}
+            or control is None
             or not valid_row
             or requested not in screen.get("row_actions", [])
         ):
@@ -724,16 +734,10 @@ class InterviewExecution:
             )
         namespace = payload["namespace"]
         with self._prepared_operation(namespace) as (interview, status):
-            arguments = {"list": operation.target}
-            if operation.kind == "delete":
-                arguments["item"] = str(operation.row)
+            # Native edit controls carry authored follow-ups and completion
+            # actions. Replay them intact, including resolved generic anchors.
             status.current_info.update(
-                {
-                    "action": "_da_list_add"
-                    if operation.kind == "add"
-                    else "_da_list_remove",
-                    "arguments": arguments,
-                }
+                {"action": control["action"], "arguments": control["arguments"]}
             )
             outcome = _assemble(interview, namespace, status)
         if outcome.get("kind") != "error":
@@ -853,6 +857,21 @@ class InterviewExecution:
                     validation,
                 )
             _mark_answered(interview, namespace, screen.get("question_name"))
+            pending = (
+                namespace.get("_internal", {})
+                .get("event_stack", {})
+                .get(status.current_info["user"]["session_uid"], [])
+            )
+            if (
+                screen.get("orig_sought")
+                and pending
+                and pending[0].get("action") == screen["orig_sought"]
+            ):
+                from docassemble.base.functions import pop_event_stack
+
+                # The browser advances the forced action only after accepting
+                # its screen submission; native completion follow-ups remain.
+                pop_event_stack(screen["orig_sought"])
             outcome = _assemble(interview, namespace, status)
         if dispositions:
             outcome["assignments"] = dispositions

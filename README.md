@@ -153,11 +153,12 @@ docassemble-simulator seek M.family --activate
 Table/review screens expose `row_actions`, an array of rendered controls such as
 `{"kind": "add", "target": "people"}` and
 `{"kind": "delete", "target": "people", "row": 0}` (zero-based rows).
-`kind` is an open string vocabulary; currently only add and delete are supported.
-Press them with `row-action add people` or `row-action delete people --row 0`.
-The operation accepts only controls on the saved screen, uses docassemble's own
-list action dispatch, and saves the resulting screen only on success. Editing
-and nested/generic-object rows are not supported. The worker accepts
+`kind` is an open string vocabulary; add, delete, and edit are supported.
+Press them with `row-action add people`, `row-action delete people --row 0`,
+or `row-action edit people --row 0`. Edit presents the row's authored screen.
+Nested targets such as `children[0].grandchildren` use the same controls.
+The operation accepts only controls on the saved screen, replays docassemble's
+rendered action dispatch, and saves the resulting screen only on success. The worker accepts
 `{"operation": "row-action", "kind": "delete", "target": "people", "row": 0}`;
 Python callers use `runner.row_action("delete", "people", row=0)`.
 These additive screen facts are debug-only in screen traces, not field-fact
