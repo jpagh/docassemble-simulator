@@ -1436,6 +1436,9 @@ def _assemble(interview, namespace, status):
             "orig_sought": status.orig_sought,
             "question": question,
             "selectcompute": getattr(status, "selectcompute", {}),
+            "extras": getattr(status, "extras", {}),
+            "defaults": getattr(status, "defaults", {}),
+            "labels": getattr(status, "labels", {}),
         }
         return describe_question_result(result, namespace)
     return {
