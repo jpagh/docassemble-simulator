@@ -595,6 +595,58 @@ def test_seek_diagnostics_flag_is_accepted_on_subcommands():
     assert render.seek_diagnostics == "off"
 
 
+def test_render_help_documents_fixture_bindings_and_worker_request_shape():
+    parser = cli.build_parser()
+    render_parser = next(
+        action.choices["render"]
+        for action in parser._actions
+        if getattr(action, "choices", None) and "render" in action.choices
+    )
+
+    help_text = " ".join(render_parser.format_help().split())
+
+    assert "exec a Python file in a fresh render namespace" in help_text
+    assert "never assembles" in help_text
+    assert "README" in help_text
+    assert "render_bindings" in help_text
+    assert '"operation":"render"' in help_text
+    assert "Persistent journeys" in help_text
+
+
+def test_reset_command_reports_every_removed_session(monkeypatch, tmp_path, capsys):
+    removed = (tmp_path / ".simulator" / "sessions" / "pkg-abc123.pkl",)
+    reset_calls = []
+
+    def reset():
+        reset_calls.append("reset")
+        return removed
+
+    execution = SimpleNamespace(
+        scope=SimpleNamespace(interview="docassemble.pkg:data/questions/main.yml"),
+        reset=reset,
+    )
+    monkeypatch.setattr(cli, "_execution", lambda args, root: execution)
+
+    json_args = cli.build_parser().parse_args(["reset", "--json"])
+    assert cli.cmd_reset(json_args, tmp_path) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": True,
+        "command": "reset",
+        "result": {
+            "kind": "reset",
+            "interview": "docassemble.pkg:data/questions/main.yml",
+            "removed": [str(removed[0])],
+        },
+    }
+
+    human_args = cli.build_parser().parse_args(["reset"])
+    assert cli.cmd_reset(human_args, tmp_path) == 0
+    human = capsys.readouterr().out
+    assert "kind: reset" in human
+    assert str(removed[0]) in human
+    assert reset_calls == ["reset", "reset"]
+
+
 def test_render_requires_explicit_fixture_source(monkeypatch, tmp_path, capsys):
     from docassemble_simulator import render as render_module
 
@@ -745,7 +797,9 @@ def test_config_report_redacts_secrets_in_human_output(tmp_path, capsys):
     assert "visible-safe" in human
 
 
-def test_composition_root_skips_runtime_for_info_and_status(monkeypatch, tmp_path):
+def test_composition_root_skips_runtime_for_info_status_and_reset(
+    monkeypatch, tmp_path
+):
     calls = []
     monkeypatch.setattr(cli, "_reexec_with_dyld_path", lambda: None)
     monkeypatch.setattr(cli, "find_package_root", lambda root: tmp_path)
@@ -754,9 +808,11 @@ def test_composition_root_skips_runtime_for_info_and_status(monkeypatch, tmp_pat
     monkeypatch.setattr(cli, "bootstrap", lambda **kwargs: calls.append("bootstrap"))
     monkeypatch.setattr(cli, "cmd_info", lambda args, root: 0)
     monkeypatch.setattr(cli, "cmd_execution", lambda args, root: 0)
+    monkeypatch.setattr(cli, "cmd_reset", lambda args, root: 0)
 
     assert cli.main(["info"]) == 0
     assert cli.main(["status"]) == 0
+    assert cli.main(["reset"]) == 0
     assert calls == []
 
 

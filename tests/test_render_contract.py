@@ -353,6 +353,72 @@ def test_fresh_render_never_acquires_the_session_lock(tmp_path, monkeypatch, da_
     assert outcome.ok is True
 
 
+def test_saved_source_without_a_session_names_the_other_render_sources(
+    tmp_path, monkeypatch, da_stubs
+):
+    _install_fake_runtime(monkeypatch)
+
+    outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
+        RenderRequest("form.docx", SavedSessionSource(), assemble=False)
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "state"
+    assert "no saved session" in outcome.error.message
+    assert "`--fresh`" in outcome.error.message
+    assert "`--snapshot PATH`" in outcome.error.message
+    assert "`--fixture PATH`" in outcome.error.message
+
+
+def test_fixture_failure_carries_path_error_type_and_traceback(
+    tmp_path, monkeypatch, da_stubs
+):
+    _install_fake_runtime(monkeypatch)
+    fixture = tmp_path / "fixture.py"
+    fixture.write_text(
+        "def build_namespace():\n"
+        '    raise FileNotFoundError("missing letterhead: /nonexistent.docx")\n'
+        "\n"
+        "build_namespace()\n",
+        encoding="utf-8",
+    )
+
+    outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
+        RenderRequest("form.docx", FixtureSource(fixture), assemble=False)
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "execution"
+    assert outcome.error.message.startswith(
+        "fixture failed: FileNotFoundError: missing letterhead: /nonexistent.docx"
+    )
+    assert outcome.error.details["fixture"] == str(fixture)
+    assert outcome.error.details["error_type"] == "FileNotFoundError"
+    report = outcome.error.details["traceback"]
+    assert "Traceback (most recent call last)" in report
+    assert str(fixture) in report
+    assert "build_namespace" in report
+    assert "missing letterhead: /nonexistent.docx" in report
+
+
+def test_unexpected_fixture_exception_is_still_a_fixture_failure(
+    tmp_path, monkeypatch, da_stubs
+):
+    _install_fake_runtime(monkeypatch)
+    fixture = tmp_path / "fixture.py"
+    fixture.write_text("1 / 0\n", encoding="utf-8")
+
+    outcome = InterviewRenderer(tmp_path, _workspace(tmp_path)).render(
+        RenderRequest("form.docx", FixtureSource(fixture), assemble=False)
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "execution"
+    assert outcome.error.message.startswith("fixture failed: ZeroDivisionError")
+    assert outcome.error.details["error_type"] == "ZeroDivisionError"
+    assert "ZeroDivisionError" in outcome.error.details["traceback"]
+
+
 def test_render_failure_identifies_the_requested_template(
     tmp_path, monkeypatch, da_stubs
 ):

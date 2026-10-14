@@ -242,6 +242,12 @@ class ExecutionFailure(Exception):
         self.details = details
 
 
+_NO_SAVED_SESSION = "no saved session; run `start` first"
+_RENDER_SOURCE_HINT = (
+    ", or render with `--fresh`, `--snapshot PATH`, or `--fixture PATH`"
+)
+
+
 def _configuration_mismatch_message(
     root: Path, identity: str, context: dict[str, Any]
 ) -> str:
@@ -249,13 +255,14 @@ def _configuration_mismatch_message(
     files = context.get("config_files") or []
     override = context.get("config_override")
     command_overrides = context.get("command_overrides") or {}
-    command = [
+    base = [
         "docassemble-simulator",
         "--root",
         str(root),
         "--interview",
         identity,
     ]
+    command = list(base)
     if override:
         command.extend(("--config", str(override)))
     if command_overrides.get("offline"):
@@ -275,6 +282,7 @@ def _configuration_mismatch_message(
     if override:
         source.append(f"stored --config override: {override}")
     source.append("resume with: " + shlex.join(command))
+    source.append("clear it with: " + shlex.join(base + ["reset"]))
     return (
         "a saved session exists under a different effective configuration; "
         + "; ".join(source)
@@ -381,27 +389,46 @@ class StateStore:
         )
         self.directory = session_directory or root / ".simulator" / "sessions"
         self.path = self.directory / f"{self.slug}-{digest}.pkl"
-        self.lock_path = self.path.with_suffix(".lock")
+        # One advisory lock per interview, not per fingerprint: reset spans
+        # every configuration, so a mutation under one fingerprint must
+        # serialize against it.
+        self.lock_path = self.directory / f"{self.slug}.lock"
 
     @contextmanager
     def lock(self):
         with flock(self.lock_path):
             yield
 
+    def _session_candidates(self) -> list[Path]:
+        """Every session payload path sharing this interview's slug.
+
+        The slug is the identity's sanitized tail, so a path match alone does
+        not prove the payload belongs to this interview; callers that unlink
+        any candidate other than their own exact path must still verify it
+        through :meth:`_read_candidate`.
+        """
+        return sorted(self.directory.glob(f"{self.slug}-*.pkl"))
+
+    def _read_candidate(self, candidate: Path) -> dict[str, Any] | None:
+        """Read one candidate payload, or ``None`` when it is unrelated or unreadable."""
+        try:
+            return _read_payload(
+                candidate,
+                identity=self.identity,
+                load_namespace=False,
+                policy=_SAVED_PAYLOAD,
+            )
+        except Exception as error:  # noqa: BLE001 - unrelated or unreadable session files
+            logger.debug("ignoring session file %r: %s", candidate, error)
+            return None
+
     def _other_configuration(self) -> tuple[Path, dict[str, Any]] | None:
         """Return a same-interview session stored under another fingerprint."""
-        for candidate in sorted(self.directory.glob(f"{self.slug}-*.pkl")):
+        for candidate in self._session_candidates():
             if candidate == self.path:
                 continue
-            try:
-                payload = _read_payload(
-                    candidate,
-                    identity=self.identity,
-                    load_namespace=False,
-                    policy=_SAVED_PAYLOAD,
-                )
-            except Exception as error:  # noqa: BLE001 - unrelated or unreadable session files
-                logger.debug("ignoring session file %r: %s", candidate, error)
+            payload = self._read_candidate(candidate)
+            if payload is None:
                 continue
             if (payload.get("config_fingerprint") or "") != self.config_fingerprint:
                 return candidate, payload.get("config_context") or {
@@ -423,9 +450,7 @@ class StateStore:
                     ),
                     {"stored_configuration": context},
                 )
-            raise ExecutionFailure(
-                ErrorKind.STATE, "no saved session; run `start` first"
-            )
+            raise ExecutionFailure(ErrorKind.STATE, _NO_SAVED_SESSION)
         payload = _read_payload(
             self.path,
             identity=self.identity,
@@ -444,9 +469,22 @@ class StateStore:
             )
         return payload
 
-    def reset(self) -> None:
-        """Remove this store's payload; the advisory lock itself is harmless."""
-        self.path.unlink(missing_ok=True)
+    def reset(self) -> tuple[Path, ...]:
+        """Remove every saved session for this interview, any configuration.
+
+        A configuration change scopes the same interview to a different
+        payload path, so the mismatched session can only be found by slug.
+        Every other candidate is re-verified against this interview's identity
+        first, because a slug is only the identity's sanitized tail.  The
+        advisory lock files themselves are harmless and stay behind.
+        """
+        removed = []
+        for candidate in self._session_candidates():
+            if candidate != self.path and self._read_candidate(candidate) is None:
+                continue
+            candidate.unlink(missing_ok=True)
+            removed.append(candidate)
+        return tuple(removed)
 
     def save(
         self,
@@ -665,10 +703,10 @@ class InterviewExecution:
                 else:
                     interview.debug = previous_debug
 
-    def reset(self) -> None:
-        """Discard this worker's saved session without changing its scope."""
+    def reset(self) -> tuple[Path, ...]:
+        """Discard every saved session for this interview without changing scope."""
         with self._store.lock():
-            self._store.reset()
+            return self._store.reset()
 
     def ensure_current(self, identity: str | None = None) -> CompileFailure | None:
         """Refresh the compiled interview a non-operation caller is about to read.
@@ -1047,9 +1085,7 @@ class InterviewExecution:
         try:
             namespace = self._store.load()["namespace"]
         except ExecutionFailure as error:
-            if error.kind != ErrorKind.STATE or str(error) != (
-                "no saved session; run `start` first"
-            ):
+            if error.kind != ErrorKind.STATE or str(error) != _NO_SAVED_SESSION:
                 raise
 
         if namespace is None:
@@ -1209,7 +1245,16 @@ class InterviewExecution:
                 raise ExecutionFailure(ErrorKind.INPUT, str(error)) from error
             source = preparation.source
             if isinstance(source, SavedSessionSource):
-                namespace = self._store.load()["namespace"]
+                try:
+                    namespace = self._store.load()["namespace"]
+                except ExecutionFailure as error:
+                    if str(error) != _NO_SAVED_SESSION:
+                        raise
+                    raise ExecutionFailure(
+                        error.kind,
+                        _NO_SAVED_SESSION + _RENDER_SOURCE_HINT,
+                        error.details,
+                    ) from error
             elif isinstance(source, FreshSource):
                 namespace = _fresh_namespace()
             elif isinstance(source, SnapshotSource):
@@ -1221,25 +1266,27 @@ class InterviewExecution:
             with self._prepared_operation(namespace) as (interview, status):
                 if isinstance(source, FixtureSource):
                     try:
-                        __builtins__["exec"](
-                            source.path.read_text(encoding="utf-8"), namespace
+                        # Compiling under the fixture's own path keeps a
+                        # failure's traceback pointed at the authored line
+                        # instead of an anonymous "<string>".
+                        fixture = compile(
+                            source.path.read_text(encoding="utf-8"),
+                            str(source.path),
+                            "exec",
                         )
-                    except (
-                        ValueError,
-                        TypeError,
-                        RuntimeError,
-                        AttributeError,
-                        KeyError,
-                        IndexError,
-                        ImportError,
-                        OSError,
-                        LookupError,
-                        NameError,
-                        SyntaxError,
-                    ) as error:
+                        __builtins__["exec"](fixture, namespace)
+                    except Exception as error:
+                        # Fixture code is user-authored, so every failure in
+                        # it is the fixture's: keep the traceback, not just
+                        # the final message.
                         raise ExecutionFailure(
                             ErrorKind.EXECUTION,
                             f"fixture failed: {type(error).__name__}: {error}",
+                            {
+                                "fixture": str(source.path),
+                                "error_type": type(error).__name__,
+                                "traceback": traceback.format_exc(),
+                            },
                         ) from error
                 elif preparation.assemble:
                     outcome = _assemble(interview, namespace, status)

@@ -178,6 +178,7 @@ def test_missing_session_names_the_other_configuration(tmp_path):
     assert "override.yml" in message
     assert "resume with:" in message
     assert "status" in message
+    assert "reset" in message
     assert caught.value.kind.value == "state"
 
     with pytest.raises(ExecutionFailure) as missing:
@@ -201,6 +202,58 @@ def test_session_payload_rejects_a_different_configuration(tmp_path):
 
     assert "effective configuration" in str(caught.value)
     assert caught.value.kind.value == "state"
+
+
+def test_reset_clears_every_configuration_for_the_interview(tmp_path):
+    identity = "docassemble.pkg:data/questions/main.yml"
+    first = StateStore(tmp_path, identity, "abc123")
+    second = StateStore(tmp_path, identity, "def456")
+    other = StateStore(tmp_path, "docassemble.other:data/questions/main.yml", "abc123")
+    for store in (first, second, other):
+        store.save({}, {"kind": "executed"})
+
+    removed = second.reset()
+
+    assert set(removed) == {first.path, second.path}
+    assert not first.path.exists()
+    assert not second.path.exists()
+    assert other.path.exists()
+
+
+def test_reset_without_sessions_is_a_no_op(tmp_path):
+    store = StateStore(tmp_path, "docassemble.pkg:data/questions/main.yml", "abc123")
+
+    assert store.reset() == ()
+
+
+def test_configurations_of_one_interview_share_an_advisory_lock(tmp_path):
+    import fcntl
+
+    identity = "docassemble.pkg:data/questions/main.yml"
+    first = StateStore(tmp_path, identity, "abc123")
+    second = StateStore(tmp_path, identity, "def456")
+    assert first.path != second.path
+
+    with (
+        first.lock(),
+        second.lock_path.open("a+b") as handle,
+        pytest.raises(BlockingIOError),
+    ):
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_reset_keeps_a_different_interview_sharing_the_slug(tmp_path):
+    common = "data/questions/" + "nested/" * 10 + "main.yml"
+    first = StateStore(tmp_path, "docassemble.alpha:" + common, "abc123")
+    second = StateStore(tmp_path, "docassemble.beta:" + common, "abc123")
+    assert first.slug == second.slug
+    first.save({}, {"kind": "executed"})
+    second.save({}, {"kind": "executed"})
+
+    removed = second.reset()
+
+    assert removed == (second.path,)
+    assert first.path.exists()
 
 
 def test_snapshots_ignore_the_config_fingerprint(tmp_path):

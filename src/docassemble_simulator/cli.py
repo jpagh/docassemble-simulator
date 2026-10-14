@@ -654,6 +654,24 @@ def cmd_execution(args, root):
     return 0
 
 
+def cmd_reset(args, root):
+    """Discard every saved session for the selected interview."""
+    execution = _execution(args, root)
+    removed = execution.reset()
+    _emit(
+        _envelope(
+            "reset",
+            {
+                "kind": "reset",
+                "interview": execution.scope.interview,
+                "removed": [str(path) for path in removed],
+            },
+        ),
+        args.json,
+    )
+    return 0
+
+
 def cmd_worker(args, root):
     """Run the persistent JSON-lines worker used by agents and test suites."""
     import io
@@ -2388,6 +2406,16 @@ def build_parser():
             epilog=recording_epilog,
         )
     ).set_defaults(func=cmd_execution)
+    add(
+        "reset",
+        help="discard every saved session for the selected interview",
+        description=(
+            "Remove saved state for the selected interview, including any "
+            "session stored under a different effective configuration. Use it "
+            "as the one-shot escape when a command reports a saved session "
+            "under a different effective configuration."
+        ),
+    ).set_defaults(func=cmd_reset)
     row_action = add(
         "row-action", help="press an add, delete, or edit control on the saved screen"
     )
@@ -2656,14 +2684,28 @@ def build_parser():
         description=(
             "Render DOCX only. PDF conversion is unavailable and no external "
             "converter is invoked. Use --bind NAME=EXPRESSION for explicit "
-            "ephemeral template bindings."
+            "ephemeral template bindings; configured defaults come from "
+            "[simulator.render_bindings]. See README § Rendering."
+        ),
+        epilog=(
+            "The persistent worker accepts the same request as "
+            '{"operation":"render", ...}: template, source, path, bindings, '
+            "no_assemble, output, save_snapshot, and expect_missing. See README "
+            "§ Persistent journeys and the standard runner."
         ),
     )
     render.add_argument("template")
     render_source = render.add_mutually_exclusive_group()
     render_source.add_argument("--fresh", action="store_true")
     render_source.add_argument("--snapshot", dest="snapshot_source")
-    render_source.add_argument("--fixture")
+    render_source.add_argument(
+        "--fixture",
+        metavar="PATH",
+        help=(
+            "exec a Python file in a fresh render namespace; never assembles "
+            "(see README § Rendering)"
+        ),
+    )
     render.add_argument("--no-assemble", action="store_true")
     render.add_argument("--save-snapshot")
     render.add_argument("--output", metavar="PATH")
@@ -2673,7 +2715,10 @@ def build_parser():
         action="append",
         default=[],
         metavar="NAME=EXPRESSION",
-        help="bind a template variable in the ephemeral render namespace (repeatable)",
+        help=(
+            "bind a template variable in the ephemeral render namespace "
+            "(repeatable; defaults come from [simulator.render_bindings])"
+        ),
     )
     render.set_defaults(func=cmd_render)
     return parser
@@ -2791,6 +2836,7 @@ def main(argv=None):
             needs_interview_bootstrap = args.command not in {
                 "info",
                 "status",
+                "reset",
                 "config",
                 "trace",
             } or (args.command == "trace" and args.trace_command == "replay")

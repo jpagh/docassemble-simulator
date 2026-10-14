@@ -99,6 +99,7 @@ docassemble-simulator answer --defaults
 docassemble-simulator seek M.family --auto
 docassemble-simulator status
 docassemble-simulator refresh
+docassemble-simulator reset
 docassemble-simulator eval 'M.name'
 docassemble-simulator vars
 docassemble-simulator exec 'M.items.append_object()'
@@ -133,7 +134,11 @@ docassemble-simulator seek M.family --activate
   required gate. Assignment or validation failure discards every submitted
   value.
 - `status` only reads the saved outcome. `refresh` explicitly rehydrates and
-  reassembles saved state.
+  reassembles saved state. `reset` discards every saved session for the
+  selected interview, including any session stored under a different effective
+  configuration. It needs no importable interview, never assembles, and is the
+  one-shot escape when a saved session cannot be loaded under the current
+  configuration.
 - `seek` starts from saved state by default. `--fresh` is isolated and
   `--activate` persists the sought screen as the active screen. `--auto`
   submits each screen that can be completed from defaults/blanks as its own
@@ -188,8 +193,9 @@ starts a separate session instead of silently rehydrating the old one.
 `config --json` reports this as `config_fingerprint` and, for every effective
 top-level key, the contributing file/override layers and shadowed values.
 Loading state saved under a different configuration reports the stored
-fingerprint, config files/override, and an exact resume command; the previous
-session stays on disk for the configuration that produced it. This diagnostic
+fingerprint, config files/override, an exact resume command, and an exact
+`reset` command for discarding it; the previous session stays on disk for the
+configuration that produced it. This diagnostic
 is shared by `status`, `vars`, `answer`, and `seek`. Files are trusted-local
 pickle payloads. Unsupported or stale state fails with an instruction to run
 `start` again. Mutations hold a per-interview advisory lock and commit with
@@ -220,7 +226,9 @@ printf '%s\\n' \\
 `run` and `worker` accept JSON-lines on stdin or `--journey FILE` (a JSON array
 is also accepted). Each response contains the request `id`, `ok`, the normal
 simulator `result` or `error`, and the active project/interview/session scope.
-`reset` discards the worker's saved session; `shutdown` exits cleanly.
+`reset` discards every saved session for the worker's interview, including
+sessions stored under another effective configuration; `shutdown` exits
+cleanly.
 `--session-root PATH` makes the session resumable by another worker. Without it,
 the command uses a temporary isolated session. Interview/bootstrap output is
 redirected to stderr so stdout remains protocol-only. Timings are optional and
@@ -590,6 +598,7 @@ docassemble-simulator render form.docx --fixture fixture.py
 docassemble-simulator render form.docx --no-assemble
 docassemble-simulator render form.docx --save-snapshot state.pkl
 docassemble-simulator render form.docx --output artifacts/form.docx
+docassemble-simulator render form.docx --bind client_name=clients[0].name
 ```
 
 A render request has orthogonal concerns:
@@ -603,7 +612,14 @@ A render request has orthogonal concerns:
 - **artifact effect:** `--output PATH` names the exact DOCX target and is written
   atomically only after successful evaluation and expectations;
 - **expectation:** `--expect-missing VARIABLE` makes that strict undefined error
-  the expected result.
+  the expected result;
+- **bindings:** `--bind NAME=EXPRESSION` (repeatable) evaluates an expression
+  in the ephemeral render namespace. Configured defaults come from
+  `[simulator.render_bindings]`, with `[simulator.render_bindings."form.docx"]`
+  overriding them for one template; command-line bindings win over both. The
+  legacy top-level `[render-bindings]` spelling supplies the whole table
+  instead of `[simulator.render_bindings]`, so the two do not merge. Bindings
+  are never saved.
 
 Rendering never writes, replaces, or deletes a saved session. Fresh rendering is
 ephemeral. Snapshot payloads are versioned and interview-specific. Snapshot and
@@ -617,6 +633,58 @@ context active. Structural DOCX failures report the requested template, error
 type, and available paragraph/line; an included filename is reported only when
 the runtime preserves it reliably. Source and included templates are never
 rewritten or repaired.
+
+### Authoring a fixture
+
+A fixture is a Python file `exec`'d into a fresh render namespace; it is not a
+module and is not imported. A fixture source never assembles, so a
+template-only check needs no `start`, session, or saved state.
+
+```python
+# .config/simulator/fixture.py
+from pathlib import Path
+
+from docassemble.base.util import DALocalFile
+
+import docassemble.my_project
+
+PACKAGE = Path(docassemble.my_project.__file__).parent
+
+
+def build_namespace():
+    return {
+        "client_name": "Ada Lovelace",
+        "fee": currency(1250),
+        "month": format_date("2026-10-01", "MMMM yyyy"),
+        "letterhead": DALocalFile(PACKAGE / "data/static/letterhead.docx"),
+    }
+
+
+for key, value in build_namespace().items():
+    globals()[key] = value
+```
+
+```sh
+docassemble-simulator render fee_agreement.docx \
+  --fixture .config/simulator/fixture.py --output out.docx
+```
+
+- The namespace starts from `parse.INITIAL_DICT` (essentially empty) and is the
+  same namespace the prepared interview supplies at render time. Helpers such
+  as `currency`, `format_date`, and `ordinal_number` resolve in it; do not stub
+  them, because stubbing hides the real formatting behavior a template must be
+  tested against.
+- Names must be module-level globals. The `build_namespace()`-returns-a-dict
+  shape assigned item by item into `globals()` is the convention that keeps
+  every value visible to the template.
+- `__file__` is not defined. Anchor repository-relative paths with
+  `Path(docassemble.<package>.__file__)` (as above) or an absolute path.
+- File inputs (an uploaded letterhead, a static PDF) need `DALocalFile(path)`
+  so `include_docx_template` takes its `.path()` branch instead of a
+  package-template lookup.
+- A failing fixture reports its path, error type, and full Python traceback in
+  the error's `details` as `fixture`, `error_type`, and `traceback`; the
+  traceback's failing line is attributed to the fixture file.
 
 DOCX output is supported. Generated interview attachments are stored under
 `.simulator/files/`; completion links use real local `file://` URIs and JSON
@@ -724,10 +792,13 @@ x = "clients[0]"
 ```
 
 Use `render form.docx --bind x=clients[1]` to override a configured binding.
-A template-specific table such as `[render-bindings."poa.docx"]` overrides the
-default binding map for that template. Command-line bindings win over
-template-specific config, which wins over the default binding map. Bindings
-are simple names evaluated in an ephemeral render namespace and never saved.
+A template-specific table such as `[simulator.render_bindings."poa.docx"]`
+overrides the default binding map for that template. Command-line bindings win
+over template-specific config, which wins over the default binding map. The
+legacy top-level `[render-bindings]` spelling is an alternative to
+`[simulator.render_bindings]` that supplies the whole table; the two spellings
+do not merge. Bindings are simple names evaluated in an ephemeral render
+namespace and never saved.
 
 Optional `config.py` executes after namespace rehydration and before authored
 flow, evaluation, or render work. Use it for deterministic seed data and
