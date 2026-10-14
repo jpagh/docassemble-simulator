@@ -28,7 +28,9 @@ from docassemble_simulator.execution import (
     Answer, Evaluate, InterviewExecution, ReplayAutomatic, Seek, Start, Status,
 )
 from docassemble_simulator.preflight import ensure_importable
-from docassemble_simulator.trace import ReplayExpectation, screen_content, screen_identity
+from docassemble_simulator.trace import (
+    TraceEntry, replay_expectation, screen_content, screen_identity,
+)
 
 root = Path(sys.argv[1]).resolve()
 with SimulatorRuntime().activate(root):
@@ -41,14 +43,42 @@ with SimulatorRuntime().activate(root):
         assert observed.ok, observed
         return observed.result['value']
 
+    def select_operation(mode, *, answer, seek, replay):
+        # One lookup keeps the three parametrized dispatches identical.
+        return {'answer': answer, 'seek': seek, 'replay': replay}[mode]
+
     def expectation(screen, *, ok=True, error_kind=None, seq=1):
-        identity = screen_identity(screen)
-        return ReplayExpectation(
-            seq, None, identity.key, identity.rule,
-            json.dumps(list(screen_content(screen)), sort_keys=True, default=str),
-            ok, error_kind,
-        )
+        # Replay facts come from the trace-owned serializer; the entry's
+        # operation label is never part of a replay expectation.
+        return replay_expectation(TraceEntry(
+            seq=seq,
+            operation='answer',
+            phase=None,
+            submitted={},
+            ok=ok,
+            screen=screen,
+            identity=screen_identity(screen),
+            content=screen_content(screen),
+            error=None if error_kind is None else {'kind': error_kind},
+        ))
 """
+
+
+#: Shared fixture prefix: an ``entry`` code block plus the ``id: submission``
+#: screen that most acceptance scenarios answer first.
+SUBMISSION_FIXTURE = """\
+---
+mandatory: True
+code: |
+  entry
+---
+id: submission
+"""
+
+
+def _submission_interview(body: str) -> str:
+    """Prefix the shared submission fixture onto a dedented interview body."""
+    return SUBMISSION_FIXTURE + textwrap.dedent(body)
 
 
 def _execute(family: RuntimeFamily, root: Path, interview: str, scenario: str) -> None:
@@ -80,17 +110,24 @@ def test_required_explicit_blank_answer_and_replay_override(
     tmp_path,
     datatype,
 ):
-    """Numeric coercion erases replay's blank intent, unlike ordinary Answer."""
+    """Replay accepts a raw empty numeric that ordinary Answer rejects.
+
+    Observed matrix for the raw submitted value of a visible required field:
+
+    - ``''`` on an integer/number field is rejected by ordinary ``Answer`` as
+      an explicit empty required value, but a replay override accepts it after
+      browser-style coercion to ``0``/``0.0``.
+    - The literal ``None`` (submitted as ``'None'``) rejects in both modes.
+    - Empty text and empty yesnoradio reject in both modes.
+
+    Replay losing the explicit-blank intent is a possible acceptance defect;
+    aligning it with ordinary ``Answer`` (or sanctioning the difference) is a
+    separate decision.
+    """
     _execute(
         family_python,
         tmp_path,
-        f"""
-        ---
-        mandatory: True
-        code: |
-          entry
-        ---
-        id: submission
+        _submission_interview(f"""
         question: Required input
         fields:
           - Entry: entry
@@ -100,7 +137,7 @@ def test_required_explicit_blank_answer_and_replay_override(
         ---
         mandatory: True
         question: Accepted
-        """,
+        """),
         f"""
         numeric = {datatype in ("integer", "number")!r}
         for raw in ('', 'None'):
@@ -144,13 +181,7 @@ def test_submission_settles_defaults_and_visibility_before_validation(
     _execute(
         family_python,
         tmp_path,
-        """
-        ---
-        mandatory: True
-        code: |
-          entry
-        ---
-        id: submission
+        _submission_interview("""
         question: Settling defaults
         fields:
           - Earlier default: removed_default
@@ -176,7 +207,7 @@ def test_submission_settles_defaults_and_visibility_before_validation(
         ---
         mandatory: True
         question: Accepted
-        """,
+        """),
         f"""
         mode = {mode!r}
         for assignments in ((), (('entry', 'explicit'), ('show_more', 'False'))):
@@ -184,13 +215,13 @@ def test_submission_settles_defaults_and_visibility_before_validation(
                 continue  # Seek has no assignment override mode.
             started = execution.run(Start())
             assert started.ok, started
-            operation = {{
-                'answer': Answer(assignments, defaults=True),
-                'seek': Seek('entry', auto=True, activate=True),
-                'replay': ReplayAutomatic('entry', submissions=(assignments,), activate=True,
+            accepted = execution.run(select_operation(
+                mode,
+                answer=Answer(assignments, defaults=True),
+                seek=Seek('entry', auto=True, activate=True),
+                replay=ReplayAutomatic('entry', submissions=(assignments,), activate=True,
                     expectations=(expectation(started.result),)),
-            }}[mode]
-            accepted = execution.run(operation)
+            ))
             assert accepted.ok, accepted
             assert 'replay_divergence' not in accepted.result, accepted
             assert execution.run(Status()).result['question_text'] == 'Accepted'
@@ -212,13 +243,7 @@ def test_submission_rejects_unstable_default_visibility_without_saving(
     _execute(
         family_python,
         tmp_path,
-        """
-        ---
-        mandatory: True
-        code: |
-          entry
-        ---
-        id: submission
+        _submission_interview("""
         question: Unstable default
         fields:
           - Entry: entry
@@ -228,18 +253,18 @@ def test_submission_rejects_unstable_default_visibility_without_saving(
               code: globals().get('entry', True)
         validation code: |
           validation_ran = True
-        """,
+        """),
         f"""
         started = execution.run(Start())
         assert started.ok, started
         before = execution.run(Status()).result
-        operation = {{
-            'answer': Answer((), defaults=True),
-            'seek': Seek('entry', auto=True, activate=True),
-            'replay': ReplayAutomatic('entry', submissions=((),), activate=True,
+        rejected = execution.run(select_operation(
+            {mode!r},
+            answer=Answer((), defaults=True),
+            seek=Seek('entry', auto=True, activate=True),
+            replay=ReplayAutomatic('entry', submissions=((),), activate=True,
                 expectations=(expectation(started.result),)),
-        }}[{mode!r}]
-        rejected = execution.run(operation)
+        ))
         assert not rejected.ok and rejected.error.kind == 'validation', rejected
         assert rejected.error.message == 'rendered defaults have unstable visibility', rejected
         assert execution.run(Status()).result == before
@@ -255,13 +280,7 @@ def test_early_input_rejection_uses_assignments_and_defaults_but_not_blanks_or_v
     _execute(
         family_python,
         tmp_path,
-        f"""
-        ---
-        mandatory: True
-        code: |
-          entry
-        ---
-        id: submission
+        _submission_interview(f"""
         question: Early guidance
         fields:
           - Entry: entry
@@ -284,7 +303,7 @@ def test_early_input_rejection_uses_assignments_and_defaults_but_not_blanks_or_v
           with open({str(tmp_path / "authored-validation")!r}, 'w') as marker:
             marker.write('ran')
           validation_error('Authored rejection')
-        """,
+        """),
         """
         started = execution.run(Start())
         assert started.ok, started
@@ -334,9 +353,8 @@ def test_submission_checks_required_then_constraints_then_authored_validation(
 ):
     entry_default = "" if gate == "required" else f"    default: {gate}\n"
     amount_default = 1 if gate in {"required", "constraint"} else 2
-    interview = (
-        "---\nmandatory: True\ncode: |\n  entry\n"
-        "---\nid: submission\nquestion: Ordered gates\nfields:\n"
+    interview = _submission_interview(
+        "question: Ordered gates\nfields:\n"
         "  - Entry: entry\n"
         + entry_default
         + "  - Amount: amount\n    datatype: integer\n    min: 2\n"
@@ -359,14 +377,14 @@ def test_submission_checks_required_then_constraints_then_authored_validation(
         started = execution.run(Start())
         assert started.ok, started
         before = execution.run(Status()).result
-        operation = {{
-            'answer': Answer((), defaults=True),
-            'seek': Seek('entry', auto=True, activate=True),
-            'replay': ReplayAutomatic('entry', submissions=((),), activate=True,
+        outcome = execution.run(select_operation(
+            mode,
+            answer=Answer((), defaults=True),
+            seek=Seek('entry', auto=True, activate=True),
+            replay=ReplayAutomatic('entry', submissions=((),), activate=True,
                 expectations=(expectation(started.result, ok=gate == 'accepted',
                     error_kind=None if gate == 'accepted' else 'validation'),)),
-        }}[mode]
-        outcome = execution.run(operation)
+        ))
         assert (root / 'authored-validation').exists() is (gate in ('authored', 'accepted'))
         if gate == 'accepted':
             assert outcome.ok, outcome
@@ -405,13 +423,7 @@ def test_answer_partial_strict_and_no_validate_keep_distinct_acceptance_rules(
     _execute(
         family_python,
         tmp_path,
-        """
-        ---
-        mandatory: True
-        code: |
-          entry
-        ---
-        id: submission
+        _submission_interview("""
         question: Mode differences
         fields:
           - Entry: entry
@@ -429,7 +441,7 @@ def test_answer_partial_strict_and_no_validate_keep_distinct_acceptance_rules(
         ---
         mandatory: True
         question: Accepted
-        """,
+        """),
         """
         assert execution.run(Start()).ok
         before = execution.run(Status()).result
@@ -554,13 +566,7 @@ def test_automatic_submission_gathers_required_object_groups_without_choices(
     _execute(
         family_python,
         tmp_path,
-        f"""
-        ---
-        mandatory: True
-        code: |
-          entry
-        ---
-        id: submission
+        _submission_interview(f"""
         question: No choices
         fields:
           - Entry: entry
@@ -572,7 +578,7 @@ def test_automatic_submission_gathers_required_object_groups_without_choices(
         ---
         mandatory: True
         question: Accepted
-        """,
+        """),
         """
         for mode in ('seek', 'replay'):
             started = execution.run(Start())
@@ -668,5 +674,45 @@ def test_replay_commits_all_accepted_steps_only_when_activated(
             else:
                 assert execution.run(Status()).result == before
                 assert value("any(name in globals() for name in ('first_value', 'second_value', 'target_value'))") == 'False'
+        """,
+    )
+
+
+def test_rejected_answer_preserves_accepted_saved_session(
+    family_python,  # noqa: F811 - fixture registered by import
+    tmp_path,
+):
+    """An accepted screen survives a rejected answer on the following screen."""
+    _execute(
+        family_python,
+        tmp_path,
+        _submission_interview("""
+        question: First screen
+        fields:
+          - Entry: entry
+            default: first
+        ---
+        mandatory: True
+        question: Second screen
+        fields:
+          - Required: second_value
+        ---
+        mandatory: True
+        question: Done
+        """),
+        """
+        assert execution.run(Start()).ok
+        accepted = execution.run(Answer((), defaults=True))
+        assert accepted.ok, accepted
+        before = execution.run(Status()).result
+        assert before['question_text'] == 'Second screen', before
+        assert value('entry') == "'first'"
+
+        rejected = execution.run(Answer((('second_value', ''),)))
+        assert not rejected.ok and rejected.error.kind == 'validation', rejected
+        assert rejected.error.details['missing_required'] == ['second_value'], rejected
+        assert execution.run(Status()).result == before
+        assert value('entry') == "'first'"
+        assert value("'second_value' in globals()") == 'False'
         """,
     )
