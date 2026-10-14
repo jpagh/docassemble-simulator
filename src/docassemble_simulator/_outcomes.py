@@ -1,4 +1,4 @@
-"""Private typed outcome vocabulary shared by simulator modules."""
+"""Private typed outcome and failure vocabulary shared by simulator modules."""
 
 from __future__ import annotations
 
@@ -40,6 +40,32 @@ class Failure:
         object.__setattr__(self, "kind", ErrorKind(self.kind))
         if self.details is None:
             object.__setattr__(self, "details", {})
+
+
+class ExecutionFailure(Exception):
+    """A typed failure raised while an operation is in flight.
+
+    Execution and the shared screen-submission implementation both raise it,
+    so it lives with the failure vocabulary they share (ADR-0002).
+    :class:`Failure` is the value an outcome carries; this is the exception
+    that becomes one.
+    """
+
+    def __init__(
+        self,
+        kind: ErrorKind,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ):
+        super().__init__(message)
+        self.kind = ErrorKind(kind)
+        self.details = details
+
+
+def first_line(error: BaseException) -> str:
+    """The one-line summary of an error message used in typed failures."""
+    text = str(error).strip()
+    return text.splitlines()[0] if text else type(error).__name__
 
 
 @dataclass(frozen=True)
