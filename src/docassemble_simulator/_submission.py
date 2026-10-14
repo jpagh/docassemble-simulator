@@ -214,14 +214,10 @@ def _screen_field_targets(screen):
 
 
 def _field_types(screen, targets):
-    types = {
-        field.get("variable"): str(field.get("type", "")).lower()
-        for field in screen.get("fields") or []
+    return {
+        variable: str(field.get("type", "")).lower()
+        for variable, field in _field_specs(screen, targets).items()
     }
-    for variable, target in targets.items():
-        if variable in types:
-            types.setdefault(target, types[variable])
-    return types
 
 
 def _field_specs(screen, targets):
@@ -538,7 +534,7 @@ def _required_violations(namespace, screen, blank_submissions):
 
 def _blankable_fields(namespace, screen):
     """Yield fields the browser would submit for a shown screen but that are
-    not yet defined: ``(variable, default, required)``."""
+    not yet defined: ``(variable, default, required, field)``."""
     targets = _screen_field_targets(screen)
     for field in screen.get("fields") or []:
         variable = field.get("variable")
