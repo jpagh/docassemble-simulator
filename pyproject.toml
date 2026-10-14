@@ -45,10 +45,6 @@
         "docassemble-webapp>=1.10,<1.11",
     ]
 
-[build-system]
-    requires      = ["uv_build>=0.12.5,<0.14"]
-    build-backend = "uv_build"
-
 [tool.pyrefly]
     project-includes       = [
         "**/*.py*",
@@ -70,6 +66,7 @@
     ]
 
 [tool.uv]
+    package                 = true
     # da19 and da110 pin disjoint versions of the same target packages, so
     # they can never be installed together. Declaring the conflict lets uv
     # resolve and lock each family separately (`uv sync --group da19`, ...).
