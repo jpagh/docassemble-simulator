@@ -34,6 +34,28 @@ mise run test:runtime # provision both lanes and run the compatibility gate
 mise run test:all-da  # aggregate lane: whole suite with both families wired
 ```
 
+## Native build prerequisites
+
+`docassemble-base` pins `numpy==2.2.6` and `scipy==1.15.3` in both families,
+and neither pin publishes a cp314 wheel. With the CPython 3.14 interpreter the
+lanes currently provision, both are built from source, and scipy's meson
+configure needs a BLAS/LAPACK it can find through pkg-config or CMake.
+Homebrew's `openblas` is keg-only, so its `openblas.pc` is not on the default
+pkg-config search path. Export the path (or configure it in the machine's
+global mise config) before provisioning:
+
+```sh
+PKG_CONFIG_PATH=/opt/homebrew/opt/openblas/lib/pkgconfig uv sync --group da110
+```
+
+Without it, provisioning fails while building `scipy==1.15.3` with
+`Dependency "OpenBLAS" not found`. The first cold provision compiles numpy and
+scipy (minutes) and caches the built wheels; later syncs reuse them. A lane
+interpreter of CPython 3.12 or 3.13 avoids the source build entirely, because
+both pins ship cp313 wheels. None of this reaches the published package: the
+simulator itself depends only on `pyyaml`, and the target project's own
+`docassemble-base` pin decides whether an install has to build scipy.
+
 ## Runtime gate
 
 `mise run test:runtime` is the compatibility gate. It provisions both lanes,
