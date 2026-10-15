@@ -146,9 +146,9 @@ def test_resolution_explanation_prepares_saved_state_without_committing(
     assert _session_bytes(execution) == before
 
 
-@pytest.mark.parametrize("refresh_before_operation", [False, True])
+@pytest.mark.parametrize("compile_before_operation", [False, True])
 def test_compile_warning_is_attributed_once_across_operations(
-    tmp_path, monkeypatch, da_stubs, capsys, refresh_before_operation
+    tmp_path, monkeypatch, da_stubs, capsys, compile_before_operation
 ):
     monkeypatch.setattr(
         "docassemble_simulator._diagnostics._SEEN_COMPILE_WARNINGS", set()
@@ -174,8 +174,10 @@ def test_compile_warning_is_attributed_once_across_operations(
         return original(identity)
 
     monkeypatch.setattr(cache, "get_interview", get_interview)
-    if refresh_before_operation:
-        assert execution.ensure_current() is None
+    if compile_before_operation:
+        # A compile before the operation consumes the warning first, exactly as
+        # a worker's inspection compile would.
+        execution.catalog._compile(execution.scope.interview)
     first = execution.run(ExplainResolution("shared"))
     second = execution.run(ExplainResolution("shared"))
     warnings = [item for item in first.diagnostics if item.kind == "compile-warning"]

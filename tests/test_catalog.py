@@ -15,7 +15,6 @@ from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
 from docassemble_simulator.catalog import (
     CatalogFailure,
-    CompileFailure,
     InterviewCatalog,
 )
 
@@ -545,16 +544,14 @@ def test_compiled_cache_reloads_when_source_disappears(tmp_path, monkeypatch, da
     assert len(calls) == 2
 
 
-def test_ensure_current_recompiles_an_unwatched_global_cache(
-    tmp_path, monkeypatch, da_stubs
-):
-    """An inspection must not read a compile this catalog never watched.
+def test_compile_recompiles_an_unwatched_global_cache(tmp_path, monkeypatch, da_stubs):
+    """A request must not read a compile this catalog never watched.
 
     docassemble's compiled-interview cache is process-global, so a request that
-    compiles through a fresh catalog (a catalog inspection, or a trace replay's
-    short-lived execution) can find an entry recorded by another catalog in the
-    same process. Without a watch of its own this catalog cannot tell whether
-    that entry predates an edit.
+    compiles through a catalog with no watch of its own (a worker's first
+    inspection, or a trace replay's short-lived execution) can find an entry
+    recorded by another catalog in the same process. With no signature to
+    compare, ``_compile`` drops that entry and recompiles.
     """
     source = _reload_workspace(tmp_path)
     calls = _install_interview_cache(monkeypatch, source)
@@ -572,21 +569,18 @@ def test_ensure_current_recompiles_an_unwatched_global_cache(
     }
     catalog = InterviewCatalog(tmp_path, identity, cache_compiled=True)
 
-    catalog.ensure_current()
-
     # The unwatched global compile is dropped and replaced by a fresh compile.
-    assert len(calls) == 1
     assert catalog._compile() is not stale
     assert len(calls) == 1
     # With a watch established, an unchanged source then stays warm.
-    catalog.ensure_current()
+    assert catalog._compile() is not stale
     assert len(calls) == 1
 
 
-def test_ensure_current_evicts_helpers_of_an_unwatched_global_cache(
+def test_compile_evicts_helpers_of_an_unwatched_global_cache(
     tmp_path, monkeypatch, da_stubs
 ):
-    """A never-watched reload still evicts the helpers the cached compile imported.
+    """A never-watched compile still evicts the helpers the cached source imported.
 
     Another catalog (or a share of docassemble's process-global cache) can leave
     an entry this catalog never watched, and the cached interview is the only
@@ -613,26 +607,27 @@ def test_ensure_current_evicts_helpers_of_an_unwatched_global_cache(
     os.utime(helper, (original_mtime, original_mtime))
     catalog = InterviewCatalog(tmp_path, identity, cache_compiled=True)
 
-    catalog.ensure_current()
+    # The unwatched global compile is dropped, evicting the helper module and
+    # its bytecode before the fresh compile.
+    fresh = catalog._compile()
 
     # The helper module the cached compile imported is gone, so the next import
     # executes the edited body instead of the stale module or its bytecode.
     assert "docassemble.pkg.helpers" not in sys.modules
-    assert catalog._compile() is not stale
+    assert fresh is not stale
     assert len(calls) == 2
     assert _execute_workspace_helper(helper).greeting("x") == "v2:x"
 
 
-def test_a_failed_refresh_compiles_once_and_surfaces_the_cli_error(
+def test_a_failing_compile_raises_into_the_consumers_typed_path(
     tmp_path, monkeypatch, da_stubs
 ):
-    """One compile per request, even when the refresh cannot compile.
+    """One failing request pays one compile and reports its own typed error.
 
-    The refresh returns its failure instead of swallowing it, and the catalog
-    (or replay execution) the caller compiles through re-raises it, so the
-    failing request pays one compile and still reports the typed error its own
-    path produces: a ``check`` row, a ``CatalogFailure``, or a replay
-    divergence.
+    With the refresh handoff removed, the catalog compiles the broken source
+    itself and raises into the consumer: ``check`` records a typed row while
+    the inspection verbs raise ``CatalogFailure``. No adapter re-runs the
+    compile, and no request clears or mutates a Saved session.
     """
     source = _reload_workspace(tmp_path)
     identity = "docassemble.pkg:data/questions/main.yml"
@@ -643,17 +638,7 @@ def test_a_failed_refresh_compiles_once_and_surfaces_the_cli_error(
     calls = _install_interview_cache(monkeypatch, source, broken)
     catalog = InterviewCatalog(tmp_path, identity, cache_compiled=True)
 
-    failure = catalog.ensure_current()
-
-    assert len(calls) == 1
-    assert isinstance(failure, CompileFailure)
-    assert failure.identity == identity
-    assert isinstance(failure.error, ValueError)
-
-    # What the catalog adapter hands its payload catalog: one compile, and the
-    # same per-interview row ``sim check`` reports for this project.
-    payload = InterviewCatalog(tmp_path, identity, compile_failure=failure)
-    check = payload.check().result
+    check = catalog.check().result
     assert len(calls) == 1
     assert check["failures"] == 1
     assert check["results"] == [
@@ -665,15 +650,15 @@ def test_a_failed_refresh_compiles_once_and_surfaces_the_cli_error(
         }
     ]
 
-    # The listing verbs keep their own typed mapping, still without compiling.
+    # The listing verbs keep their own typed mapping, each paying one compile.
     with pytest.raises(CatalogFailure, match="ValueError: broken interview"):
-        payload.questions()
+        catalog.questions()
     with pytest.raises(CatalogFailure, match="ValueError: broken interview"):
-        payload.index()
-    assert len(calls) == 1
+        catalog.index()
+    assert len(calls) == 3
 
 
-def test_ensure_current_reloads_a_changed_source(tmp_path, monkeypatch, da_stubs):
+def test_compile_reloads_a_changed_source(tmp_path, monkeypatch, da_stubs):
     """A watched edit is reloaded before the caller inspects the program."""
     source = _reload_workspace(tmp_path)
     calls = _install_interview_cache(monkeypatch, source)
@@ -684,33 +669,48 @@ def test_ensure_current_reloads_a_changed_source(tmp_path, monkeypatch, da_stubs
 
     source.write_text("---\nquestion: Second\nfields:\n  - Name: user_name\n")
     os.utime(source, (0, 0))
-    catalog.ensure_current()
+    second = catalog._compile()
 
     assert len(calls) == 2
-    assert catalog._compile() is not first
+    assert second is not first
+    assert catalog._compile() is second
     assert len(calls) == 2
 
 
-def test_execution_ensure_current_delegates_to_its_catalog(tmp_path, monkeypatch):
-    """The worker's execution exposes the refresh for its adapter requests."""
-    from docassemble_simulator import execution as execution_module
+def test_execution_compiles_its_identity_through_a_shared_catalog(
+    tmp_path, monkeypatch, da_stubs
+):
+    """An execution with a catalog compiles its own identity through it.
+
+    A worker shares one cached catalog with the readers it spawns, and a trace
+    replay compiles the recorded interview through that same authority without
+    adopting the worker's selector.
+    """
     from docassemble_simulator.execution import InterviewExecution
 
-    calls = []
+    _reload_workspace(tmp_path)
+    compiled = []
 
     class FakeCatalog:
-        def __init__(self, root, selector=None, **kwargs):
+        def __init__(self):
             self.identity = "docassemble.pkg:data/questions/main.yml"
 
-        def ensure_current(self, identity=None):
-            calls.append(identity)
+        def _compile(self, identity=None):
+            compiled.append(identity)
+            return SimpleNamespace(questions_list=[], questions={}, debug=False)
 
-    monkeypatch.setattr(execution_module, "InterviewCatalog", FakeCatalog)
-    execution = InterviewExecution(tmp_path, "docassemble.pkg:data/questions/main.yml")
+    catalog = FakeCatalog()
+    execution = InterviewExecution(
+        tmp_path, "docassemble.other:data/questions/main.yml", catalog=catalog
+    )
+    assert execution.catalog is catalog
+    assert execution.scope.interview == "docassemble.other:data/questions/main.yml"
+    monkeypatch.setattr(execution, "_prepare", lambda interview, namespace: None)
 
-    execution.ensure_current("docassemble.other:data/questions/main.yml")
+    with execution._prepared_operation({}):
+        pass
 
-    assert calls == ["docassemble.other:data/questions/main.yml"]
+    assert compiled == ["docassemble.other:data/questions/main.yml"]
 
 
 def test_reload_evicts_declared_helper_modules(tmp_path, monkeypatch, da_stubs):
