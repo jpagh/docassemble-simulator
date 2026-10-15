@@ -264,6 +264,58 @@ class GenericAmountInterview(FakeInterview):
         }
 
 
+class OverlappingAmountInterview(FakeInterview):
+    """A generic screen whose placeholder spelling collides with a resolved target.
+
+    ``sought`` is ``x.amount`` and ``orig_sought`` is ``x.child.amount``, so the
+    described field ``x.amount`` resolves through ``_screen_field_targets`` to
+    ``x.child.amount`` and the optional field ``x.child.amount`` resolves to
+    ``x.child.child.amount``. A submission of ``x.amount`` therefore writes to
+    the required field's resolved variable, while a blank ``x.child.amount``
+    submission writes one level deeper.
+    """
+
+    def assemble(self, namespace, interview_status):
+        if "x" not in namespace:
+            from docassemble.base.util import DAObject
+
+            x = DAObject("x")
+            x.child = DAObject("child")
+            x.child.child = DAObject("child")
+            namespace["x"] = x
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(saveas="x.amount", datatype="integer", required=True),
+                SimpleNamespace(
+                    saveas="x.child.amount", datatype="integer", required=False
+                ),
+            ],
+        )
+        interview_status.question_text = "What is the amount?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.amount"
+        interview_status.orig_sought = "x.child.amount"
+        interview_status.selectcompute = {}
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        status = args[1]
+        self.assemble(namespace, status)
+        return {
+            "type": "question",
+            "question": status.question,
+            "question_text": status.question_text,
+            "subquestion_text": status.subquestion_text,
+            "continue_label": status.continue_label,
+            "sought": status.sought,
+            "orig_sought": status.orig_sought,
+            "selectcompute": status.selectcompute,
+        }
+
+
 class GenericMultiFieldInterview(FakeInterview):
     """A generic screen whose triggering field is not the only described field."""
 
@@ -2006,6 +2058,32 @@ def test_generic_object_replay_override_naming_resolved_target_stops_required(
     assert replay.result["auto_stop"]["reason"] == "required fields missing"
     assert replay.result["auto_stop"]["missing_required"] == ["x.amount"]
     assert execution.run(Evaluate("'amount' in vars(rav)")).result["value"] == "False"
+
+
+def test_generic_object_blank_name_colliding_with_another_fields_target_is_not_blank(
+    tmp_path, monkeypatch, da_stubs
+):
+    """A blank submission blanks only the field it writes to.
+
+    ``x.child.amount`` is the resolved target of the required field
+    ``x.amount``, so the old ``targets.get(variable) in blank_submissions``
+    check read the *other* field's blank submission as if it blanked this
+    field. The blank actually writes to ``x.child.child.amount``, leaving the
+    required field's resolved value at 5; the submission must be accepted.
+    """
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, OverlappingAmountInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("x.amount", "5"), ("x.child.amount", ""))))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("x.child.amount")).result["value"] == "5"
+    assert execution.run(Evaluate("x.child.child.amount")).result["value"] == "0"
 
 
 def test_generic_object_answer_resolves_placeholder_field_names(

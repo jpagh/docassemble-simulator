@@ -505,11 +505,15 @@ def _constraint_errors(namespace, screen):
 def _required_violations(namespace, screen, blank_submissions):
     """Return ``(variable, reason)`` for required visible fields that are not
     answered. Signatures are never required; hidden fields are not shown and
-    therefore not assigned or required. Blank intent is keyed by the name the
-    caller submitted, which for a generic-object screen may be the resolved
-    target rather than the placeholder field variable."""
+    therefore not assigned or required. A blank submission is resolved through
+    the same screen targets an assignment uses (:func:`_apply_assignments`
+    resolves a submitted name with ``targets.get(name, name)``), so a field is
+    blank by intent only when the blank wrote to that field's resolved
+    variable. A submitted name that merely coincides with the field's target
+    while resolving elsewhere does not blank the field."""
     violations = []
     targets = _screen_field_targets(screen)
+    blank_targets = {targets.get(name, name) for name in blank_submissions}
     for field in screen.get("fields") or []:
         variable = field.get("variable")
         if not isinstance(variable, str) or not variable:
@@ -529,11 +533,7 @@ def _required_violations(namespace, screen, blank_submissions):
         found, value = _field_value(namespace, variable, targets)
         if not found:
             violations.append((variable, "undefined"))
-        elif (
-            variable in blank_submissions
-            or targets.get(variable) in blank_submissions
-            or _is_empty_value(value)
-        ):
+        elif targets.get(variable, variable) in blank_targets or _is_empty_value(value):
             violations.append((variable, "empty"))
         elif datatype in _GROUP_DATATYPES and _has_no_selected_option(value):
             violations.append((variable, "unselected"))
