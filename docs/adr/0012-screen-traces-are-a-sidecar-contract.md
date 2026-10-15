@@ -25,8 +25,11 @@ Replay compares that pre-submission screen and then applies `answer --defaults`
 (or a per-step override) in its isolated session. The post-walk seek result is
 recorded separately so the trace retains both the transition and the resulting
 screen. A default `answer --defaults` is recorded as `defaults`, never as an
-ordinary empty answer. A trace schema change is required for these meanings;
-earlier traces are input errors, not silently reinterpreted.
+ordinary empty answer. A per-step replay override carries the same
+explicit-blank intent as an ordinary `answer` (ADR-0013, issue #71), so a raw
+empty required field stops the walk instead of being accepted. A trace schema
+change is required for these meanings; earlier traces are input errors, not
+silently reinterpreted.
 
 Issue #9 clarified two points the original text left implicit, and the
 implementation now enforces them:

@@ -110,19 +110,20 @@ def test_required_explicit_blank_answer_and_replay_override(
     tmp_path,
     datatype,
 ):
-    """Replay accepts a raw empty numeric that ordinary Answer rejects.
+    """Replay carries the same explicit-blank intent as ordinary Answer.
 
     Observed matrix for the raw submitted value of a visible required field:
 
     - ``''`` on an integer/number field is rejected by ordinary ``Answer`` as
-      an explicit empty required value, but a replay override accepts it after
-      browser-style coercion to ``0``/``0.0``.
+      an explicit empty required value, and a replay override now rejects it
+      too instead of coercing it to ``0``/``0.0`` before the required gate.
     - The literal ``None`` (submitted as ``'None'``) rejects in both modes.
     - Empty text and empty yesnoradio reject in both modes.
+    - An explicit ``'0'``/``'0.0'`` is accepted in both modes.
 
-    Replay losing the explicit-blank intent is a possible acceptance defect;
-    aligning it with ordinary ``Answer`` (or sanctioning the difference) is a
-    separate decision.
+    The aligned behavior resolves the #67 "possible acceptance defect": a
+    replay can no longer commit a required numeric field a browser could not
+    submit.
     """
     _execute(
         family_python,
@@ -141,8 +142,9 @@ def test_required_explicit_blank_answer_and_replay_override(
         f"""
         numeric = {datatype in ("integer", "number")!r}
         for raw in ('', 'None'):
-            # Only empty raw numeric input coerces to zero; literal None stays None.
-            replay_accepts = numeric and raw == ''
+            # A raw empty submission is explicit-blank intent in both modes,
+            # so a required numeric field no longer coerces to zero; literal
+            # None stays None.
             started = execution.run(Start())
             assert started.ok, started
             before = execution.run(Status()).result
@@ -155,19 +157,38 @@ def test_required_explicit_blank_answer_and_replay_override(
 
             replay = execution.run(ReplayAutomatic(
                 'entry', submissions=((('entry', raw),),), activate=True,
-                expectations=(expectation(started.result, ok=replay_accepts,
-                    error_kind=None if replay_accepts else 'validation'),),
+                expectations=(expectation(started.result, ok=False, error_kind='validation'),),
             ))
             assert replay.ok, replay
             assert 'replay_divergence' not in replay.result, replay
-            assert replay.result['auto_trace'][0]['ok'] is replay_accepts, replay
-            if replay_accepts:
-                assert value('entry') == {("0" if datatype == "integer" else "0.0")!r}
-                assert value('validation_ran') == 'True'
-                assert execution.run(Status()).result['question_text'] == 'Accepted'
-            else:
-                assert replay.result['auto_stop']['missing_required'] == ['entry'], replay
-                assert value("('entry' in globals(), 'validation_ran' in globals())") == '(False, False)'
+            assert replay.result['auto_trace'][0]['ok'] is False, replay
+            assert replay.result['auto_stop']['reason'] == 'required fields missing', replay
+            assert replay.result['auto_stop']['submitted'] is False, replay
+            assert replay.result['auto_stop']['missing_required'] == ['entry'], replay
+            assert value("('entry' in globals(), 'validation_ran' in globals())") == '(False, False)'
+
+        if numeric:
+            # The explicit zero a browser could post still passes the gate.
+            explicit = {("0" if datatype == "integer" else "0.0")!r}
+            started = execution.run(Start())
+            assert started.ok, started
+            accepted = execution.run(Answer((('entry', explicit),)))
+            assert accepted.ok, accepted
+            assert value('entry') == {("0" if datatype == "integer" else "0.0")!r}
+            assert value("'validation_ran' in globals()") == 'True'
+
+            started = execution.run(Start())
+            assert started.ok, started
+            replay = execution.run(ReplayAutomatic(
+                'entry', submissions=((('entry', explicit),),), activate=True,
+                expectations=(expectation(started.result),),
+            ))
+            assert replay.ok, replay
+            assert 'replay_divergence' not in replay.result, replay
+            assert replay.result['auto_trace'][0]['ok'] is True, replay
+            assert value('entry') == {("0" if datatype == "integer" else "0.0")!r}
+            assert value("'validation_ran' in globals()") == 'True'
+            assert execution.run(Status()).result['question_text'] == 'Accepted'
         """,
     )
 
