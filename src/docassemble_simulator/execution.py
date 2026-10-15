@@ -43,8 +43,9 @@ from docassemble_simulator._outcomes import (
     first_line,
 )
 from docassemble_simulator._submission import (
-    SubmissionGate,
-    SubmissionRejected,
+    AssignmentsRejected,
+    RequiredRejected,
+    ValidationRejected,
     _early_rejection_required_guidance,
     _unknown_field_details,
     accept_screen_submission,
@@ -809,48 +810,58 @@ class InterviewExecution:
                 validate=operation.validate,
                 strict=operation.strict,
             )
-            if isinstance(submission, SubmissionRejected):
-                if submission.gate is SubmissionGate.ASSIGNMENTS:
-                    dispositions = list(submission.dispositions)
-                    try:
-                        details = {
-                            "errors": list(submission.errors),
-                            "assignments": dispositions,
-                        }
-                        # Keep the established active-field and closest-name
-                        # guidance on every early rejection, including parse
-                        # errors.
-                        details.update(_unknown_field_details(screen, dispositions))
-                        details.update(
-                            _early_rejection_required_guidance(
-                                namespace,
-                                screen,
-                                blank_submissions,
-                                interview,
-                            )
+            if isinstance(submission, AssignmentsRejected):
+                dispositions = list(submission.dispositions)
+                try:
+                    details = {
+                        "errors": list(submission.errors),
+                        "assignments": dispositions,
+                    }
+                    # Keep the established active-field and closest-name
+                    # guidance on every early rejection, including parse
+                    # errors.
+                    details.update(_unknown_field_details(screen, dispositions))
+                    details.update(
+                        _early_rejection_required_guidance(
+                            namespace,
+                            screen,
+                            blank_submissions,
+                            interview,
                         )
-                    finally:
-                        # A rejected submission is not a partial commit.
-                        # Guidance may inspect valid assignments and defaults
-                        # in this operation-local namespace, but it must not
-                        # leave them in Working state or let them reach
-                        # persistence.
-                        _restore_namespace(namespace, submission_snapshot)
-                    raise ExecutionFailure(
-                        ErrorKind.VALIDATION
-                        if submission.validation_error
-                        else ErrorKind.ANSWER_INPUT,
-                        "one or more answers could not be applied",
-                        details,
                     )
+                finally:
+                    # A rejected submission is not a partial commit.
+                    # Guidance may inspect valid assignments and defaults
+                    # in this operation-local namespace, but it must not
+                    # leave them in Working state or let them reach
+                    # persistence.
+                    _restore_namespace(namespace, submission_snapshot)
+                raise ExecutionFailure(
+                    ErrorKind.VALIDATION
+                    if submission.validation_error
+                    else ErrorKind.ANSWER_INPUT,
+                    "one or more answers could not be applied",
+                    details,
+                )
+            if isinstance(submission, RequiredRejected):
+                details = {
+                    "errors": list(submission.errors),
+                    "warnings": [],
+                    "assignments": list(submission.dispositions),
+                }
+                details["missing_required"] = list(submission.missing_required)
+                details["active_fields"] = list(submission.active_fields)
+                raise ExecutionFailure(
+                    ErrorKind.VALIDATION,
+                    "screen rejected; all answers were discarded",
+                    details,
+                )
+            if isinstance(submission, ValidationRejected):
                 details = {
                     "errors": list(submission.errors),
                     "warnings": list(submission.warnings),
                     "assignments": list(submission.dispositions),
                 }
-                if submission.gate is SubmissionGate.REQUIRED:
-                    details["missing_required"] = list(submission.missing_required)
-                    details["active_fields"] = list(submission.active_fields)
                 raise ExecutionFailure(
                     ErrorKind.VALIDATION,
                     "screen rejected; all answers were discarded",
@@ -1053,7 +1064,9 @@ class InterviewExecution:
         if namespace is None:
             return ExecutionOutcome(
                 True,
-                self._resolution_report(self._catalog.why(operation.variable)),
+                self._resolution_report(
+                    self._catalog.why(operation.variable, identity=self._identity)
+                ),
             )
 
         with self._prepared_operation(namespace) as (interview, _status):
@@ -1570,7 +1583,9 @@ def _auto_submit_screen(
             screen,
             assignments=assignments,
         )
-        if isinstance(submission, SubmissionRejected):
+        if isinstance(
+            submission, AssignmentsRejected | RequiredRejected | ValidationRejected
+        ):
             _restore_namespace(namespace, snapshot)
             return None, _auto_submission_stop(submission, screen)
         _mark_answered(interview, namespace, screen.get("question_name"))
@@ -1590,9 +1605,11 @@ def _auto_submit_screen(
         raise
 
 
-def _auto_submission_stop(submission: SubmissionRejected, screen):
+def _auto_submission_stop(
+    submission: AssignmentsRejected | RequiredRejected | ValidationRejected, screen
+):
     """Report one rejected automatic submission as its replay stop payload."""
-    if submission.gate is SubmissionGate.ASSIGNMENTS:
+    if isinstance(submission, AssignmentsRejected):
         return {
             "reason": (
                 "validation failed" if submission.validation_error else "answer failed"
@@ -1602,7 +1619,7 @@ def _auto_submission_stop(submission: SubmissionRejected, screen):
             "assignments": list(submission.dispositions),
             "screen": screen,
         }
-    if submission.gate is SubmissionGate.REQUIRED:
+    if isinstance(submission, RequiredRejected):
         return {
             "reason": "required fields missing",
             "submitted": False,

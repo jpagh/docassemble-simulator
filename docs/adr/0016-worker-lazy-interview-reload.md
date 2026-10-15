@@ -4,6 +4,11 @@ status: accepted
 
 # A persistent worker lazily reloads its interview source
 
+> **Superseded in part by [ADR-0018](0018-worker-catalog-is-the-compile-authority.md):**
+> the caller-refresh protocol (`ensure_current`/`CompileFailure`) is replaced by
+> the catalog-owned compile authority; every reload guarantee recorded below
+> stands.
+
 ## Context
 
 A worker compiles the interview once and keeps it for the process's life so a
