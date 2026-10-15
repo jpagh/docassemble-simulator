@@ -52,9 +52,9 @@ from docassemble_simulator._submission import (
 )
 from docassemble_simulator.catalog import (
     CatalogFailure,
-    CompileFailure,
     InterviewCatalog,
     _provenance,
+    resolve_interview,
 )
 from docassemble_simulator.compatibility import (
     AssemblyLineCompatibilityError,
@@ -539,20 +539,34 @@ class InterviewExecution:
         root: str | Path,
         selector: str | None = None,
         *,
+        catalog: InterviewCatalog | None = None,
         config_fingerprint: str = "",
         config_context: dict[str, Any] | None = None,
         session_directory: Path | None = None,
         cache_interview: bool = False,
-        compile_failure: CompileFailure | None = None,
     ):
         self.root = Path(root).resolve()
-        self._catalog = InterviewCatalog(
-            self.root,
-            selector,
-            cache_compiled=cache_interview,
-            compile_failure=compile_failure,
-        )
-        self._identity = self._catalog.identity
+        if catalog is not None:
+            # A shared catalog is a worker's one compile authority. It may be
+            # scoped to another selector (a replay names the recorded
+            # interview), so this execution resolves its own identity and
+            # compiles it explicitly.
+            self._catalog = catalog
+            self._identity = (
+                resolve_interview(self.root, selector)[0]
+                if selector is not None
+                else catalog.identity
+            )
+        else:
+            # The catalog's selector is the resolved identity, so a worker's
+            # shared catalog scopes read-only requests (``check``) to one
+            # interview even when it was started without an explicit one.
+            self._identity = resolve_interview(self.root, selector)[0]
+            self._catalog = InterviewCatalog(
+                self.root,
+                self._identity,
+                cache_compiled=cache_interview,
+            )
         self._store = StateStore(
             self.root,
             self._identity,
@@ -560,6 +574,11 @@ class InterviewExecution:
             config_context,
             session_directory=session_directory,
         )
+
+    @property
+    def catalog(self) -> InterviewCatalog:
+        """This execution's compile authority, read-only to adapters."""
+        return self._catalog
 
     @property
     def scope(self) -> ExecutionScope:
@@ -682,7 +701,7 @@ class InterviewExecution:
     @contextmanager
     def _prepared_operation(self, namespace: dict[str, Any]):
         """Own compile, context entry, and namespace preparation once."""
-        interview = self._catalog._compile()
+        interview = self._catalog._compile(self._identity)
         previous_debug = getattr(interview, "debug", _MISSING)
         forced_debug = is_capture_enabled() and previous_debug is not True
         if forced_debug:
@@ -702,21 +721,6 @@ class InterviewExecution:
         """Discard every saved session for this interview without changing scope."""
         with self._store.lock():
             return self._store.reset()
-
-    def ensure_current(self, identity: str | None = None) -> CompileFailure | None:
-        """Refresh the compiled interview a non-operation caller is about to read.
-
-        The worker's catalog and trace adapter requests compile outside an
-        execution operation, through their own catalog instances, so they ask
-        this execution to run the source reload check
-        (:meth:`InterviewCatalog.ensure_current`) before they compile. That
-        keeps this execution's catalog, which owns the worker's watches, the
-        process's record of what was compiled from which source. A refresh that
-        could not compile returns its :class:`CompileFailure` for the caller to
-        hand to the catalog or execution that would otherwise compile the same
-        broken source again.
-        """
-        return self._catalog.ensure_current(identity)
 
     def _start(self):
         namespace = _fresh_namespace()

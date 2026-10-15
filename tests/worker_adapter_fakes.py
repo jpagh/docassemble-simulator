@@ -13,9 +13,7 @@ class AdapterFakeExecution:
     The command adapter maps each request onto its own seam (the renderer, the
     catalog payload, or a trace seam), so a test that sends one through the
     worker's generic handler registry proves the adapter never fell through to
-    ``Worker.execution.run``. The double also records the source refreshes a
-    catalog or trace request asks for, because those requests compile outside
-    an execution operation.
+    ``Worker.execution.run``.
     """
 
     _identity = IDENTITY
@@ -28,15 +26,13 @@ class AdapterFakeExecution:
             tmp_path / "sessions",
             tmp_path / "sessions" / "main.pkl",
         )
+        # A shared compile authority for the catalog and trace adapters.
+        self.catalog = None
         self.operations = []
-        self.source_refreshes = []
 
     def run(self, operation):
         self.operations.append(operation)
         raise AssertionError("an adapter request must not run an execution operation")
-
-    def ensure_current(self, identity=None):
-        self.source_refreshes.append(identity)
 
     def reset(self):
         pass

@@ -18,7 +18,6 @@ from worker_adapter_fakes import AdapterFakeExecution
 
 from docassemble_simulator import cli
 from docassemble_simulator._outcomes import ErrorKind
-from docassemble_simulator.catalog import CompileFailure
 from docassemble_simulator.trace import (
     ComparePolicy,
     ScreenIdentity,
@@ -211,12 +210,11 @@ INTERVIEW = "docassemble.example:data/questions/main.yml"
 
 
 def _replay_worker(tmp_path, execution=None):
-    """A worker namespace for the replay handler, with a refreshable execution."""
+    """A worker namespace for the replay handler, with a shared catalog."""
     return SimpleNamespace(
         root=tmp_path,
         identity=INTERVIEW,
-        execution=execution
-        or SimpleNamespace(ensure_current=lambda identity=None: None),
+        execution=execution or SimpleNamespace(catalog=None),
     )
 
 
@@ -343,30 +341,23 @@ def test_trace_replay_worker_rejects_malformed_requests(tmp_path, payload, messa
 # -- protocol --------------------------------------------------------------
 
 
-def test_trace_replay_worker_refreshes_the_source_before_replaying(
+def test_trace_replay_worker_hands_the_shared_catalog_to_the_replay(
     monkeypatch, tmp_path
 ):
-    """The replay refreshes the worker's watch before its isolated execution.
+    """The replay compiles through the worker's one catalog, not a fresh one.
 
-    A replay compiles through its own short-lived execution, which reads
-    docassemble's process-global compiled-interview cache; the worker's own
-    watch is the only thing that can invalidate that entry when the source
-    changed between two requests. A refresh that could not compile is handed to
-    that execution so the failing request pays one compile.
+    The worker's cached catalog owns the current-source watches and its
+    ``_compile`` revalidates every identity it is asked for, so the replay
+    observes an edit without the adapter refreshing first.
     """
-    order = []
-    failure = CompileFailure(INTERVIEW, ValueError("broken interview"))
-
-    def replay(root, golden, **kwargs):
-        order.append(("replay", kwargs.get("compile_failure")))
-        return _replay_report(True)
-
-    monkeypatch.setattr(cli, "_trace_replay_report", replay)
-    execution = SimpleNamespace(
-        ensure_current=lambda identity=None: (
-            order.append(("refresh", identity)) or failure
-        )
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "_trace_replay_report",
+        lambda root, golden, **kwargs: seen.update(kwargs) or _replay_report(True),
     )
+    catalog = object()
+    execution = SimpleNamespace(catalog=catalog)
     worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW, execution=execution)
 
     outcome = cli._trace_replay_worker_request(
@@ -374,17 +365,21 @@ def test_trace_replay_worker_refreshes_the_source_before_replaying(
     )
 
     assert outcome.ok is True
-    assert order == [("refresh", INTERVIEW), ("replay", failure)]
+    assert seen["catalog"] is catalog
+    assert seen["interview"] == INTERVIEW
 
 
-def test_trace_replay_worker_refreshes_the_requested_interview(monkeypatch, tmp_path):
-    """A replay for another interview refreshes the identity it will compile."""
-    refreshed = []
+def test_trace_replay_worker_names_the_recorded_interview(monkeypatch, tmp_path):
+    """A replay for another interview still forwards the requested identity."""
+    seen = {}
     monkeypatch.setattr(
-        cli, "_trace_replay_report", lambda *args, **kwargs: _replay_report(True)
+        cli,
+        "_trace_replay_report",
+        lambda root, golden, **kwargs: seen.update(kwargs) or _replay_report(True),
     )
-    execution = SimpleNamespace(ensure_current=refreshed.append)
-    worker = SimpleNamespace(root=tmp_path, identity=INTERVIEW, execution=execution)
+    worker = SimpleNamespace(
+        root=tmp_path, identity=INTERVIEW, execution=SimpleNamespace(catalog=object())
+    )
 
     cli._trace_replay_worker_request(
         SimpleNamespace(),
@@ -395,7 +390,7 @@ def test_trace_replay_worker_refreshes_the_requested_interview(monkeypatch, tmp_
         },
     )
 
-    assert refreshed == ["docassemble.other:data/questions/main.yml"]
+    assert seen["interview"] == "docassemble.other:data/questions/main.yml"
 
 
 @pytest.mark.parametrize(
@@ -561,14 +556,14 @@ def test_trace_replay_report_runs_in_a_temporary_session_directory(
     write_trace(golden, trace)
     original = golden.read_bytes()
     captured = {}
-    failure = CompileFailure(INTERVIEW, ValueError("broken interview"))
+    catalog = object()
 
     class FakeExecution:
         def __init__(self, root, interview, **kwargs):
             captured["root"] = root
             captured["interview"] = interview
             captured["session_directory"] = kwargs["session_directory"]
-            captured["compile_failure"] = kwargs["compile_failure"]
+            captured["catalog"] = kwargs["catalog"]
 
         def run(self, operation):
             return SimpleNamespace(ok=True, result=trace.entries[0].screen, error=None)
@@ -580,13 +575,13 @@ def test_trace_replay_report_runs_in_a_temporary_session_directory(
         lambda root, interview, resolved_configuration=None: trace.metadata,
     )
 
-    report = cli._trace_replay_report(tmp_path, str(golden), compile_failure=failure)
+    report = cli._trace_replay_report(tmp_path, str(golden), catalog=catalog)
 
     assert report["clean"] is True
     assert captured["root"] == tmp_path
     assert captured["interview"] == INTERVIEW
-    # A worker refresh that already failed is handed to the replay execution.
-    assert captured["compile_failure"] is failure
+    # The replay's isolated execution compiles through the shared catalog.
+    assert captured["catalog"] is catalog
     scope = captured["session_directory"]
     assert scope.parent.parent == tmp_path / ".simulator"
     assert scope.parent.name.startswith("trace-replay-")

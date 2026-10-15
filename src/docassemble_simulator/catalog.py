@@ -106,22 +106,6 @@ class CatalogFailure(Exception):
 
 
 @dataclass(frozen=True)
-class CompileFailure:
-    """A failed compile a refresh already paid for.
-
-    ``identity`` is the interview that failed and ``error`` the exception
-    docassemble raised. Handing it to a catalog (or an execution) for the same
-    identity makes that path re-raise the error instead of compiling the same
-    broken source again, so one request pays for one failed compile while the
-    caller still reports its own typed error: a ``check`` row, a catalog
-    failure, or a replay divergence.
-    """
-
-    identity: str
-    error: BaseException
-
-
-@dataclass(frozen=True)
 class CatalogOutcome:
     interview: str | None
     result: Any
@@ -413,7 +397,6 @@ class InterviewCatalog:
         selector: str | None = None,
         *,
         cache_compiled: bool = False,
-        compile_failure: CompileFailure | None = None,
     ):
         self.root = Path(root).resolve()
         self.selector = selector
@@ -428,9 +411,6 @@ class InterviewCatalog:
         # helper files and package directories, and the signatures captured at
         # compile time. Only populated when the compiled cache is on.
         self._watches: dict[str, _WatchRecord] = {}
-        # A compile a caller's refresh already paid for and lost; re-raised for
-        # that identity instead of compiling the same broken source again.
-        self._compile_failure = compile_failure
 
     @property
     def identity(self) -> str:
@@ -443,15 +423,18 @@ class InterviewCatalog:
         a runtime pair that cannot compile the standard birthdate metadata
         would otherwise surface as an authored-looking label error. Authored
         parse errors after a passing probe keep their compile-error behavior.
+
+        A cached catalog revalidates the identity it is asked for before
+        serving it, so every caller compiles through this one authority and
+        reads a current program without a separate refresh step. On a cache hit
+        it compares the watched signatures. With no watch of its own but
+        docassemble's process-global cache already holding the identity
+        (another catalog in this process compiled it), it drops that entry and
+        the declared workspace helpers it imported before recompiling.
         """
         from docassemble_simulator._diagnostics import capture_compile_warnings
 
         selected = identity or self.identity
-        failure = self._compile_failure
-        if failure is not None and failure.identity == selected:
-            # A refresh already ran this compile and it failed; compiling the
-            # same source again would only pay for the same error twice.
-            raise failure.error
         require_assemblyline_compatibility()
         from docassemble.base.interview_cache import get_interview
 
@@ -464,6 +447,13 @@ class InterviewCatalog:
                     return cached
                 # The source changed under a running worker: drop both
                 # docassemble's compile and ours so get_interview recompiles.
+                self._reload_source(selected)
+            elif self._cached_interview(selected) is not None:
+                # No watch of our own, but docassemble's process-global cache
+                # already holds this identity (another catalog in this process
+                # compiled it). With no signature to compare it may be stale,
+                # so drop the entry and the workspace helpers it imported
+                # before compiling.
                 self._reload_source(selected)
         saved_argv = list(sys.argv)
         sys.argv[:] = ["docassemble-simulator", selected]
@@ -650,42 +640,6 @@ class InterviewCatalog:
         if current is None or current != record.source_signature:
             return False
         return self._tree_signatures(record.module_paths) == record.module_signature
-
-    def ensure_current(self, identity: str | None = None) -> CompileFailure | None:
-        """Reload the compiled program a caller is about to inspect.
-
-        :meth:`_compile`'s cache-hit path revalidates only an identity this
-        catalog compiled itself, but docassemble's compiled-interview cache is
-        process-global: a caller that compiles through its own fresh catalog
-        (the worker's ``check``/``questions``/``index`` requests, or a trace
-        replay's short-lived execution) can read an entry another catalog in
-        the same process recorded before the source changed. This seam runs
-        the same check for that caller. A watched identity that is still
-        current is left alone; a changed or never-watched one drops
-        docassemble's compile and the interview's workspace helper modules and
-        recompiles through this catalog.
-
-        The recompile records the watch the next caller compares against, so a
-        single edit costs one reload rather than one per request. A
-        recompilation failure is returned instead of raised: the caller hands
-        the :class:`CompileFailure` to the catalog or execution that would have
-        compiled again, which re-raises it, so one request pays for one compile
-        and still reports its own typed error (a ``check`` row, a
-        ``CatalogFailure``, or a replay divergence). The seam belongs to the
-        cached path (``cache_compiled=True``); a caller without it keeps no
-        watch and so recompiles on every call.
-        """
-        selected = identity or self.identity
-        record = self._watches.get(selected)
-        if record is not None and self._source_current(selected):
-            return None
-        self._reload_source(selected)
-        try:
-            self._compile(selected)
-        except Exception as error:  # noqa: BLE001 - the caller reports the typed error
-            logger.debug("reload check could not recompile %r: %s", selected, error)
-            return CompileFailure(selected, error)
-        return None
 
     def _declared_module_names(self, interview) -> set[str]:
         """Fully-qualified names declared by the interview's import directives."""
@@ -1136,7 +1090,6 @@ class InterviewCatalog:
 __all__ = [
     "CatalogFailure",
     "CatalogOutcome",
-    "CompileFailure",
     "InterviewCatalog",
     "guess_main_interview",
     "list_interviews",
