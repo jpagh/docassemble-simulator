@@ -1582,6 +1582,7 @@ def _auto_submit_screen(
             namespace,
             screen,
             assignments=assignments,
+            blank_submissions=_blank_assignments(assignments),
         )
         if isinstance(
             submission, AssignmentsRejected | RequiredRejected | ValidationRejected
@@ -2054,12 +2055,24 @@ def _blank_submissions(operation):
 
     A browser cannot submit a blank required input; an API caller can, and
     that explicit clearing must fail the required gate instead of parking an
-    empty value in the namespace.
+    empty value in the namespace.  ``use_code`` bypasses browser-style
+    parsing entirely, so authored code carries no explicit-blank intent.
     """
     if operation.code:
         return set()
+    return _blank_assignments(operation.assignments)
+
+
+def _blank_assignments(assignments):
+    """Variables among raw ``(variable, raw)`` assignments submitted empty.
+
+    A blank string or a value that parses to ``None`` is the explicit-blank
+    intent a browser cannot send for a required input.  Ordinary answers and
+    replay overrides both carry it, so neither can clear a required field
+    that a browser would have refused.
+    """
     blanks = set()
-    for variable, raw in operation.assignments:
+    for variable, raw in assignments:
         if raw.strip() == "" or parse_value(raw) is None:
             blanks.add(variable)
     return blanks

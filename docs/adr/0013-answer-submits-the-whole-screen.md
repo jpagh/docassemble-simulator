@@ -65,6 +65,8 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
   defaults or synthesize blanks. The omitted-hidden-field POST divergence
   remains deliberate, not an unresolved requirement of this change.
 - An explicitly empty submission for a visible required field (`field=`, `field=None`, or a value that coerces to `None`) fails the required gate with an "is empty" message; a quoted `"None"` remains an ordinary string value. This is the API equivalent of a browser refusing to submit a blank required input. `--partial` downgrades it to a warning like any other missing required field. An object group field that rendered no choices is exempt: docassemble clears and gathers it rather than applying a selection (ADR-0014), so there is none to demand.
+
+  **Amendment (issue #71).** Replay's per-step submissions carry the same explicit-blank intent as an ordinary `answer`, so a raw empty or `None` replay override on a visible required field fails the required gate and stops the walk with the required-missing `auto_stop` payload. Replay no longer lets browser-style coercion turn an empty numeric override into `0`/`0.0` and commit it: a replay can no longer commit a screen state a browser user could not have submitted. Literal text, `None`, yesnoradio, and non-required numeric fields keep their existing behavior, and an explicit `0`/`0.0` is still accepted.
 - Signature fields are never required and become `DAEmpty()` when untouched, so templates and documents that reference them render as empty instead of failing the flow. Signature capture itself is not part of the CLI submission path.
 
 ## Known gaps
