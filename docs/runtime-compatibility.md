@@ -89,6 +89,49 @@ canary; neither is part of the other. The corpus gate provisions the modern
 lane itself, validates the external fixture checkout before pytest, and fails
 when the canary would otherwise pass by skipping (see README).
 
+## ONNX Runtime telemetry teardown
+
+The Linux aarch64 evidence below was revalidated with docassemble-base and
+docassemble-webapp both at 1.10.13 in the modern lane and both at 1.9.13 in the
+legacy lane, with ONNX Runtime 1.30.0 in each. The original modern observation
+used a stale 1.10.10 environment, not the 1.10.13 matrix pin.
+
+ONNX Runtime 1.30.0 (AssemblyLine → ALToolbox → markitdown → magika)
+can race a telemetry HTTP callback during native static destruction on macOS,
+then abort with `recursive_mutex lock failed: Invalid argument` after the worker
+has acknowledged shutdown. Calling `onnxruntime.disable_telemetry_events()`
+after import is insufficient: in both provisioned lanes on Linux aarch64,
+plain import and import followed by that API still create
+`$XDG_CACHE_HOME/Microsoft/DeveloperTools/.onnxruntime/deviceid` and
+`onnxruntime.db` in a fresh cache home.
+
+The simulator instead forces `ORT_DISABLE_TELEMETRY=1` before runtime imports:
+in persistent-worker and corpus child environments, and at CLI entry for both
+worker and in-process one-shot commands (including a macOS library-path
+re-exec). This deliberately overrides an explicitly exported value: enabling
+telemetry is not a safe opt-out from the teardown-race mitigation. Other
+inherited environment values are preserved. Embedders that import ONNX Runtime
+before entering the simulator must set the variable before that import; the
+simulator cannot undo native initialization that already happened.
+
+With that pre-import switch, neither the telemetry directory nor its files are
+created on Linux, demonstrating prevention of the telemetry initialization
+implicated in the crash. The isolated-cache regression in
+`tests/test_onnx_telemetry_real_runtime.py` verifies this through the actual
+runner, worker CLI, and one-shot CLI launch paths in both lanes, without a
+network service or a dependency-pin change.
+
+The macOS SIGABRT was **not reproduced** on the Linux aarch64 development host.
+Post-change revalidation completed three worker journeys plus three fresh-worker
+saved-session reloads per lane, both idle and under two-process CPU load:
+complete screen traces, drained authored diagnostics, reloadable sessions,
+acknowledged shutdown, exit 0, no abort stderr, and no surviving children in
+both lanes. This is not proof that macOS exits are fixed. The exact
+acknowledged-shutdown/SIGABRT/stderr exemption, its warning
+attribution, and all negative tests in `tests/test_real_runtime.py` remain;
+macOS repeated-journey/load validation is still required. Neither immediate
+process exit nor blanket stderr suppression is used.
+
 ## Dependency pinning and security alerts
 
 `docassemble-base` and `docassemble-webapp` pin their entire dependency tree

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -480,3 +481,19 @@ def test_resolve_provenance_requires_override_for_identical_collision(
         discover_fixture_cases(fixtures)[0], packages, overrides={"same.yml": "base"}
     )
     assert case.package == "base"
+
+
+@pytest.mark.parametrize("explicit_environment", [False, True])
+def test_run_subprocess_disables_onnx_telemetry_before_child_imports(
+    monkeypatch, explicit_environment
+):
+    monkeypatch.setenv("ORT_DISABLE_TELEMETRY", "0")
+    environment = dict(os.environ) if explicit_environment else None
+    result = run_subprocess(
+        [sys.executable, "-c", "import os; print(os.environ['ORT_DISABLE_TELEMETRY'])"],
+        environment=environment,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "1\n"
+    assert result.stderr == ""

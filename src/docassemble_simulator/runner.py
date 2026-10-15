@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from docassemble_simulator._environment import target_interpreter_environment
 from docassemble_simulator.config import (
     deep_merge,
     load_config,
@@ -386,7 +387,9 @@ class SimulatorRunner:
                 stdout=subprocess.PIPE,
                 stderr=None,
                 bufsize=0,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env=target_interpreter_environment(
+                    {**os.environ, "PYTHONUNBUFFERED": "1"}
+                ),
             )
         except OSError as error:
             self._cleanup_workspace()
