@@ -16,6 +16,7 @@ from docassemble_simulator.execution import (
     Execute,
     InterviewExecution,
     Refresh,
+    ReplayAutomatic,
     SeedState,
     Seek,
     Start,
@@ -29,6 +30,12 @@ from docassemble_simulator.render import (
     RenderRequest,
     SavedSessionSource,
     SnapshotSource,
+)
+from docassemble_simulator.trace import (
+    TraceEntry,
+    replay_expectation,
+    screen_content,
+    screen_identity,
 )
 
 
@@ -217,6 +224,44 @@ class GenericDateInterview(FakeInterview):
         interview_status.sought = "x.date"
         interview_status.orig_sought = "rav.date"
         interview_status.selectcompute = {}
+
+
+class GenericAmountInterview(FakeInterview):
+    """A required generic-object integer screen: ``x.amount`` targets ``rav.amount``."""
+
+    def assemble(self, namespace, interview_status):
+        if "rav" not in namespace:
+            from docassemble.base.util import DAObject
+
+            namespace["rav"] = DAObject("rav")
+        interview_status.question = SimpleNamespace(
+            question_type="fields",
+            name=None,
+            validation_code=None,
+            fields=[
+                SimpleNamespace(saveas="x.amount", datatype="integer", required=True)
+            ],
+        )
+        interview_status.question_text = "What is the amount?"
+        interview_status.subquestion_text = None
+        interview_status.continue_label = None
+        interview_status.sought = "x.amount"
+        interview_status.orig_sought = "rav.amount"
+        interview_status.selectcompute = {}
+
+    def askfor(self, variable, namespace, *args, **kwargs):
+        status = args[1]
+        self.assemble(namespace, status)
+        return {
+            "type": "question",
+            "question": status.question,
+            "question_text": status.question_text,
+            "subquestion_text": status.subquestion_text,
+            "continue_label": status.continue_label,
+            "sought": status.sought,
+            "orig_sought": status.orig_sought,
+            "selectcompute": status.selectcompute,
+        }
 
 
 class GenericMultiFieldInterview(FakeInterview):
@@ -1850,6 +1895,117 @@ def test_generic_object_validation_evaluates_resolved_targets(
 
     assert accepted.ok
     assert "warnings" not in accepted.result
+
+
+def test_generic_object_resolved_target_blank_fails_required_gate(
+    tmp_path, monkeypatch, da_stubs
+):
+    """An empty submission through the resolved target is explicit blank intent.
+
+    The caller named ``rav.amount``, the screen's resolved target, so the
+    required gate must see the blank even though the field variable is the
+    generic placeholder ``x.amount``.
+    """
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericAmountInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    before = _session_bytes(tmp_path)
+    rejected = execution.run(Answer((("rav.amount", ""),)))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    assert rejected.error.details["missing_required"] == ["x.amount"]
+    assert "is empty" in rejected.error.details["errors"][0]
+    assert _session_bytes(tmp_path) == before
+
+
+def test_generic_object_placeholder_blank_still_fails_required_gate(
+    tmp_path, monkeypatch, da_stubs
+):
+    """The placeholder spelling keeps rejecting an explicit blank (regression)."""
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericAmountInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    before = _session_bytes(tmp_path)
+    rejected = execution.run(Answer((("x.amount", ""),)))
+
+    assert not rejected.ok
+    assert rejected.error.kind == "validation"
+    assert rejected.error.details["missing_required"] == ["x.amount"]
+    assert "is empty" in rejected.error.details["errors"][0]
+    assert _session_bytes(tmp_path) == before
+
+
+def test_generic_object_resolved_target_explicit_zero_is_accepted(
+    tmp_path, monkeypatch, da_stubs
+):
+    """An explicit ``0`` through the resolved target is not blank intent."""
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericAmountInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+
+    accepted = execution.run(Answer((("rav.amount", "0"),)))
+
+    assert accepted.ok
+    assert execution.run(Evaluate("rav.amount")).result["value"] == "0"
+
+
+def test_generic_object_replay_override_naming_resolved_target_stops_required(
+    tmp_path, monkeypatch, da_stubs
+):
+    """A replay override that names the resolved target carries blank intent too."""
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, GenericAmountInterview
+    )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"], "DAObject", PicklableStubObject
+    )
+    assert execution.run(Start()).ok
+    generic = execution.run(Seek("rav.amount")).result
+    assert generic["sought"] == "x.amount"
+    expected = replay_expectation(
+        TraceEntry(
+            seq=1,
+            operation="answer",
+            phase=None,
+            submitted={},
+            ok=False,
+            screen=generic,
+            identity=screen_identity(generic),
+            content=screen_content(generic),
+            error={"kind": "validation"},
+        )
+    )
+
+    replay = execution.run(
+        ReplayAutomatic(
+            "rav.amount",
+            submissions=((("rav.amount", ""),),),
+            activate=True,
+            expectations=(expected,),
+        )
+    )
+
+    assert replay.ok
+    assert replay.result["auto_trace"][0]["ok"] is False
+    assert "replay_divergence" not in replay.result
+    assert replay.result["auto_stop"]["reason"] == "required fields missing"
+    assert replay.result["auto_stop"]["missing_required"] == ["x.amount"]
+    assert execution.run(Evaluate("'amount' in vars(rav)")).result["value"] == "False"
 
 
 def test_generic_object_answer_resolves_placeholder_field_names(
