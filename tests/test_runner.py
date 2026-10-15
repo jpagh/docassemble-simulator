@@ -288,3 +288,27 @@ def test_runner_shared_policy_does_not_copy_source(tmp_path):
 
     assert runner.root == project.resolve()
     runner.close()
+
+
+@pytest.mark.parametrize("value", [None, "0", "1"])
+def test_runner_launch_disables_onnx_telemetry_before_child_imports(
+    tmp_path, monkeypatch, value
+):
+    if value is None:
+        monkeypatch.delenv("ORT_DISABLE_TELEMETRY", raising=False)
+    else:
+        monkeypatch.setenv("ORT_DISABLE_TELEMETRY", value)
+    executable = _worker_executable(
+        tmp_path,
+        "response = {'id': request['id'], 'ok': True, 'scope': "
+        + repr(_scope())
+        + ", 'result': {'telemetry': os.environ.get('ORT_DISABLE_TELEMETRY'), "
+        "'unbuffered': os.environ.get('PYTHONUNBUFFERED')}}\n"
+        "print(json.dumps(response), flush=True)\n",
+    )
+
+    with SimulatorRunner(_project(tmp_path), python=executable) as runner:
+        response = runner.request("ping")
+
+    assert response.ok
+    assert response.result == {"telemetry": "1", "unbuffered": "1"}

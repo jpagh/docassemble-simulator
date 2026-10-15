@@ -28,6 +28,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
+from docassemble_simulator._environment import target_interpreter_environment
+
 
 class CorpusError(Exception):
     """A corpus, runtime, staging, or runner configuration error."""
@@ -465,7 +467,11 @@ for name in ('base', 'demo', 'webapp'):
 print(json.dumps(result))
 """
     completed = subprocess.run(
-        [str(interpreter), "-c", script], capture_output=True, text=True, check=False
+        [str(interpreter), "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=target_interpreter_environment(),
     )
     if completed.returncode:
         raise CorpusError(
@@ -567,6 +573,7 @@ for package in {_NLTK_PACKAGES!r}:
             text=True,
             check=False,
             timeout=60,
+            env=target_interpreter_environment(),
         )
     except subprocess.TimeoutExpired:
         return False
@@ -656,6 +663,7 @@ def _python_version(interpreter: str | Path) -> str:
         capture_output=True,
         text=True,
         check=False,
+        env=target_interpreter_environment(),
     )
     if completed.returncode:
         raise CorpusError(
@@ -756,7 +764,7 @@ def run_subprocess(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=dict(environment) if environment is not None else None,
+        env=target_interpreter_environment(environment),
         start_new_session=(os.name == "posix"),
     )
     try:

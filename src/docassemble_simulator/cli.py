@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import tempfile
 import textwrap
@@ -18,6 +19,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from docassemble_simulator._environment import target_interpreter_environment
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
 from docassemble_simulator._runtime import (
     SimulatorRuntime,
@@ -2761,6 +2763,7 @@ def _emit_worker_startup_error(args, error, kind):
 
 
 def main(argv=None):
+    os.environ.update(target_interpreter_environment())
     _reexec_with_dyld_path()
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
