@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from docassemble_simulator.catalog import InterviewCatalog
 from docassemble_simulator.execution import ExplainResolution, InterviewExecution, Start
 
 
@@ -117,6 +118,37 @@ def test_resolution_explanation_without_saved_state_stays_static(
     ]
     assert "state" not in outcome.result["candidates"][0]
     assert not execution.scope.session.exists()
+
+
+def test_resolution_explanation_without_saved_state_names_its_identity(
+    tmp_path, monkeypatch, da_stubs
+):
+    """A shared catalog scoped elsewhere still explains this execution's interview.
+
+    A trace replay shares the worker's catalog but names a different interview,
+    so the no-saved-session inspection must compile the execution's identity
+    rather than the catalog's selector.
+    """
+    execution = _execution(tmp_path, monkeypatch, da_stubs, guards=["True"])
+    cache = sys.modules["docassemble.base.interview_cache"]
+    original = cache.get_interview
+    compiled = []
+
+    def recording_get_interview(identity):
+        compiled.append(identity)
+        return original(identity)
+
+    monkeypatch.setattr(cache, "get_interview", recording_get_interview)
+    catalog = InterviewCatalog(
+        tmp_path, "docassemble.other:data/questions/main.yml", cache_compiled=True
+    )
+    shared = InterviewExecution(tmp_path, execution.scope.interview, catalog=catalog)
+    assert catalog.identity != shared.scope.interview
+
+    outcome = shared.run(ExplainResolution("shared"))
+
+    assert outcome.ok
+    assert compiled == [shared.scope.interview]
 
 
 def test_resolution_explanation_prepares_saved_state_without_committing(

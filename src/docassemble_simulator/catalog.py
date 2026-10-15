@@ -946,6 +946,7 @@ class InterviewCatalog:
         *,
         interview=None,
         language: str | None = None,
+        identity: str | None = None,
     ):
         """Explain resolution using the compiled runtime's candidate order.
 
@@ -953,9 +954,17 @@ class InterviewCatalog:
         session is available.  Keeping compilation and guard evaluation in
         that execution context lets real runtime objects and helpers behave as
         they do during seeking, while the returned report contains only plain
-        values.
+        values.  ``identity`` names the interview to compile when no
+        ``interview`` is supplied: a caller sharing a catalog scoped to
+        another selector (a trace replay) explains its own interview rather
+        than the catalog's.
         """
-        interview = interview or self._compile_for_inspection()
+        if interview is None:
+            interview = (
+                self._compile_for_inspection(identity)
+                if identity is not None
+                else self._compile_for_inspection()
+            )
         entry = (getattr(interview, "questions", {}) or {}).get(variable) or {}
         if language is None:
             try:
@@ -1078,9 +1087,9 @@ class InterviewCatalog:
             },
         )
 
-    def _compile_for_inspection(self):
+    def _compile_for_inspection(self, identity: str | None = None):
         try:
-            return self._compile()
+            return self._compile(identity)
         except AssemblyLineCompatibilityError:
             raise
         except Exception as error:  # includes DAError/DAErrorMissingVariable

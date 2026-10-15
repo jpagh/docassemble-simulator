@@ -1,13 +1,13 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # The worker's interview catalog is its compile authority
 
-> **Proposed.** Recorded from the issue #69 investigation (evidence and the
-> strongest counterargument are in that issue). If accepted, this supersedes
-> ADR-0016's caller-refresh protocol: the reload guarantee stays, the
-> adapter-side refresh-and-failure-handoff choreography goes.
+> Recorded from the issue #69 investigation (evidence and the strongest
+> counterargument are in that issue). This supersedes ADR-0016's caller-refresh
+> protocol: the reload guarantee stays, the adapter-side
+> refresh-and-failure-handoff choreography goes.
 
 ## Context
 

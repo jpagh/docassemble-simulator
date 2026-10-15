@@ -19,7 +19,6 @@ import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from enum import StrEnum
 from typing import Any
 
 from docassemble_simulator._outcomes import (
@@ -39,15 +38,6 @@ logger = logging.getLogger(__name__)
 _MISSING = object()
 
 
-class SubmissionGate(StrEnum):
-    """The gate that rejected one screen submission."""
-
-    ASSIGNMENTS = "assignments"
-    REQUIRED = "required"
-    CONSTRAINT = "constraint"
-    AUTHORED = "authored"
-
-
 @dataclass(frozen=True)
 class SubmissionAccepted:
     """A screen the shared sequence accepted, with its per-assignment facts."""
@@ -57,25 +47,41 @@ class SubmissionAccepted:
 
 
 @dataclass(frozen=True)
-class SubmissionRejected:
-    """A screen the shared sequence rejected, and the gate that stopped it.
+class AssignmentsRejected:
+    """A rejected submission whose assignment gate stopped it.
 
-    Only the facts that gate produced are populated: ``missing_required`` and
-    ``active_fields`` belong to the required gate, ``warnings`` to authored
-    validation, and ``validation_error`` marks an assignment that failed
-    docassemble's own per-field validation hook.
+    ``validation_error`` marks an assignment that failed docassemble's own
+    per-field validation hook rather than being unknown or unparseable.
     """
 
-    gate: SubmissionGate
     errors: tuple[str, ...]
     dispositions: tuple[dict[str, Any], ...] = ()
-    warnings: tuple[str, ...] = ()
-    missing_required: tuple[str, ...] = ()
-    active_fields: tuple[str, ...] = ()
     validation_error: bool = False
 
 
-SubmissionVerdict = SubmissionAccepted | SubmissionRejected
+@dataclass(frozen=True)
+class RequiredRejected:
+    """A rejected submission whose rendered required gate stopped it."""
+
+    errors: tuple[str, ...]
+    dispositions: tuple[dict[str, Any], ...] = ()
+    missing_required: tuple[str, ...] = ()
+    active_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ValidationRejected:
+    """A rejected submission whose rendered-constraint or authored-validation
+    gate stopped it; both gates are reported identically."""
+
+    errors: tuple[str, ...]
+    dispositions: tuple[dict[str, Any], ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+SubmissionVerdict = (
+    SubmissionAccepted | AssignmentsRejected | RequiredRejected | ValidationRejected
+)
 
 
 def accept_screen_submission(
@@ -120,8 +126,7 @@ def accept_screen_submission(
         dispositions=dispositions,
     )
     if errors:
-        return SubmissionRejected(
-            gate=SubmissionGate.ASSIGNMENTS,
+        return AssignmentsRejected(
             errors=tuple(errors),
             dispositions=tuple(dispositions),
             validation_error=any(
@@ -136,8 +141,7 @@ def accept_screen_submission(
         submission_screen = _submit_screen_fields(namespace, screen, interview)
     violations = _required_violations(namespace, submission_screen, blank_submissions)
     if violations and not partial:
-        return SubmissionRejected(
-            gate=SubmissionGate.REQUIRED,
+        return RequiredRejected(
             errors=tuple(
                 _required_message(variable, reason) for variable, reason in violations
             ),
@@ -149,8 +153,7 @@ def accept_screen_submission(
         _constraint_errors(namespace, submission_screen) if not partial else []
     )
     if constraint_errors:
-        return SubmissionRejected(
-            gate=SubmissionGate.CONSTRAINT,
+        return ValidationRejected(
             errors=tuple(constraint_errors),
             dispositions=tuple(dispositions),
         )
@@ -169,8 +172,7 @@ def accept_screen_submission(
         authored_errors.extend(warnings)
         warnings = []
     if authored_errors:
-        return SubmissionRejected(
-            gate=SubmissionGate.AUTHORED,
+        return ValidationRejected(
             errors=tuple(authored_errors),
             dispositions=tuple(dispositions),
             warnings=tuple(warnings),
