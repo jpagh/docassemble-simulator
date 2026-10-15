@@ -505,7 +505,9 @@ def _constraint_errors(namespace, screen):
 def _required_violations(namespace, screen, blank_submissions):
     """Return ``(variable, reason)`` for required visible fields that are not
     answered. Signatures are never required; hidden fields are not shown and
-    therefore not assigned or required."""
+    therefore not assigned or required. Blank intent is keyed by the name the
+    caller submitted, which for a generic-object screen may be the resolved
+    target rather than the placeholder field variable."""
     violations = []
     targets = _screen_field_targets(screen)
     for field in screen.get("fields") or []:
@@ -527,7 +529,11 @@ def _required_violations(namespace, screen, blank_submissions):
         found, value = _field_value(namespace, variable, targets)
         if not found:
             violations.append((variable, "undefined"))
-        elif variable in blank_submissions or _is_empty_value(value):
+        elif (
+            variable in blank_submissions
+            or targets.get(variable) in blank_submissions
+            or _is_empty_value(value)
+        ):
             violations.append((variable, "empty"))
         elif datatype in _GROUP_DATATYPES and _has_no_selected_option(value):
             violations.append((variable, "unselected"))
