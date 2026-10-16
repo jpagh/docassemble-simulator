@@ -1,4 +1,4 @@
-"""Linux-observable prevention of ORT's native telemetry initialization."""
+"""Platform-aware observation of ORT's native telemetry SDK initialization."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import json
 import os
 import subprocess
 import sys
+import time
+from functools import partial
+from pathlib import Path
 
 import pytest
 from test_real_runtime import (  # noqa: F401 - fixtures registered by import
@@ -20,9 +23,123 @@ from docassemble_simulator.runner import SimulatorRunner
 pytestmark = [
     pytest.mark.real_runtime,
     pytest.mark.skipif(
-        sys.platform != "linux", reason="Linux telemetry cache observable"
+        sys.platform not in {"linux", "darwin"},
+        reason="telemetry state paths are known on Linux and macOS",
     ),
 ]
+
+
+def _telemetry_state_directory(home: Path, cache: Path) -> Path:
+    # Upstream posix/device_id.cc ignores XDG_CACHE_HOME on Apple.
+    base = (
+        home / "Library" / "Application Support" if sys.platform == "darwin" else cache
+    )
+    return base / "Microsoft" / "DeveloperTools" / ".onnxruntime"
+
+
+def _assert_process_group_exited(pgid: int, *, timeout: float = 5) -> None:
+    # Each launch gets a new session so the group includes inherited descendants,
+    # even after the direct child is reaped. Allow bounded orphan-reaping latency.
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        assert time.monotonic() < deadline, f"surviving worker process group {pgid}"
+        time.sleep(0.05)
+
+
+def test_process_group_exit_check_detects_survivor_after_leader_exits():
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
+    # Both are our children so we can reap them on Linux as well as macOS.
+    # The second process models a descendant's inherited group membership.
+    with subprocess.Popen(command, process_group=0) as leader:
+        try:
+            with subprocess.Popen(command, process_group=leader.pid) as member:
+                try:
+                    leader.terminate()
+                    leader.wait(timeout=5)
+                    with pytest.raises(ProcessLookupError):
+                        os.kill(leader.pid, 0)
+                    with pytest.raises(
+                        AssertionError, match="surviving worker process group"
+                    ):
+                        _assert_process_group_exited(leader.pid, timeout=0)
+                finally:
+                    member.terminate()
+                    member.wait(timeout=5)
+            _assert_process_group_exited(leader.pid)
+        finally:
+            if leader.poll() is None:
+                leader.terminate()
+                leader.wait(timeout=5)
+
+
+@pytest.mark.skipif(
+    os.environ.get("DASIMULATOR_TELEMETRY_DIAGNOSTICS") != "1",
+    reason="opt-in only: enables telemetry and may trigger the native macOS abort",
+)
+@pytest.mark.parametrize(
+    "mode", ["plain-import", "post-import-disable", "pre-import-disable"]
+)
+def test_onnx_telemetry_state_diagnostic(family_python, tmp_path, mode):  # noqa: F811
+    home = tmp_path / "home"
+    home.mkdir()
+    cache = home / ".cache"
+    environment = {
+        **_environment(),
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(cache),
+    }
+    environment.pop("ORT_DISABLE_TELEMETRY", None)
+    if mode == "pre-import-disable":
+        environment["ORT_DISABLE_TELEMETRY"] = "1"
+    # Never import an enabled uploader in pytest itself: static destruction can
+    # SIGABRT on macOS. Isolate both the state and the potentially crashing import.
+    command = [
+        str(family_python.interpreter),
+        "-c",
+        "import importlib.util, sys\n"
+        "if importlib.util.find_spec('onnxruntime') is None: sys.exit(77)\n"
+        "import onnxruntime\n"
+        + (
+            "onnxruntime.disable_telemetry_events()\n"
+            if mode == "post-import-disable"
+            else ""
+        )
+        + "print(onnxruntime.__version__, flush=True)\n",
+    ]
+    completed = subprocess.run(
+        command,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode == 77:
+        pytest.skip("onnxruntime is not installed in the target interpreter")
+    state = _telemetry_state_directory(home, cache)
+    evidence = {
+        "lane": family_python.label,
+        "mode": mode,
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "state_directory": str(state),
+        "state_directory_exists": state.is_dir(),
+        "deviceid_exists": (state / "deviceid").is_file(),
+        "database_exists": (state / "onnxruntime.db").is_file(),
+    }
+    print(json.dumps(evidence, sort_keys=True))
+    if mode == "pre-import-disable":
+        assert not state.exists(), evidence
+    else:
+        assert (state / "deviceid").is_file(), evidence
+        assert (state / "onnxruntime.db").is_file(), evidence
+    assert completed.returncode == 0, evidence
 
 
 @pytest.mark.parametrize("launch", ["runner", "worker", "one-shot"])
@@ -86,13 +203,22 @@ def test_target_interpreter_launch_prevents_onnx_telemetry_state(
         "fields:\n  - Name: name\n"
     )
     if launch == "runner":
-        with SimulatorRunner(
+        runner = SimulatorRunner(
             project,
             interview="main.yml",
             python=interpreter,
             offline=True,
             timeout=120,
-        ) as runner:
+        )
+        # Test-only process isolation; do not change the production runner's
+        # launch semantics just to observe its descendants at shutdown.
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "docassemble_simulator.runner.subprocess.Popen",
+                partial(subprocess.Popen, start_new_session=True),
+            )
+            runner.open()
+        with runner:
             assert runner.start().ok
             process = runner._process
             assert runner.request("shutdown").ok
@@ -129,6 +255,7 @@ def test_target_interpreter_launch_prevents_onnx_telemetry_state(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         ) as process:
             try:
                 stdout, stderr = process.communicate(input_text, timeout=180)
@@ -149,6 +276,5 @@ def test_target_interpreter_launch_prevents_onnx_telemetry_state(
                 assert frames[-1]["result"]["kind"] == "shutdown"
             pid = process.pid
 
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-    assert not (cache / "Microsoft" / "DeveloperTools" / ".onnxruntime").exists()
+    _assert_process_group_exited(pid)
+    assert not _telemetry_state_directory(home, cache).exists()
