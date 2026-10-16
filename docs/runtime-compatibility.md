@@ -110,23 +110,59 @@ in persistent-worker and corpus child environments, and at CLI entry for both
 worker and in-process one-shot commands (including a macOS library-path
 re-exec). This deliberately overrides an explicitly exported value: enabling
 telemetry is not a safe opt-out from the teardown-race mitigation. Other
-inherited environment values are preserved. Embedders that import ONNX Runtime
-before entering the simulator must set the variable before that import; the
-simulator cannot undo native initialization that already happened.
+inherited environment values are preserved. This prevents the **1DS SDK
+manager/uploader initialization**, not the existence of ONNX Runtime's
+`PosixTelemetry` provider object.
+
+Callers bypassing the CLI/runner launch seams — direct in-process bootstrap,
+custom test harnesses, and `sitecustomize`/`.pth` startup hooks — must set
+`ORT_DISABLE_TELEMETRY=1` **before any runtime bootstrap or `onnxruntime`
+import**. Startup hooks run before CLI entry, so they must inherit the switch
+from the launching environment if they load the runtime. The simulator cannot
+undo native initialization that already happened. An import-order regression
+in `tests/test_environment.py` pins that importing `docassemble_simulator.cli`
+does not itself import `docassemble.*` or `onnxruntime`, allowing `cli.main()`
+to apply the switch before runtime imports.
 
 With that pre-import switch, neither the telemetry directory nor its files are
-created on Linux, demonstrating prevention of the telemetry initialization
-implicated in the crash. The isolated-cache regression in
+created on Linux, demonstrating prevention of the SDK initialization implicated
+in the crash. The isolated-cache regression in
 `tests/test_onnx_telemetry_real_runtime.py` verifies this through the actual
 runner, worker CLI, and one-shot CLI launch paths in both lanes, without a
-network service or a dependency-pin change.
+network service or a dependency-pin change. Its observation path follows
+upstream `posix/device_id.cc`: Linux uses
+`$XDG_CACHE_HOME/Microsoft/DeveloperTools/.onnxruntime`, while Apple ignores XDG
+and uses `$HOME/Library/Application Support/Microsoft/DeveloperTools/.onnxruntime`.
+The regression supports both platforms.
+
+Positive controls (plain import and import plus `disable_telemetry_events()`
+create `deviceid` and `onnxruntime.db`; the pre-import switch creates neither)
+are **opt-in diagnostics**, skipped by default and isolated in subprocesses.
+They deliberately enable telemetry, can emit network traffic, and can themselves
+trigger the macOS abort (#73; microsoft/onnxruntime#33251). They are not part of
+the default gate. To opt in with provisioned lanes:
+
+```sh
+DASIMULATOR_TELEMETRY_DIAGNOSTICS=1 \
+DASIMULATOR_REAL_PYTHON="$PWD/.venv-da110/bin/python" \
+DASIMULATOR_REAL_PYTHON_19="$PWD/.venv-da19/bin/python" \
+uv run pytest -q tests/test_onnx_telemetry_real_runtime.py -k diagnostic -m real_runtime
+```
 
 The macOS SIGABRT was **not reproduced** on the Linux aarch64 development host.
-Post-change revalidation completed three worker journeys plus three fresh-worker
-saved-session reloads per lane, both idle and under two-process CPU load:
-complete screen traces, drained authored diagnostics, reloadable sessions,
-acknowledged shutdown, exit 0, no abort stderr, and no surviving children in
-both lanes. This is not proof that macOS exits are fixed. The exact
+Two separate Linux campaigns were recorded (these are not interchangeable
+workload counts):
+
+- The revalidation recorded here completed **three worker journeys plus three
+  fresh-worker saved-session reloads per lane**, both idle and under two-process
+  CPU load: complete screen traces, drained authored diagnostics, reloadable
+  sessions, acknowledged shutdown, exit 0, no abort stderr, and no surviving
+  children in both lanes.
+- #73's closing comment records a separate run of **five idle plus five
+  CPU-loaded journeys per lane**, fresh-worker saved-session reloads, and ten
+  bare imports per lane, all exiting 0 without abort stderr.
+
+Neither campaign proves that macOS exits are fixed. The exact
 acknowledged-shutdown/SIGABRT/stderr exemption, its warning
 attribution, and all negative tests in `tests/test_real_runtime.py` remain;
 macOS repeated-journey/load validation is still required. Neither immediate

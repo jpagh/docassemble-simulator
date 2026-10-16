@@ -618,9 +618,9 @@ _STDERR_WAIT = 30.0
 # must follow. It only ever costs time on a worker that died before answering.
 _SHUTDOWN_WAIT = 10.0
 
-# The interpreter runtime writes this line just before aborting when CPython
-# finalizes while a locked C++ object (docassemble's native dependencies) is
-# still alive. It happens intermittently on both supported families and is
+# ONNX Runtime's 1DS telemetry teardown can write this line just before
+# aborting during native static destruction (see runtime-compatibility.md).
+# It happens intermittently on both supported families and is
 # written after the shutdown response, so it is teardown noise from the runtime
 # rather than authored interview output: a journey whose worker died this way is
 # not held to the empty-stderr guarantee, and the abort is reported as a warning
@@ -963,6 +963,14 @@ class WorkerJourney:
         # close() asserts on is then deterministic.
         self._stderr_thread.join(timeout=5)
         self._stdout_thread.join(timeout=5)
+        alive_drains = [
+            thread.name
+            for thread in (self._stderr_thread, self._stdout_thread)
+            if thread.is_alive()
+        ]
+        assert not alive_drains, self.failure_message(
+            f"worker stream drains still alive; output may be incomplete: {alive_drains}"
+        )
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream is not None:
                 try:
@@ -1274,6 +1282,26 @@ def _fake_worker_interpreter(
     )
     script.chmod(0o755)
     return script
+
+
+@pytest.mark.parametrize("drain", ["stderr", "stdout"])
+def test_worker_journey_close_rejects_live_drain_thread(tmp_path, monkeypatch, drain):
+    interpreter = _fake_worker_interpreter(tmp_path, death_signal="TERM")
+    journey = WorkerJourney(interpreter, tmp_path)
+    thread = getattr(journey, f"_{drain}_thread")
+    # Keep real join/EOF behavior, but simulate a drain that outlived its join.
+    monkeypatch.setattr(thread, "is_alive", lambda: True)
+    try:
+        with pytest.raises(AssertionError, match=f"drains still alive.*{drain}"):
+            journey.close()
+    finally:
+        for stream in (
+            journey.process.stdin,
+            journey.process.stdout,
+            journey.process.stderr,
+        ):
+            if stream is not None:
+                stream.close()
 
 
 @pytest.mark.parametrize("family", [LEGACY, MODERN])
