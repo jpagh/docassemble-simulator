@@ -1308,7 +1308,7 @@ def _record_execution(
     ``phase`` and the request's operation name explicitly. Both paths then
     share one recording implementation.
     """
-    from docassemble_simulator.execution import Status
+    from docassemble_simulator.execution import Seek, Status
     from docassemble_simulator.trace import append_trace, is_screen_outcome
 
     if record is None:
@@ -1319,7 +1319,13 @@ def _record_execution(
         command = getattr(args, "command", None)
     context = _trace_operation_context(operation, command)
     result = payload.get("result") if payload.get("ok") else None
-    auto_trace = result.get("auto_trace") if isinstance(result, dict) else None
+    # Only an automatic seek performed this walk; Status can observe a stored
+    # outcome that still carries auto_trace without performing it again.
+    auto_trace = (
+        result.get("auto_trace")
+        if isinstance(operation, Seek) and operation.auto and isinstance(result, dict)
+        else None
+    )
     if auto_trace:
         metadata = _command_trace_metadata(root, args)
         for index, step in enumerate(auto_trace):
