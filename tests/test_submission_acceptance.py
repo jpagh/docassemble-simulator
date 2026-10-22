@@ -617,6 +617,70 @@ def test_automatic_submission_gathers_required_object_groups_without_choices(
     )
 
 
+@pytest.mark.parametrize("mode", ["seek", "replay"])
+@pytest.mark.parametrize("fresh", [False, True])
+def test_seek_and_replay_working_state_and_activation(
+    family_python,  # noqa: F811 - fixture registered by import
+    tmp_path,
+    mode,
+    fresh,
+):
+    _execute(
+        family_python,
+        tmp_path,
+        """
+        ---
+        initial: True
+        code: |
+          if 'origin' not in globals():
+            origin = 'fresh'
+        ---
+        mandatory: True
+        question: Saved screen
+        fields:
+          - Value: saved_value
+        ---
+        question: Target ${ origin }
+        fields:
+          - Value: target
+        """,
+        f"""
+        from docassemble_simulator.execution import Execute
+
+        operation_type = Seek if {mode!r} == 'seek' else ReplayAutomatic
+        for activate in (False, True):
+            missing = execution.run(operation_type('target', activate=activate))
+            assert not missing.ok and missing.error.kind == 'state', missing
+            assert missing.error.message == 'no saved session; run `start` first'
+            assert not execution.scope.session.exists()
+
+        for activate in (False, True):
+            # A fresh operation works without an existing Saved session.
+            initialized = execution.run(operation_type('target', fresh=True))
+            assert initialized.ok, initialized
+            assert initialized.result['question_text'] == 'Target fresh', initialized
+            assert not execution.scope.session.exists()
+
+            assert execution.run(Start()).ok
+            assert execution.run(Execute("origin = 'loaded'", assemble=False)).ok
+            before = execution.scope.session.read_bytes()
+            outcome = execution.run(operation_type(
+                'target', fresh={fresh!r}, activate=activate,
+            ))
+            assert outcome.ok, outcome
+            assert outcome.result['question_text'] == {"Target fresh" if fresh else "Target loaded"!r}, outcome
+            if activate:
+                assert execution.scope.session.read_bytes() != before
+                assert execution.run(Status()).result == outcome.result
+                assert value('origin') == {repr("fresh" if fresh else "loaded")!r}
+            else:
+                assert execution.scope.session.read_bytes() == before
+                assert value('origin') == "'loaded'"
+            execution.reset()
+        """,
+    )
+
+
 def test_replay_commits_all_accepted_steps_only_when_activated(
     family_python,  # noqa: F811 - fixture registered by import
     tmp_path,
