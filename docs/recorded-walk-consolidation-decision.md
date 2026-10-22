@@ -101,12 +101,15 @@ Relevant existing coverage retained and exercised:
   partial saved session (including fresh replay).
 - `test_worker_trace_compare_and_replay_match_the_cli` and
   `test_worker_trace_replay_sees_an_edit_between_requests`: immutable goldens,
-  isolated sessions, shared reports, and the warm worker's current-source catalog.
+  isolated sessions, shared reports, and the warm worker's current-source
+  catalog (shared-catalog replay coverage lives here).
 - `tests/test_trace.py`: pure replay verdicts, malformed/compare-only input,
   comparison/identity tests, and the older stubbed markerless automatic test.
-- `tests/test_submission_acceptance.py` and `tests/test_detect_session.py`:
-  shared acceptance, execution lifecycle, and shared-catalog regressions in
-  the required gate selection.
+- `tests/test_submission_acceptance.py`: shared submission-acceptance runtime
+  coverage in the required gate selection.
+- `tests/test_detect_session.py`: unmarked, stub-based execution-lifecycle
+  coverage. It runs in the fast lane; the gate's `real_runtime and not corpus`
+  selection excludes it.
 
 ## Depth, locality, leverage, and deletion test
 
