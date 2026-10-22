@@ -12,6 +12,7 @@ import os
 import subprocess
 import time
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,10 +27,14 @@ from test_real_runtime import (  # noqa: F401 - fixtures registered by import
 
 from docassemble_simulator.trace import (
     ComparePolicy,
+    ScreenTrace,
+    TraceEntry,
     compare_traces,
     load_exceptions,
     load_trace,
+    screen_content,
     screen_identity,
+    write_trace,
 )
 
 pytestmark = pytest.mark.real_runtime
@@ -598,12 +603,12 @@ def test_worker_journey_recording_matches_the_one_shot_cli(
         assert worker_entry == cli_entry, (worker_entry, cli_entry)
 
 
-def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
+def test_trace_replay_groups_adjacent_recorded_nonactivated_walks(
     family_python,  # noqa: F811
     tmp_path,
     worker_journey,  # noqa: F811
 ):
-    """A recorded auto,auto walk stays isolated from its Saved source screen."""
+    """Two real recorded walks retain their markers and Saved source screen (#78)."""
     interpreter = family_python.interpreter
     marker = tmp_path / "multi-auto.marker"
     interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
@@ -619,23 +624,39 @@ def test_trace_replay_groups_a_recorded_multi_screen_nonactivated_walk(
     )
 
     assert _record(journey, "start", record)["ok"]
-    assert _record(journey, "seek", record, variable="target_value", auto=True)["ok"]
-    marker.unlink()
-    # This answer must still target Saved screen A after the non-activated
-    # walk temporarily traversed screens B and C.
+    for _ in range(2):
+        assert _record(journey, "seek", record, variable="target_value", auto=True)[
+            "ok"
+        ]
+        marker.unlink()
+    # This answer must still target Saved screen A after both non-activated
+    # walks temporarily traversed screens B and C.
     assert _record(journey, "answer", record, assignments=["saved_value=done"])["ok"]
 
     golden = load_trace(record)
-    automatic = [entry for entry in golden.entries if entry.intent == "auto"]
-    assert len(automatic) >= 2
-    assert golden.entries[1].intent == "auto"
-    assert golden.entries[2].intent == "auto"
-    assert golden.entries[3].post_auto is True
-    assert golden.entries[3].activate is False
+    assert [entry.intent for entry in golden.entries] == [
+        "start",
+        "auto",
+        "auto",
+        "seek",
+        "auto",
+        "auto",
+        "seek",
+        "answer",
+    ]
+    assert [entry.seq for entry in golden.entries if entry.post_auto] == [4, 7]
+    assert not any(entry.activate or entry.fresh for entry in golden.entries)
     original = record.read_bytes()
+    sessions_before = _saved_session_files(root)
     code, replay = _command(interpreter, root, "trace", "replay", str(record))
     assert code == 0, replay
     assert replay["result"]["clean"] is True, replay
+    assert replay["result"]["counts"] == {"expected": 8, "replayed": 8, "matched": 8}
+    worker_replay = journey.request("trace-replay", golden=str(record))
+    assert worker_replay["ok"], worker_replay
+    assert worker_replay["result"] == replay["result"]
+    assert _saved_session_files(root) == sessions_before
+    assert list((root / ".simulator").glob("trace-replay-*")) == []
 
     code, overridden = _command(
         interpreter,
@@ -750,11 +771,144 @@ def test_trace_replay_groups_fresh_activated_multi_screen_walk(
     automatic = [entry for entry in golden.entries if entry.intent == "auto"]
     assert len(automatic) >= 2
     assert automatic[0].fresh is True
-    assert next(entry for entry in golden.entries if entry.post_auto).activate is True
+    assert sum(entry.fresh for entry in golden.entries) == 1
+    post = next(entry for entry in golden.entries if entry.post_auto)
+    assert post.activate is True
+    assert post.fresh is False
 
     code, replay = _command(interpreter, root, "trace", "replay", str(record))
     assert code == 0, replay
     assert replay["result"]["clean"] is True, replay
+
+
+@pytest.mark.parametrize("activate", [False, True])
+def test_trace_replay_trailing_activation_overrides_contradictory_automatic_entries(
+    family_python,  # noqa: F811
+    tmp_path,
+    worker_journey,  # noqa: F811
+    activate,
+):
+    """A compatibility copy contradicts capture's per-entry policy, not its marker."""
+    interpreter = family_python.interpreter
+    interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
+        "__TRACE_REPLAY_MARKER__", str(tmp_path / "activation.marker")
+    )
+    root = _write_interview(tmp_path / "activation", interview)
+    record = root / "recorded.trace.jsonl"
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
+    )
+    assert _record(journey, "start", record)["ok"]
+    assert _record(
+        journey, "seek", record, variable="target_value", auto=True, activate=activate
+    )["ok"]
+    assert _record(journey, "refresh", record)["ok"]
+    captured = load_trace(record)
+    post = next(entry for entry in captured.entries if entry.post_auto)
+    assert post.activate is activate
+    # Refresh distinguishes a committed target from the untouched Saved screen;
+    # matching only the walk's observations would not prove activation policy.
+    expected_screen = post.screen if activate else captured.entries[0].screen
+    assert screen_identity(captured.entries[-1].screen) == screen_identity(
+        expected_screen
+    )
+    assert screen_identity(post.screen) != screen_identity(captured.entries[0].screen)
+    compatibility = replace(
+        captured,
+        entries=tuple(
+            replace(entry, activate=not activate) if entry.intent == "auto" else entry
+            for entry in captured.entries
+        ),
+    )
+    compatibility_path = root / "contradictory-activation.trace.jsonl"
+    write_trace(compatibility_path, compatibility)
+    originals = {path: path.read_bytes() for path in (record, compatibility_path)}
+    sessions_before = _saved_session_files(root)
+
+    code, replay = _command(
+        interpreter, root, "trace", "replay", str(compatibility_path)
+    )
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
+    assert replay["result"]["counts"]["matched"] == len(compatibility.entries)
+    assert _saved_session_files(root) == sessions_before
+    assert all(path.read_bytes() == original for path, original in originals.items())
+    assert list((root / ".simulator").glob("trace-replay-*")) == []
+
+
+def test_trace_replay_hand_written_markerless_schema4_keeps_legacy_mutations(
+    family_python,  # noqa: F811
+    tmp_path,
+    worker_journey,  # noqa: F811
+):
+    """Hand-written legacy entries, NOT an automatic recorder-produced walk (#78).
+
+    The screens come from ordinary answers. We explicitly author the automatic
+    intents without post_auto markers; non-activated legacy submissions persist
+    for later entries, unlike the recorder-produced operation-local walks.
+    """
+    interpreter = family_python.interpreter
+    interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
+        "__TRACE_REPLAY_MARKER__", str(tmp_path / "legacy.marker")
+    )
+    root = _write_interview(tmp_path / "legacy", interview)
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
+    )
+    # Capture only Start to obtain matching metadata, never an automatic walk.
+    metadata_record = root / "start-only.trace.jsonl"
+    saved = _record(journey, "start", metadata_record)
+    first = journey.request("answer", assignments=["saved_value=done"])
+    second = journey.request("answer", defaults=True)
+    done = journey.request("answer", defaults=True)
+    assert all(response["ok"] for response in (saved, first, second, done))
+    entries = []
+    for seq, (operation, intent, submitted, screen) in enumerate(
+        (
+            ("start", "start", {}, saved["result"]),
+            ("answer", "answer", {"saved_value": "done"}, first["result"]),
+            ("seek", "auto", {}, first["result"]),
+            ("seek", "auto", {}, second["result"]),
+            ("status", "status", {}, done["result"]),
+        ),
+        start=1,
+    ):
+        entries.append(
+            TraceEntry(
+                seq=seq,
+                operation=operation,
+                intent=intent,
+                phase=None,
+                submitted=submitted,
+                ok=True,
+                screen=screen,
+                identity=screen_identity(screen),
+                content=screen_content(screen),
+                target="target_value" if intent == "auto" else None,
+                activate=False,
+            )
+        )
+    legacy = ScreenTrace(load_trace(metadata_record).metadata, tuple(entries))
+    assert legacy.metadata.schema == 4
+    assert not any(entry.post_auto for entry in legacy.entries)
+    legacy_path = root / "hand-written-markerless.trace.jsonl"
+    write_trace(legacy_path, legacy)
+    original = legacy_path.read_bytes()
+    sessions_before = _saved_session_files(root)
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(legacy_path))
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
+    assert replay["result"]["counts"] == {"expected": 5, "replayed": 5, "matched": 5}
+    assert legacy_path.read_bytes() == original
+    assert _saved_session_files(root) == sessions_before
+    assert list((root / ".simulator").glob("trace-replay-*")) == []
 
 
 def test_trace_replay_preserves_nonactivated_seek_context(
