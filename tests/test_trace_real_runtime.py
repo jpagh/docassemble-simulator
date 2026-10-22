@@ -1698,3 +1698,79 @@ def test_worker_trace_replay_sees_an_edit_between_requests(
         )
     finally:
         journey.close()
+
+
+@pytest.mark.parametrize(
+    ("fresh", "activate"), [(False, True), (True, True), (False, False)]
+)
+def test_worker_status_after_automatic_walk_replays_one_observation(
+    family_python,  # noqa: F811
+    tmp_path,
+    worker_journey,  # noqa: F811
+    fresh,
+    activate,
+):
+    interpreter = family_python.interpreter
+    interview = MULTI_AUTO_REPLAY_INTERVIEW.replace(
+        "__TRACE_REPLAY_MARKER__", str(tmp_path / "walk-marker")
+    )
+    root = _write_interview(tmp_path / "status-walk", interview)
+    record = root / "scenario.trace.jsonl"
+    journey = worker_journey(
+        interpreter,
+        root,
+        family=family_python.probe,
+        arguments=("--offline", "--seek-diagnostics", "off"),
+    )
+
+    start = _record(journey, "start", record)
+    assert start["ok"], start
+    seek = _record(
+        journey,
+        "seek",
+        record,
+        variable="target_value",
+        auto=True,
+        fresh=fresh,
+        activate=activate,
+    )
+    assert seek["ok"], seek
+    before_status = record.read_bytes()
+    walk = load_trace(record).entries
+    assert [entry.intent for entry in walk] == ["start", "auto", "auto", "seek"]
+    assert walk[-1].post_auto
+
+    status = _record(journey, "status", record)
+    assert status["ok"], status
+    assert status["result"] == (seek if activate else start)["result"]
+    assert ("auto_trace" in status["result"]) is activate
+    assert record.read_bytes().startswith(before_status)
+    golden = load_trace(record)
+    assert golden.entries[:-1] == walk
+    assert len(golden.entries) == 5
+    observation = golden.entries[-1]
+    assert (observation.operation, observation.intent) == ("status", "status")
+    assert observation.target is None
+    assert (
+        not observation.fresh and not observation.activate and not observation.post_auto
+    )
+    if activate:
+        # Category identities receive a trace-local ordinal, even for a
+        # read-only repeat of the same stored continuation.
+        assert observation.identity.key == "screen:continue#2"
+        assert observation.identity.rule == "category"
+        assert observation.identity.occurrence == 1
+    else:
+        assert observation.identity.key == walk[0].identity.key
+        assert observation.identity.rule == walk[0].identity.rule
+        assert observation.identity.occurrence == 2
+    golden_before = record.read_bytes()
+    sessions_before = _saved_session_files(root)
+
+    code, replay = _command(interpreter, root, "trace", "replay", str(record))
+
+    assert code == 0, replay
+    assert replay["result"]["clean"] is True, replay
+    assert replay["result"]["counts"] == {"expected": 5, "replayed": 5, "matched": 5}
+    assert record.read_bytes() == golden_before
+    assert _saved_session_files(root) == sessions_before
