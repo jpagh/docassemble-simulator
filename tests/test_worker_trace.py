@@ -777,3 +777,137 @@ def test_trace_compare_worker_report_equals_the_cli_for_every_policy_case(
             assert cli_payload["ok"] is False, name
             assert outcome.error.kind == ErrorKind.TRACE_MISMATCH, name
             assert outcome.error.details == cli_payload["error"]["details"], name
+
+
+@pytest.mark.parametrize(
+    ("fresh", "activate"), [(False, True), (True, True), (False, False)]
+)
+def test_worker_status_observes_automatic_walk_without_recording_it_again(
+    tmp_path, monkeypatch, fresh, activate
+):
+    from test_cli_trace import (
+        _metadata,
+        _outcome,
+        _parse,
+        _ScopedFakeExecution,
+        _screen,
+        _serve_worker,
+    )
+
+    from docassemble_simulator.trace import load_trace
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda *args: _metadata())
+    saved = _screen("ID saved")
+    walked = {
+        **_screen("ID final"),
+        "auto_trace": [
+            {"screen": _screen("ID first"), "submitted": {"first": "one"}},
+            {"screen": _screen("ID second"), "submitted": {"second": "two"}},
+        ],
+    }
+    stored = walked if activate else saved
+    execution = _ScopedFakeExecution(
+        tmp_path, *(_outcome(True, result) for result in (saved, walked, stored))
+    )
+    worker = Worker(tmp_path, execution=execution)
+    record = tmp_path / "journey.jsonl"
+    observer = cli._worker_journey_recorder(
+        _parse("worker", "--record", str(record)), tmp_path, worker
+    )
+    requests = [
+        {"operation": "start"},
+        {
+            "operation": "seek",
+            "variable": "target",
+            "auto": True,
+            "fresh": fresh,
+            "activate": activate,
+        },
+        {"operation": "status"},
+    ]
+    code, responses = _serve_worker(
+        worker, observer, "".join(json.dumps(request) + "\n" for request in requests)
+    )
+
+    assert code == 0
+    assert all(response["ok"] for response in responses)
+    assert responses[-1]["result"] == stored  # status keeps its public result shape
+    entries = load_trace(record).entries
+    assert [(entry.seq, entry.operation, entry.intent) for entry in entries] == [
+        (1, "start", "start"),
+        (2, "seek", "auto"),
+        (3, "seek", "auto"),
+        (4, "seek", "seek"),
+        (5, "status", "status"),
+    ]
+    assert [entry.target for entry in entries] == [
+        None,
+        "target",
+        "target",
+        "target",
+        None,
+    ]
+    assert [entry.post_auto for entry in entries] == [False, False, False, True, False]
+    assert [entry.fresh for entry in entries] == [False, fresh, False, False, False]
+    assert [entry.activate for entry in entries] == [
+        False,
+        activate,
+        activate,
+        activate,
+        False,
+    ]
+    assert entries[-1].identity.key == entries[3 if activate else 0].identity.key
+    assert entries[-1].identity.rule == entries[3 if activate else 0].identity.rule
+    assert entries[-1].identity.occurrence == 2
+    assert entries[-1].submitted == {}
+
+
+@pytest.mark.parametrize("save", [None, "refresh", "answer"])
+def test_worker_status_without_a_walk_records_one_unchanged_observation(
+    tmp_path, monkeypatch, save
+):
+    from test_cli_trace import (
+        _metadata,
+        _outcome,
+        _parse,
+        _ScopedFakeExecution,
+        _screen,
+        _serve_worker,
+    )
+
+    from docassemble_simulator.trace import load_trace
+
+    monkeypatch.setattr(cli, "_trace_metadata", lambda *args: _metadata())
+    screens = [_screen("ID saved")]
+    requests = [{"operation": "start"}]
+    if save:
+        screens.append(_screen("ID updated"))
+        requests.append({"operation": save})
+    screens.append(screens[-1])
+    requests.append({"operation": "status"})
+    execution = _ScopedFakeExecution(
+        tmp_path, *(_outcome(True, result) for result in screens)
+    )
+    worker = Worker(tmp_path, execution=execution)
+    record = tmp_path / "journey.jsonl"
+    observer = cli._worker_journey_recorder(
+        _parse("worker", "--record", str(record)), tmp_path, worker
+    )
+
+    code, responses = _serve_worker(
+        worker, observer, "".join(json.dumps(request) + "\n" for request in requests)
+    )
+
+    assert code == 0
+    assert responses[-1]["result"] == screens[-1]
+    entries = load_trace(record).entries
+    assert len(entries) == len(requests)
+    status = entries[-1]
+    assert (status.operation, status.intent) == ("status", "status")
+    assert status.identity.key == entries[-2].identity.key
+    assert status.identity.rule == entries[-2].identity.rule
+    assert status.identity.occurrence == 2
+    assert status.screen == entries[-2].screen
+    assert status.submitted == {}
+    assert status.target is None
+    assert not status.fresh and not status.activate and not status.post_auto
