@@ -1336,11 +1336,12 @@ def test_exhausted_variable_seeking_is_one_typed_failure(
     assert outcome.diagnostics[0].details["variable"] == "M.unknown"
 
 
+@pytest.mark.parametrize("operation_type", [Seek, ReplayAutomatic])
 @pytest.mark.parametrize("activate", [False, True])
 def test_explicit_exhausted_seek_uses_unresolved_variable_failure(
-    tmp_path, monkeypatch, da_stubs, activate
+    tmp_path, monkeypatch, da_stubs, activate, operation_type
 ):
-    class DAErrorMissingVariable(Exception):
+    class DAErrorMissingVariable(RuntimeError):
         def __init__(self, variable):
             super().__init__(f"could not define {variable}")
             self.variable = variable
@@ -1357,7 +1358,7 @@ def test_explicit_exhausted_seek_uses_unresolved_variable_failure(
     execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, MissingInterview)
     assert execution.run(Start()).ok
 
-    outcome = execution.run(Seek("M.unknown", activate=activate))
+    outcome = execution.run(operation_type("M.unknown", activate=activate))
 
     assert not outcome.ok
     assert outcome.error.kind == "unresolved-variable"
@@ -1558,6 +1559,120 @@ def test_refresh_variables_exec_and_seek_follow_their_commit_policies(
     activated = execution.run(Seek("target", activate=True))
     assert activated.ok
     assert execution.run(Status()).result["sought_variable"] == "target"
+
+
+@pytest.mark.parametrize("operation_type", [Seek, ReplayAutomatic])
+@pytest.mark.parametrize("fresh", [False, True])
+@pytest.mark.parametrize("activate", [False, True])
+def test_seek_and_replay_prepare_working_state_and_only_activate_on_request(
+    tmp_path, monkeypatch, da_stubs, operation_type, fresh, activate
+):
+    class SeekingInterview(FakeInterview):
+        def askfor(self, variable, namespace, *args, **kwargs):
+            namespace["walk_origin"] = namespace.get("counter", "fresh")
+            return {
+                "type": "resolved",
+                "origin": namespace["walk_origin"],
+                "prepared": namespace["helper"](7),
+            }
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+    assert execution.run(Start()).ok
+    assert execution.run(Execute("counter = 42", assemble=False)).ok
+    before = _session_bytes(tmp_path)
+
+    outcome = execution.run(operation_type("target", fresh=fresh, activate=activate))
+
+    assert outcome.ok
+    assert outcome.result["raw"] == {
+        "type": "resolved",
+        "origin": "fresh" if fresh else "42",
+        "prepared": "$7",
+    }
+    if activate:
+        assert _session_bytes(tmp_path) != before
+        assert execution.run(Status()).result == outcome.result
+        assert execution.run(Evaluate("walk_origin")).result["value"] == (
+            "'fresh'" if fresh else "42"
+        )
+        assert execution.run(Refresh()).result["sought_variable"] == "target"
+    else:
+        assert _session_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("operation_type", [Seek, ReplayAutomatic])
+@pytest.mark.parametrize("activate", [False, True])
+def test_seek_and_replay_require_saved_state_unless_fresh(
+    tmp_path, monkeypatch, da_stubs, operation_type, activate
+):
+    class SeekingInterview(FakeInterview):
+        def askfor(self, *args, **kwargs):
+            return {"type": "continue"}
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+
+    missing = execution.run(operation_type("target", activate=activate))
+
+    assert not missing.ok
+    assert missing.error.kind == "state"
+    assert missing.error.message == "no saved session; run `start` first"
+    assert _session_bytes(tmp_path) == {}
+
+    fresh = execution.run(operation_type("target", fresh=True, activate=activate))
+
+    assert fresh.ok
+    assert bool(_session_bytes(tmp_path)) is activate
+
+
+@pytest.mark.parametrize("operation_type", [Seek, ReplayAutomatic])
+@pytest.mark.parametrize("activate", [False, True])
+def test_seek_and_replay_translate_error_shaped_outcomes(
+    tmp_path, monkeypatch, da_stubs, operation_type, activate
+):
+    class BrokenInterview(FakeInterview):
+        def askfor(self, *args, **kwargs):
+            return {"type": "error"}
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, BrokenInterview)
+    assert execution.run(Start()).ok
+    before = _session_bytes(tmp_path)
+
+    outcome = execution.run(operation_type("target", activate=activate))
+
+    assert not outcome.ok
+    assert outcome.error.kind == "execution"
+    assert outcome.error.message == "interview assembly failed"
+    assert outcome.error.details["kind"] == "error"
+    if activate:
+        assert execution.run(Status()).result == outcome.error.details
+    else:
+        assert _session_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("operation_type", [Seek, ReplayAutomatic])
+@pytest.mark.parametrize("activate", [False, True])
+@pytest.mark.parametrize("error_type", [RuntimeError, AssertionError])
+def test_seek_and_replay_classify_runtime_exceptions(
+    tmp_path, monkeypatch, da_stubs, operation_type, activate, error_type
+):
+    class BrokenInterview(FakeInterview):
+        def askfor(self, *args, **kwargs):
+            raise error_type("walk broke")
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, BrokenInterview)
+    assert execution.run(Start()).ok
+    before = _session_bytes(tmp_path)
+
+    if error_type is AssertionError:
+        with pytest.raises(AssertionError, match="walk broke"):
+            execution.run(operation_type("target", activate=activate))
+    else:
+        outcome = execution.run(operation_type("target", activate=activate))
+        assert not outcome.ok
+        # Activated operations retain _mutate/run's fault classification.
+        assert outcome.error.kind == ("fault" if activate else "seek")
+        assert outcome.error.message == "RuntimeError: walk broke"
+    assert _session_bytes(tmp_path) == before
 
 
 def test_auto_seek_walks_defaults_and_stops_at_the_first_required_screen(

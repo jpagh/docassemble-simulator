@@ -896,112 +896,81 @@ class InterviewExecution:
         return outcome
 
     def _seek_operation(self, operation: Seek):
-        def work():
-            namespace = (
-                _fresh_namespace()
-                if operation.fresh
-                else self._store.load()["namespace"]
-            )
-            with self._prepared_operation(namespace) as (interview, status):
-                outcome = (
-                    _seek_auto(
-                        interview,
-                        namespace,
-                        status,
-                        operation.variable,
-                        operation.trace,
-                    )
-                    if operation.auto
-                    else _seek(
-                        interview,
-                        namespace,
-                        status,
-                        operation.variable,
-                        operation.trace,
-                    )
-                )
-            if operation.activate:
-                self._store.save(namespace, outcome, operation.variable)
-            return outcome
-
-        if operation.activate:
-            return self._mutate(work)
-        try:
-            result = work()
-            if isinstance(result, dict) and result.get("kind") == "error":
-                return ExecutionOutcome(
-                    False,
-                    error=ExecutionError(
-                        result.get("failure_kind", ErrorKind.EXECUTION),
-                        result.get("message", "interview assembly failed"),
-                        result,
-                    ),
-                )
-            return ExecutionOutcome(True, result)
-        except ExecutionFailure as error:
-            return ExecutionOutcome(
-                False, error=ExecutionError(error.kind, str(error), error.details)
-            )
-        except Exception as error:
-            if _unresolved_variable(error) is not None:
-                raise
-            if not isinstance(
-                error,
-                (
-                    ValueError,
-                    TypeError,
-                    RuntimeError,
-                    AttributeError,
-                    KeyError,
-                    IndexError,
-                    ImportError,
-                    OSError,
-                    LookupError,
-                    NameError,
-                    SyntaxError,
-                ),
-            ):
-                raise
-            logger.exception("seek failed")
-            return ExecutionOutcome(
-                False,
-                error=ExecutionError(
-                    ErrorKind.SEEK, f"{type(error).__name__}: {error}"
-                ),
-            )
-
-    def _replay_automatic_operation(self, operation: ReplayAutomatic):
-        """Replay an automatic seek without splitting its local state.
-
-        The command adapter may need to verify each pre-submission screen, but
-        a browser-shaped automatic walk is still one execution operation.  In
-        particular, a non-activated walk must not save its temporary target
-        context before the next submission or observation.
-        """
-
-        def work():
-            namespace = (
-                _fresh_namespace()
-                if operation.fresh
-                else self._store.load()["namespace"]
-            )
-            with self._prepared_operation(namespace) as (interview, status):
-                outcome = _seek_auto(
+        def walk(interview, namespace, status):
+            return (
+                _seek_auto(
                     interview,
                     namespace,
                     status,
                     operation.variable,
-                    False,
-                    operation.submissions,
-                    operation.expectations,
-                    operation.identity_context,
-                    operation.trailing,
+                    operation.trace,
                 )
-            if operation.activate and not outcome.get("replay_divergence"):
+                if operation.auto
+                else _seek(
+                    interview,
+                    namespace,
+                    status,
+                    operation.variable,
+                    operation.trace,
+                )
+            )
+
+        def activate(namespace, outcome):
+            self._store.save(namespace, outcome, operation.variable)
+
+        return self._seek_lifecycle(
+            fresh=operation.fresh,
+            walk=walk,
+            activation=activate if operation.activate else None,
+            failure_message="seek failed",
+        )
+
+    def _replay_automatic_operation(self, operation: ReplayAutomatic):
+        def walk(interview, namespace, status):
+            return _seek_auto(
+                interview,
+                namespace,
+                status,
+                operation.variable,
+                False,
+                operation.submissions,
+                operation.expectations,
+                operation.identity_context,
+                operation.trailing,
+            )
+
+        def activate(namespace, outcome):
+            # Divergence, even after accepted submissions or at the trailing
+            # observation, must never persist a partially replayed walk.
+            if not outcome.get("replay_divergence"):
                 self._store.save(namespace, outcome, operation.variable)
+
+        return self._seek_lifecycle(
+            fresh=operation.fresh,
+            walk=walk,
+            activation=activate if operation.activate else None,
+            failure_message="automatic replay failed",
+        )
+
+    def _seek_lifecycle(
+        self,
+        *,
+        fresh: bool,
+        walk: Callable[[Any, dict[str, Any], Any], dict[str, Any]],
+        activation: Callable[[dict[str, Any], dict[str, Any]], None] | None,
+        failure_message: str,
+    ) -> ExecutionOutcome:
+        """Keep seek/replay Working state local; activation uses the transaction gate."""
+
+        def work():
+            namespace = _fresh_namespace() if fresh else self._store.load()["namespace"]
+            with self._prepared_operation(namespace) as (interview, status):
+                outcome = walk(interview, namespace, status)
+            if activation is not None:
+                activation(namespace, outcome)
             return outcome
 
-        if operation.activate:
+        if activation is not None:
             return self._mutate(work)
         try:
             result = work()
@@ -1039,7 +1008,7 @@ class InterviewExecution:
                 ),
             ):
                 raise
-            logger.exception("automatic replay failed")
+            logger.exception(failure_message)
             return ExecutionOutcome(
                 False,
                 error=ExecutionError(
