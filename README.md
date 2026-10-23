@@ -120,8 +120,10 @@ docassemble-simulator seek M.family --activate
   so an omitted choice is defined `False` rather than left undefined. A
   review's continue button is described as an answerable `True` submission,
   and `--defaults` presses it. Visible required fields left blank, or
-  explicitly emptied (`field=` or `field=None`), reject the submission, and a
-  required checkbox group needs at least one true selection.
+  explicitly emptied (`field=` or `field=None`), reject the submission, except
+  that a nonblank `None` or `null` token explicitly selecting an offered
+  null-valued radio choice is answered and stores `None`. A required checkbox
+  group needs at least one true selection.
   Hidden `show if` fields are neither assigned nor required, and signature
   fields become `DAEmpty()` so documents still render.
   Fields that are not on the active screen are rejected; use `exec` for
