@@ -64,9 +64,33 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
   field. `--partial` evaluates visibility after assignments but does not apply
   defaults or synthesize blanks. The omitted-hidden-field POST divergence
   remains deliberate, not an unresolved requirement of this change.
-- An explicitly empty submission for a visible required field (`field=`, `field=None`, or a value that coerces to `None`) fails the required gate with an "is empty" message; a quoted `"None"` remains an ordinary string value. This is the API equivalent of a browser refusing to submit a blank required input. `--partial` downgrades it to a warning like any other missing required field. An object group field that rendered no choices is exempt: docassemble clears and gathers it rather than applying a selection (ADR-0014), so there is none to demand.
+- An explicitly empty submission for a visible required field (`field=`, `field=None`, or a value that coerces to `None`) fails the required gate with an "is empty" message, except an explicitly selected offered null radio choice as described below; a quoted `"None"` remains an ordinary string value. This is the API equivalent of a browser refusing to submit a blank required input. `--partial` downgrades it to a warning like any other missing required field. An object group field that rendered no choices is exempt: docassemble clears and gathers it rather than applying a selection (ADR-0014), so there is none to demand.
 
   **Amendment (issue #71).** Replay's per-step submissions carry the same explicit-blank intent as an ordinary `answer`, so a raw empty or `None` replay override on a visible required field fails the required gate and stops the walk with the required-missing `auto_stop` payload. Replay no longer lets browser-style coercion turn an empty numeric override into `0`/`0.0` and commit it: a replay can no longer commit a screen state a browser user could not have submitted. Literal text, `None`, yesnoradio, and non-required numeric fields keep their existing behavior, and an explicit `0`/`0.0` is still accepted.
+
+  **Amendment (issue #83).** An explicitly selected null-valued radio choice
+  is an answer, not an unanswered control. A nonblank `None` or `null` token
+  selecting a rendered choice whose value is null passes the required gate
+  and stores `None`. This applies to radio inputs (including `threestate`)
+  through ordinary answers and native replay overrides, under either the
+  generic placeholder or resolved target name. Selection intent belongs to
+  this submission, not to every null in the namespace: omission without an
+  answer/default, an explicit empty string (even when coerced to `None`), and
+  a null where no null choice was offered still reject. Text/numeric blank
+  rejection, submission-time visibility, remaining rendered constraints,
+  authored validation, and transactional rollback are unchanged. Input-error
+  guidance also counts a successfully applied null selection as answered.
+
+  This follows the installed 1.9.13 and 1.10.13 browser/server sources:
+  `standardformatter.py` renders radio choices with
+  `value=str(pair['key'])` (1.9:3048; 1.10:3047), so a null choice posts the
+  nonempty string `None`. Required radios use jQuery Validate's checked-control
+  count, not the resulting Python value (`static/app/jquery.validate.js`:
+  1083-1089, 1402-1415 in both families). The server converts a posted
+  `threestate` token other than `True`/`False` to `test_data = None` and
+  assignment source `None` (1.9 `server.py`:8024-8033; 1.10
+  `interview/views.py`:1517-1526). Thus checking that radio satisfies browser
+  requiredness while legitimately storing Python null.
 - Signature fields are never required and become `DAEmpty()` when untouched, so templates and documents that reference them render as empty instead of failing the flow. Signature capture itself is not part of the CLI submission path.
 
 ## Known gaps

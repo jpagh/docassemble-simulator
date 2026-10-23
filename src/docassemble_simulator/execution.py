@@ -827,6 +827,12 @@ class InterviewExecution:
                             screen,
                             blank_submissions,
                             interview,
+                            assignments=tuple(
+                                (item["variable"], item["input"])
+                                for item in dispositions
+                                if item["disposition"] == "applied"
+                            ),
+                            use_code=operation.code,
                         )
                     )
                 finally:

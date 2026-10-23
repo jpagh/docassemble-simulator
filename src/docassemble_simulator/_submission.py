@@ -106,7 +106,9 @@ def accept_screen_submission(
     and authored validation code then run in that order, each skipping the ones
     after it.  ``blank_submissions`` names the variables whose submitted value
     is an explicit empty, so the required gate can reject what a browser would
-    never send.  Authored validation runs unless ``validate`` is false, and
+    never send. An explicit nonblank null token selecting an offered null radio
+    choice is an answer instead, even though it stores None. Authored validation
+    runs unless ``validate`` is false, and
     ``strict`` promotes its warnings to errors.
 
     The caller owns the transaction: a validation gate is reported as data,
@@ -139,7 +141,16 @@ def accept_screen_submission(
         # The whole screen is submitted: browser defaults and blanks for
         # optional fields, then the required gate.
         submission_screen = _submit_screen_fields(namespace, screen, interview)
-    violations = _required_violations(namespace, submission_screen, blank_submissions)
+    violations = _required_violations(
+        namespace,
+        submission_screen,
+        blank_submissions,
+        selected_null_targets=(
+            _selected_null_targets(submission_screen, assignments)
+            if not use_code
+            else set()
+        ),
+    )
     if violations and not partial:
         return RequiredRejected(
             errors=tuple(
@@ -355,10 +366,19 @@ def _apply_rendered_defaults(namespace, screen, interview):
     )
 
 
-def _early_rejection_required_guidance(namespace, screen, blank_submissions, interview):
+def _early_rejection_required_guidance(
+    namespace, screen, blank_submissions, interview, *, assignments=(), use_code=False
+):
     """Assess valid assignments and defaults without validation or blank synthesis."""
     screen = _apply_rendered_defaults(namespace, screen, interview)
-    violations = _required_violations(namespace, screen, blank_submissions)
+    violations = _required_violations(
+        namespace,
+        screen,
+        blank_submissions,
+        selected_null_targets=(
+            _selected_null_targets(screen, assignments) if not use_code else set()
+        ),
+    )
     return {
         "missing_required": [variable for variable, _reason in violations],
     }
@@ -502,7 +522,43 @@ def _constraint_errors(namespace, screen):
     return errors
 
 
-def _required_violations(namespace, screen, blank_submissions):
+def _selected_null_targets(
+    screen: dict[str, Any], assignments: tuple[tuple[str, str], ...]
+) -> set[str]:
+    """Explicitly selected null radios, not empty controls coerced to None.
+
+    Resolve intent to the assignment's destination, including generic aliases.
+    The final assignment to a destination determines its selection intent.
+    """
+    targets = _screen_field_targets(screen)
+    specs = _field_specs(screen, targets)
+    selected = set()
+    for variable, raw in assignments:
+        target = targets.get(variable, variable)
+        selected.discard(target)
+        field = specs.get(variable) or {}
+        if (
+            raw.strip()
+            and parse_value(raw) is None
+            and (
+                field.get("input_type") == "radio"
+                or (
+                    field.get("input_type") is None
+                    and field.get("type") == "threestate"
+                )
+            )
+            and any(
+                "value" in choice and choice["value"] is None
+                for choice in field.get("choices") or []
+            )
+        ):
+            selected.add(target)
+    return selected
+
+
+def _required_violations(
+    namespace, screen, blank_submissions, *, selected_null_targets=frozenset()
+):
     """Return ``(variable, reason)`` for required visible fields that are not
     answered. Signatures are never required; hidden fields are not shown and
     therefore not assigned or required. A blank submission is resolved through
@@ -510,7 +566,8 @@ def _required_violations(namespace, screen, blank_submissions):
     resolves a submitted name with ``targets.get(name, name)``), so a field is
     blank by intent only when the blank wrote to that field's resolved
     variable. A submitted name that merely coincides with the field's target
-    while resolving elsewhere does not blank the field."""
+    while resolving elsewhere does not blank the field. Explicitly selected
+    offered null radios count as answered only for this submission."""
     violations = []
     targets = _screen_field_targets(screen)
     blank_targets = {targets.get(name, name) for name in blank_submissions}
@@ -533,6 +590,10 @@ def _required_violations(namespace, screen, blank_submissions):
         found, value = _field_value(namespace, variable, targets)
         if not found:
             violations.append((variable, "undefined"))
+        elif value is None and targets.get(variable, variable) in selected_null_targets:
+            # A checked radio posts the nonempty token "None"; its stored null
+            # is an answer, unlike an omitted or explicitly blank control.
+            continue
         elif targets.get(variable, variable) in blank_targets or _is_empty_value(value):
             violations.append((variable, "empty"))
         elif datatype in _GROUP_DATATYPES and _has_no_selected_option(value):
