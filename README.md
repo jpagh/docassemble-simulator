@@ -389,7 +389,8 @@ is the `sim trace compare --json` result, and a mismatch is the typed
 `trace-mismatch` error whose `details` are that same report.
 
 The `trace-replay` request mirrors `sim trace replay`: `golden` (required),
-`overrides` (a `STEP.FIELD=VALUE` array, or a single `override` string), and an
+`overrides` (a `STEP.FIELD=VALUE` array, or a single `override` string),
+`artifact_dir` (an optional retained attachment output directory), and an
 optional `interview` (it defaults to the worker's own interview, so a golden
 for another interview is rejected); `update` is rejected here too, because the
 worker never writes a golden. The replay runs against its own temporary
@@ -397,7 +398,9 @@ session directory, so it never reads or writes the worker's Saved session and
 never writes the golden; a divergent activated walk leaves no durable session
 behind. The response `result` is the `sim trace replay --json` result
 (`clean`, `steps`, `first_divergence`, `counts`), and a divergence is the typed
-`trace-mismatch` error whose `details` are that same report.
+`trace-mismatch` error whose `details` are that same report. With `artifact_dir`,
+that report also includes `attachments`; file lifetime and export failures are
+[described below](#retaining-replay-attachments).
 
 Replaying through a warm worker reuses the interview the journey already
 compiled, because docassemble's compiled-interview cache is process-global and
@@ -557,6 +560,50 @@ silently skipping it.
 
 The identity rules and the evidence behind them are documented in
 [docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).
+
+### Retaining replay attachments
+
+```sh
+sim trace replay golden.trace.jsonl --artifact-dir ./artifacts --json
+# Equivalent worker request:
+# {"operation":"trace-replay","golden":"golden.trace.jsonl","artifact_dir":"./artifacts"}
+```
+
+Export is opt-in. Replay copies only files exposed as published downloads during
+its executed operations, not all generated files, intermediate renderings, or
+Saved session data. `result.attachments` is a manifest using the ordinary
+attachment metadata (`filename`, `extension`, `mimetype`, `diagnostics`,
+`structure`), with `path` and `uri` pointing at the retained copy. Repeated
+publication of the same source path is exported once; distinct published files
+with the same download filename remain distinct entries. Each export creates
+a unique `replay-*` subdirectory beneath the requested directory, with numbered
+basenames to prevent collisions. Relative directories resolve from the process
+working directory; parent directories are created as needed.
+
+The isolated replay workspace is still removed before the response returns.
+Manifest files remain readable until **you** remove them; repeated replays do
+not overwrite earlier exports. Without an output directory, replay retains no
+files and adds no manifest. Neither mode changes screen identities, field-fact
+comparison, match counts, divergence policy, the golden, or your Saved session.
+A matching trace is not an assertion about document inventory or content: use
+ordinary client assertions over the manifest and open its DOCX/ZIP files.
+
+On divergence, exported files from the executed prefix are retained and the
+manifest is in `error.details.attachments`, alongside the unchanged replay
+report (`trace-mismatch`, CLI exit `2`). Directory, copy, or manifest failures
+return an explicit `export_error` in that report. With no divergence, an export
+failure is an `input` error (CLI exit `1`), even if the report's `clean` is true:
+`clean` describes trace matching only. With both failures, `trace-mismatch`
+keeps precedence and `export_error` records the additional export problem.
+A failed export's manifest lists only completed copies; these remain retained,
+but the inventory may be incomplete. Early input errors (for example, invalid
+golden metadata) do not run replay or export files. Human output also reports
+retained attachments and export errors.
+
+The existing PDF-skip policy remains: a DOCX-backed PDF request can publish
+real DOCX output, including DOCX members of ZIPs, **not** a fabricated PDF.
+This does not establish PDF, browser-JavaScript, payment, Celery, or deployment
+fidelity.
 
 ## JSON and exit codes
 

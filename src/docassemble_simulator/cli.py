@@ -20,7 +20,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from docassemble_simulator._environment import target_interpreter_environment
-from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
+from docassemble_simulator._outcomes import (
+    ErrorKind,
+    Failure,
+    Outcome,
+    PublishedAttachment,
+)
 from docassemble_simulator._runtime import (
     SimulatorRuntime,
     bootstrap,
@@ -1085,6 +1090,9 @@ def _trace_replay_worker_request(args, worker, request):
         golden = _worker_trace_path(request, "golden")
         interview = _worker_trace_interview(request)
         overrides = _worker_trace_overrides(request)
+        artifact_dir = _worker_trace_optional_path(
+            request, "artifact_dir", "artifact-dir"
+        )
     except InputFailure as error:
         raise WorkerProtocolError(str(error)) from error
     try:
@@ -1095,20 +1103,15 @@ def _trace_replay_worker_request(args, worker, request):
             overrides=overrides,
             resolved_configuration=getattr(args, "_resolved_configuration", None),
             catalog=worker.execution.catalog,
+            artifact_dir=artifact_dir,
         )
     except TraceError as error:
         return _outcome_from_trace_input(error)
     report = _clean(report)
-    if report["clean"]:
-        return Outcome(True, result=report)
-    return Outcome(
-        False,
-        error=Failure(
-            ErrorKind.TRACE_MISMATCH,
-            "screen trace replay diverged",
-            report,
-        ),
-    )
+    failure = _trace_replay_failure(report)
+    if failure is not None:
+        return Outcome(False, error=failure)
+    return Outcome(True, result=report)
 
 
 def _outcome_from_trace_input(error):
@@ -1568,11 +1571,15 @@ def _trace_replay_operation(entry, submitted):
     )
 
 
-def _trace_replay_actual(execution, operation):
+def _trace_replay_actual(
+    execution, operation, attachments: list[PublishedAttachment] | None = None
+):
     from docassemble_simulator.execution import Status
     from docassemble_simulator.trace import is_screen_outcome
 
     outcome = execution.run(operation)
+    if attachments is not None:
+        attachments.extend(outcome.attachments)
     actual_error = _clean(outcome.error) if not outcome.ok else None
     screen = (
         outcome.result if outcome.ok and is_screen_outcome(outcome.result) else None
@@ -1663,7 +1670,13 @@ def _trace_replay_observation(
     }
 
 
-def _trace_replay_step(entry, submitted, execution, actual_entries=()):
+def _trace_replay_step(
+    entry,
+    submitted,
+    execution,
+    actual_entries=(),
+    attachments: list[PublishedAttachment] | None = None,
+):
     """Replay one non-grouped trace entry.
 
     The legacy automatic branch remains for hand-written schema-4 fixtures
@@ -1682,11 +1695,15 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
             if not entry.target:
                 raise InputFailure(f"trace step {entry.seq} has no seek variable")
             status = execution.run(Seek(entry.target, fresh=True, activate=True))
+            if attachments is not None:
+                attachments.extend(status.attachments)
         actual_screen = (
             status.result if status.ok and is_screen_outcome(status.result) else None
         )
         operation = _trace_replay_operation(entry, submitted)
         outcome = execution.run(operation)
+        if attachments is not None:
+            attachments.extend(outcome.attachments)
         actual_ok = outcome.ok
         actual_error = _clean(outcome.error) if not outcome.ok else None
     elif intent == "seek" and entry.post_auto:
@@ -1701,7 +1718,7 @@ def _trace_replay_step(entry, submitted, execution, actual_entries=()):
     else:
         operation = _trace_replay_operation(entry, submitted)
         actual_ok, actual_screen, actual_error = _trace_replay_actual(
-            execution, operation
+            execution, operation, attachments
         )
     return _trace_replay_observation(
         entry,
@@ -1748,7 +1765,14 @@ def _trace_replay_divergence_report(entry, submitted, divergence, actual_entries
     return report
 
 
-def _trace_replay_automatic_group(entries, start, overrides, execution, actual_entries):
+def _trace_replay_automatic_group(
+    entries,
+    start,
+    overrides,
+    execution,
+    actual_entries,
+    attachments: list[PublishedAttachment] | None = None,
+):
     """Replay one recorded automatic walk in one operation-local context.
 
     Execution owns the submission boundary and the trailing verdict; this
@@ -1788,6 +1812,8 @@ def _trace_replay_automatic_group(entries, start, overrides, execution, actual_e
             trailing=replay_expectation(post) if post is not None else None,
         )
     )
+    if attachments is not None:
+        attachments.extend(outcome.attachments)
     result = outcome.result if outcome.ok and isinstance(outcome.result, dict) else {}
     details = (
         outcome.error.details if not outcome.ok and outcome.error is not None else {}
@@ -1860,6 +1886,7 @@ def _trace_replay_report(
     overrides=(),
     resolved_configuration=None,
     catalog=None,
+    artifact_dir=None,
 ):
     """Run ``trace replay`` and return its report without emitting or exiting.
 
@@ -1876,11 +1903,18 @@ def _trace_replay_report(
     execution compiles through it, so it observes the current source without
     the worker refreshing first. The replay always runs against its own
     temporary session directory, so it never touches a caller's Saved session
-    and never writes the golden.
+    and never writes the golden. With ``artifact_dir``, published attachments
+    are copied before cleanup and their retained metadata is added to the
+    report. Export errors are report data, separate from trace matching, so
+    neither transport can hide a divergence behind an export failure.
     """
     from docassemble_simulator.execution import InterviewExecution
     from docassemble_simulator.trace import TraceError, load_trace
 
+    if artifact_dir is not None and (
+        not isinstance(artifact_dir, (str, Path)) or not str(artifact_dir).strip()
+    ):
+        raise TraceError("artifact_dir must be a path string")
     golden_path = Path(golden).expanduser()
     recorded = load_trace(golden_path)
     if interview and interview != recorded.metadata.interview:
@@ -1926,6 +1960,7 @@ def _trace_replay_report(
             session_directory=Path(scope) / "sessions",
         )
         steps = []
+        attachments = [] if artifact_dir is not None else None
         actual_entries = []
         first_divergence = None
         index = 0
@@ -1950,7 +1985,12 @@ def _trace_replay_report(
                     and recorded.entries[post_index].post_auto
                 ):
                     grouped, index = _trace_replay_automatic_group(
-                        recorded.entries, index, overrides, execution, actual_entries
+                        recorded.entries,
+                        index,
+                        overrides,
+                        execution,
+                        actual_entries,
+                        attachments,
                     )
                     steps.extend(grouped)
                     divergence = next(
@@ -1962,13 +2002,29 @@ def _trace_replay_report(
                     continue
             submitted = dict(entry.submitted)
             submitted.update(overrides.get(entry.seq, {}))
-            step = _trace_replay_step(entry, submitted, execution, actual_entries)
+            step = _trace_replay_step(
+                entry, submitted, execution, actual_entries, attachments
+            )
             actual_entries.append(step.pop("_actual_entry"))
             steps.append(step)
             index += 1
             if not step["match"]:
                 first_divergence = step
                 break
+
+        exported = {}
+        if artifact_dir is not None:
+            exported["attachments"] = []
+            try:
+                _trace_replay_export_attachments(
+                    attachments, artifact_dir, exported["attachments"]
+                )
+            except (OSError, ValueError, TypeError, RuntimeError) as error:
+                exported["export_error"] = _clean(
+                    Failure(
+                        ErrorKind.INPUT, f"published attachment export failed: {error}"
+                    )
+                )
 
     return {
         "golden": str(golden_path),
@@ -1981,7 +2037,48 @@ def _trace_replay_report(
             "replayed": len(steps),
             "matched": sum(step["match"] for step in steps),
         },
+        **exported,
     }
+
+
+def _trace_replay_export_attachments(
+    attachments: list[PublishedAttachment],
+    artifact_dir: str | Path,
+    manifest: list[dict[str, Any]],
+) -> None:
+    """Retain only published files, once per source path, before replay cleanup.
+
+    Each call owns a unique subdirectory so repeated exports and duplicate
+    download names never overwrite one another. The manifest contains only
+    completed copies and replaces the temporary path and URI with retained ones.
+    """
+    import shutil
+
+    directory = Path(artifact_dir).expanduser().resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = Path(tempfile.mkdtemp(prefix="replay-", dir=directory))
+    seen = set()
+    for attachment in attachments:
+        if attachment.path in seen:
+            continue
+        seen.add(attachment.path)
+        target = destination / f"{len(manifest) + 1}-{Path(attachment.filename).name}"
+        metadata = _clean(replace(attachment, path=target, uri=target.as_uri()))
+        try:
+            shutil.copyfile(attachment.path, target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        manifest.append(metadata)
+
+
+def _trace_replay_failure(report):
+    """Export failure cannot replace an already observed replay divergence."""
+    if not report["clean"]:
+        return Failure(ErrorKind.TRACE_MISMATCH, "screen trace replay diverged", report)
+    if report.get("export_error"):
+        return Failure(ErrorKind.INPUT, report["export_error"]["message"], report)
+    return None
 
 
 def cmd_trace_replay(args, root):
@@ -1993,6 +2090,7 @@ def cmd_trace_replay(args, root):
             args.golden,
             interview=args.interview,
             overrides=args.overrides,
+            artifact_dir=getattr(args, "artifact_dir", None),
             resolved_configuration=getattr(args, "_resolved_configuration", None),
         )
     except TraceError as error:
@@ -2002,7 +2100,8 @@ def cmd_trace_replay(args, root):
         )
         return _exit_for_error(ErrorKind.INPUT)
 
-    if report["clean"]:
+    failure = _trace_replay_failure(report)
+    if failure is None:
         if args.json:
             _emit(_envelope("trace", report), True)
         else:
@@ -2010,27 +2109,32 @@ def cmd_trace_replay(args, root):
                 f"trace replay: match ({report['counts']['matched']}/"
                 f"{report['counts']['expected']} steps)"
             )
+            if "attachments" in report:
+                print("attachments:")
+                print(_human(report["attachments"]))
         return 0
     if args.json:
         _emit(
             _envelope(
                 "trace",
-                error=Failure(
-                    ErrorKind.TRACE_MISMATCH,
-                    "screen trace replay diverged",
-                    report,
-                ),
+                error=failure,
             ),
             True,
         )
     else:
-        step = report["first_divergence"] or {}
-        print(
-            f"trace replay: DIVERGENCE at step {step.get('step', '?')} "
-            f"({step.get('operation', 'unknown')})"
-        )
-        print(_human(step))
-    return _exit_for_error(ErrorKind.TRACE_MISMATCH)
+        if report["first_divergence"] is not None:
+            step = report["first_divergence"]
+            print(
+                f"trace replay: DIVERGENCE at step {step.get('step', '?')} "
+                f"({step.get('operation', 'unknown')})"
+            )
+            print(_human(step))
+        if report.get("export_error"):
+            print(report["export_error"]["message"])
+        if "attachments" in report:
+            print("attachments:")
+            print(_human(report["attachments"]))
+    return _exit_for_error(failure.kind)
 
 
 def _trace_compare_report(expected, actual, policy, exceptions=None):
@@ -2594,6 +2698,10 @@ def build_parser():
         ),
     )
     trace_replay.add_argument("golden", help="golden trace to replay without modifying")
+    trace_replay.add_argument(
+        "--artifact-dir",
+        help="retain published attachments beneath this output directory",
+    )
     trace_replay.add_argument(
         "--override",
         dest="overrides",
