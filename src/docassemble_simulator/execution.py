@@ -2032,7 +2032,12 @@ def _seek(interview, namespace, status, variable, trace):
         )
     outcome = {"sought_variable": variable}
     if result.get("type") == "question":
-        outcome.update(describe_question_result(result, namespace))
+        outcome.update(
+            describe_question_result(
+                result | {"interview": status.current_info.get("yaml_filename")},
+                namespace,
+            )
+        )
     elif result.get("type") == "continue":
         outcome.update(
             {

@@ -4608,6 +4608,62 @@ def _clean_table_row_payload(value):
     return value
 
 
+@pytest.mark.parametrize("auto", [False, True])
+def test_activated_seek_preserves_native_action_interview_identity(
+    family_python, real_workspace, monkeypatch, auto
+):
+    from docassemble_simulator import SimulatorRunner
+
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+    questions = real_workspace / "docassemble" / "regression" / "data" / "questions"
+    (questions / "seek_actions.yml").write_text("""---
+include:
+  - seek_action_target.yml
+---
+mandatory: True
+question: Home
+fields:
+  - Name: home_name
+""")
+    (questions / "seek_action_target.yml").write_text("""---
+question: Sought screen
+fields:
+  - Required answer: target
+  - note: |
+      ${ action_button_html(url_action('mark', value=1), label='Direct action') }
+      ${ action_button_html(url_ask([{'action': 'mark', 'arguments': {'value': 2}}]), label='Ordered action') }
+---
+event: mark
+code: |
+  last_action = action_arguments()['value']
+""")
+    with SimulatorRunner(
+        real_workspace,
+        interview="seek_actions.yml",
+        python=family_python.interpreter,
+        isolate=False,
+        offline=True,
+        timeout=60,
+    ) as runner:
+        started = runner.start()
+        assert started.ok, started.error
+        for index in range(2):
+            sought = runner.request("seek", variable="target", activate=True, auto=auto)
+            assert sought.ok, sought.error
+            saved = runner.status().result
+            actions = saved["actions"]
+            assert [a.get("unsupported") for a in actions] == [None, None]
+            assert saved["interview"] == started.result["interview"]
+            assert (
+                saved["interview"]
+                == "docassemble.regression:data/questions/seek_actions.yml"
+            )
+            pressed = runner.action(actions[index]["id"])
+            assert pressed.ok, pressed.error
+            assert runner.evaluate("last_action").result["value"] == str(index + 1)
+
+
 def test_markdown_screen_actions_and_browser_visibility_across_families(
     family_python, real_workspace, monkeypatch
 ):

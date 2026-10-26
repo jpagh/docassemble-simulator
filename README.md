@@ -189,6 +189,8 @@ current saved screen, not a URL or an action name. Identifiers are deterministic
 for the same rendered screen and distinguish creation parameters and source
 locations; they are not permanent interview-wide identifiers. Old saved screens
 without captured note content need `refresh` before those links can be pressed.
+Likewise, refresh screens saved by earlier builds to regenerate their action
+metadata and identifiers; `status` only reads the previously saved outcome.
 
 `action` dispatches the complete native payload through docassemble, including
 `url_ask()`'s `_da_force_ask` wrapper and ordered parameter-setting/add-item
