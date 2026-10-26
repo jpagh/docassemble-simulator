@@ -4,6 +4,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
 from stub_runtime import (
     stub_incomplete_runtime as _stub_incomplete_runtime,
 )
@@ -981,6 +982,48 @@ def test_screen_trace_workflow_is_discoverable_from_help():
     assert "golden trace" in compare.stdout
     assert replay.returncode == 0
     assert "--override" in replay.stdout
+
+
+def test_native_action_workflow_is_discoverable_from_help():
+    top = _run_cli("--help")
+    action = _run_cli("action", "--help")
+
+    assert top.returncode == action.returncode == 0
+    top_text = " ".join(top.stdout.split())
+    action_text = " ".join(action.stdout.split())
+    for text in (top_text, action_text):
+        assert "status --json" in text
+        assert "result.actions" in text
+        assert "action ACTION_ID" in text
+    assert "url_ask" in action_text
+    assert "JavaScript" in action_text
+    assert "unsupported" in action_text
+    assert "not a URL" in action_text
+    assert "--record" in action_text
+
+
+@pytest.mark.parametrize(
+    ("command", "guidance"),
+    [
+        ("status", ("result.actions", "unsupported", "does not reassemble", "refresh")),
+        (
+            "refresh",
+            ("action metadata", "new identifiers", "does not reset", "active seek"),
+        ),
+        (
+            "seek",
+            ("--activate", "not saved", "--fresh", "starts over", "action ACTION_ID"),
+        ),
+        ("row-action", ("result.row_actions", "result.actions", "action ACTION_ID")),
+        ("eval", ("question-render context", "result.actions", "action ACTION_ID")),
+    ],
+)
+def test_screen_navigation_help_explains_actions_and_saved_state(command, guidance):
+    result = _run_cli(command, "--help")
+    assert result.returncode == 0
+    text = " ".join(result.stdout.split())
+    for phrase in guidance:
+        assert phrase in text
 
 
 def test_phase_without_record_is_an_input_error():

@@ -2370,6 +2370,11 @@ def _parse_assignments(pairs):
 
 
 def build_parser():
+    action_workflow = (
+        "  docassemble-simulator status --json\n"
+        "  # Inspect result.actions; choose a supported entry's id.\n"
+        "  docassemble-simulator action ACTION_ID\n"
+    )
     parser = UsageParser(
         prog="docassemble-simulator",
         description=(
@@ -2379,6 +2384,11 @@ def build_parser():
             "no server database substituted. "
             "DOCX is supported, but PDF conversion/downloads are deployment-only. "
             "JSON uses a stable ok/command/result-or-error envelope."
+        ),
+        epilog=(
+            "Native action links:\n" + action_workflow + "\n"
+            "Use seek VARIABLE --activate to save a sought screen before answering "
+            "or pressing its actions. See action --help and seek --help for details."
         ),
     )
     parser.add_argument(
@@ -2526,14 +2536,40 @@ def build_parser():
             epilog=recording_epilog,
         )
     ).set_defaults(func=cmd_execution)
-    add("status", help="read the saved outcome without assembly").set_defaults(
-        func=cmd_execution
-    )
+    add(
+        "status",
+        help="read the saved outcome without assembly",
+        description=(
+            "Read the last saved outcome; this does not reassemble or update "
+            "action metadata. Use status --json to inspect result.actions: each "
+            "entry has an id, label, source, and either a native payload or an "
+            "unsupported reason. Choose a supported id for action ACTION_ID. "
+            "Native links in notes may appear in result.actions even when "
+            "result.row_actions is empty. Use refresh after upgrading or when "
+            "saved metadata is stale, then read the new identifiers. A diagnostic "
+            "seek does not replace this saved outcome unless --activate was used."
+        ),
+        epilog="Native action links:\n" + action_workflow,
+    ).set_defaults(func=cmd_execution)
     add_recording(
         add(
             "refresh",
             help="rehydrate and reassemble saved state",
-            epilog=recording_epilog,
+            description=(
+                "Reassemble saved state, or re-seek the active seek target. "
+                "This does not reset your answers. Refresh regenerates rendered "
+                "action metadata after an upgrade, including interview identity "
+                "and control identifiers. Then inspect status --json and use the "
+                "new identifiers, not old copied IDs. Keep the same interview "
+                "and configuration flags used for the saved session."
+            ),
+            epilog=(
+                "Update an older saved screen without resetting it:\n"
+                "  docassemble-simulator refresh\n"
+                + action_workflow
+                + "\n"
+                + recording_epilog
+            ),
         )
     ).set_defaults(func=cmd_execution)
     add(
@@ -2547,12 +2583,52 @@ def build_parser():
         ),
     ).set_defaults(func=cmd_reset)
     action = add_recording(
-        add("action", help="press a native action link offered on the saved screen")
+        add(
+            "action",
+            help="press a native action link offered on the saved screen",
+            description=(
+                "Press an identifier from result.actions on the current saved "
+                "screen, not a URL or an event name. Links are captured from "
+                "rendered question/subquestion text and visible note/HTML fields, "
+                "including Markdown links. Native url_action() and url_ask() "
+                "payloads, ordered arguments, and follow-ups are dispatched intact. "
+                "This does not submit the screen's other fields or run form "
+                "validation. Only a successful resulting screen is saved; "
+                "external side effects of authored code cannot be rolled back. "
+                "Entries with an unsupported reason cannot be pressed: JavaScript, "
+                "external/cross-interview links, and malformed URLs are not supported. "
+                "For JavaScript that only sets fields and submits, use answer with "
+                "the equivalent authored field values, not eval/exec or fake "
+                "question context. An empty row_actions list does not mean that "
+                "result.actions is empty."
+            ),
+            epilog=(
+                "Native action links:\n" + action_workflow + "\n"
+                "Seek first when needed:\n"
+                "  docassemble-simulator seek VARIABLE --activate\n"
+                "  docassemble-simulator status --json\n"
+                "  docassemble-simulator action ACTION_ID --record run.jsonl\n\n"
+                "Identifiers belong to the captured screen, not the entire "
+                "interview. After upgrading, refresh older saved screens to "
+                "regenerate action metadata, then read status --json for new IDs. "
+                "Keep the same interview and configuration flags throughout.\n\n"
+                'Worker: {"operation":"action","action_id":"ACTION_ID"}\n'
+                "Python: runner.action(action_id)"
+            ),
+        )
     )
     action.add_argument("action_id", help="identifier from the active screen's actions")
     action.set_defaults(func=cmd_execution)
     row_action = add(
-        "row-action", help="press an add, delete, or edit control on the saved screen"
+        "row-action",
+        help="press an add, delete, or edit control on the saved screen",
+        description=(
+            "Press a supported list control described in result.row_actions, "
+            "using its kind, target, and optional zero-based row. This is not "
+            "the interface for every authored button. For a hand-built note "
+            "button or an ordered action sequence, inspect result.actions and "
+            "use action ACTION_ID instead; see action --help."
+        ),
     )
     row_action.add_argument("kind", choices=("add", "delete", "edit"))
     row_action.add_argument("target")
@@ -2613,20 +2689,62 @@ def build_parser():
         add(
             "seek",
             help="seek a variable from saved state by default",
-            epilog=recording_epilog,
+            description=(
+                "Seek a variable using saved answers by default. The result may "
+                "be a prerequisite question, not the requested variable's own "
+                "screen. A seek is diagnostic and its walk is not saved unless "
+                "--activate is passed. Use --activate before answer or action "
+                "so those commands operate on the sought screen. After answering "
+                "setup screens, resume without --fresh: --fresh starts over "
+                "rather than using those answers."
+            ),
+            epilog=(
+                "Seek and interact with the saved screen:\n"
+                "  docassemble-simulator seek VARIABLE --activate\n"
+                + action_workflow
+                + "\n"
+                "If a form submission is needed instead, inspect result.fields "
+                "and use answer VARIABLE=VALUE. --auto only submits defaults and "
+                "browser blanks; it does not guess answers or press native links.\n\n"
+                + recording_epilog
+            ),
         )
     )
     seek.add_argument("variable")
-    seek.add_argument("--fresh", action="store_true")
-    seek.add_argument("--activate", action="store_true")
-    seek.add_argument("--trace", action="store_true")
+    seek.add_argument(
+        "--fresh",
+        action="store_true",
+        help="start from fresh state instead of saved answers (saved only with --activate)",
+    )
+    seek.add_argument(
+        "--activate",
+        action="store_true",
+        help="save the sought screen and namespace for subsequent answer/action commands",
+    )
+    seek.add_argument(
+        "--trace",
+        action="store_true",
+        help="include variable-seeking diagnostics; use --record for a screen trace",
+    )
     seek.add_argument(
         "--auto",
         action="store_true",
         help="auto-submit defaultable screens until the variable resolves or input is needed",
     )
     seek.set_defaults(func=cmd_execution)
-    evaluate = add("eval", help="evaluate an expression without saving")
+    evaluate = add(
+        "eval",
+        help="evaluate an expression without saving",
+        description=(
+            "Evaluate an expression in the saved namespace without saving. "
+            "There is no active question-render context: context-dependent "
+            "button helpers may fail even if url_action() itself works. To "
+            "press a rendered native link, inspect result.actions using "
+            "status --json and run action ACTION_ID. Do not inject a fake "
+            "current_variable or reconstruct a payload to bypass action checks. "
+            "This command does not execute browser JavaScript."
+        ),
+    )
     evaluate.add_argument("expression")
     evaluate.set_defaults(func=cmd_execution)
     execute = add_recording(
