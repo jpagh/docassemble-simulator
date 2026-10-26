@@ -123,6 +123,11 @@ class Answer:
 
 
 @dataclass(frozen=True)
+class ScreenAction:
+    action_id: str
+
+
+@dataclass(frozen=True)
 class RowAction:
     kind: str
     target: str
@@ -228,6 +233,7 @@ Operation = (
     | Refresh
     | Answer
     | RowAction
+    | ScreenAction
     | Seek
     | ReplayAutomatic
     | Evaluate
@@ -612,6 +618,8 @@ class InterviewExecution:
                     outcome = self._mutate(lambda: self._answer(operation))
                 elif isinstance(operation, RowAction):
                     outcome = self._mutate(lambda: self._row_action(operation))
+                elif isinstance(operation, ScreenAction):
+                    outcome = self._mutate(lambda: self._screen_action(operation))
                 elif isinstance(operation, Seek):
                     outcome = self._seek_operation(operation)
                 elif isinstance(operation, ReplayAutomatic):
@@ -772,10 +780,33 @@ class InterviewExecution:
                 ErrorKind.ANSWER_INPUT,
                 "row action is not available on the saved screen",
             )
-        namespace = payload["namespace"]
+        return self._dispatch_action(payload["namespace"], control)
+
+    def _screen_action(self, operation: ScreenAction):
+        from docassemble_simulator._screen_actions import screen_actions
+
+        payload = self._store.load()
+        screen = payload.get("outcome") or {}
+        # Derive from captured rendered text, never trust a supplied URL/payload.
+        control = next(
+            (
+                action
+                for action in screen_actions(screen)
+                if action["id"] == operation.action_id
+            ),
+            None,
+        )
+        if control is None:
+            raise ExecutionFailure(
+                ErrorKind.ANSWER_INPUT, "action is not available on the saved screen"
+            )
+        if "unsupported" in control:
+            raise ExecutionFailure(ErrorKind.ANSWER_INPUT, control["unsupported"])
+        return self._dispatch_action(payload["namespace"], control["payload"])
+
+    def _dispatch_action(self, namespace: dict, control: dict):
         with self._prepared_operation(namespace) as (interview, status):
-            # Native edit controls carry authored follow-ups and completion
-            # actions. Replay them intact, including resolved generic anchors.
+            # Preserve native wrappers, ordered arguments, and follow-ups.
             status.current_info.update(
                 {"action": control["action"], "arguments": control["arguments"]}
             )
@@ -1468,6 +1499,7 @@ def _assemble(interview, namespace, status):
     if question is not None:
         result = {
             "type": "question",
+            "interview": status.current_info.get("yaml_filename"),
             "question_text": status_field(status, "question_text"),
             "subquestion_text": status_field(status, "subquestion_text"),
             "continue_label": status_field(status, "continue_label"),
@@ -2531,6 +2563,7 @@ __all__ = [
     "ReplayAutomatic",
     "RowAction",
     "SavedSessionSource",
+    "ScreenAction",
     "SeedState",
     "Seek",
     "SnapshotSource",

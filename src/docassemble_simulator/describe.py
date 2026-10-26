@@ -503,7 +503,17 @@ def _row_actions(result: dict) -> list[dict[str, Any]]:
 
 
 def describe_question_result(result: dict, user_dict: dict) -> dict:
-    """Flatten an askfor()/assemble() result dict into a screen description."""
+    """Flatten a rendered question and discover its native action links."""
+    from docassemble_simulator._screen_actions import screen_actions
+
+    out = _describe_question_result(result, user_dict)
+    if result.get("interview"):
+        out["interview"] = result["interview"]
+    out["actions"] = screen_actions(out)
+    return out
+
+
+def _describe_question_result(result: dict, user_dict: dict) -> dict:
     question = result.get("question")
     qtype = getattr(question, "question_type", None)
     out: dict[str, Any] = {
@@ -674,6 +684,13 @@ def describe_fields(
                     described["blank_example"] = f"{described['variable']}="
 
             number = getattr(field, "number", None)
+            for kind in ("note", "html"):
+                rendered = (extras.get(kind) or {}).get(number)
+                if rendered is not None:
+                    described["content"] = rendered
+                    described["source"] = f"field:{number}:{kind}"
+                    if number in (extras.get("ok") or {}):
+                        described["visible"] = bool(extras["ok"][number])
             constraints = {}
             for key in (
                 "min",

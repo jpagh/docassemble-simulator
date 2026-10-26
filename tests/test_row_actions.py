@@ -72,6 +72,130 @@ def test_nested_controls_use_the_native_list_anchor_and_ignore_malformed_links()
     ]
 
 
+def test_screen_describes_native_action_sequences_from_rendered_notes():
+    question = SimpleNamespace(
+        question_type="fields",
+        name="trust",
+        fields=[SimpleNamespace(number=0, datatype="note")],
+    )
+    sequence = action_link(
+        "_da_force_ask",
+        variables=[
+            {
+                "action": "people.new_item_parameters",
+                "arguments": {"new_item_entity": "trust"},
+            },
+            {"action": "_da_list_add", "arguments": {"list": "people"}},
+        ],
+    )
+    result = {"question": question, "extras": {"note": {0: sequence}}}
+    described = describe_question_result(result, {})
+    action = described["actions"][0]
+    assert action["label"] == "button"
+    assert action["source"] == "field:0:note"
+    assert action["payload"] == {
+        "action": "_da_force_ask",
+        "arguments": {
+            "variables": [
+                {
+                    "action": "people.new_item_parameters",
+                    "arguments": {"new_item_entity": "trust"},
+                },
+                {"action": "_da_list_add", "arguments": {"list": "people"}},
+            ]
+        },
+    }
+    assert action["id"] == describe_question_result(result, {})["actions"][0]["id"]
+
+
+def test_screen_actions_exclude_hidden_notes_and_distinguish_creation_parameters():
+    question = SimpleNamespace(
+        question_type="fields",
+        name="trust",
+        fields=[SimpleNamespace(number=n, datatype="note") for n in range(3)],
+    )
+    described = describe_question_result(
+        {
+            "question": question,
+            "extras": {
+                "note": {
+                    n: action_link("people.new_item_parameters", new_item_entity=entity)
+                    for n, entity in enumerate(("trust", "individual", "deceased"))
+                },
+                "ok": {0: True, 1: True, 2: False},
+            },
+        },
+        {},
+    )
+    assert [a["payload"]["arguments"] for a in described["actions"]] == [
+        {"new_item_entity": "trust"},
+        {"new_item_entity": "individual"},
+    ]
+    assert len({a["id"] for a in described["actions"]}) == 2
+    other = describe_question_result(
+        {
+            "question": SimpleNamespace(
+                question_type="fields", name="different", fields=question.fields
+            ),
+            "extras": {
+                "note": {
+                    0: action_link(
+                        "people.new_item_parameters", new_item_entity="trust"
+                    )
+                }
+            },
+        },
+        {},
+    )
+    assert described["actions"][0]["id"] != other["actions"][0]["id"]
+
+
+def test_screen_actions_report_unsupported_links_without_accepting_arbitrary_urls():
+    question = SimpleNamespace(question_type="fields", fields=[], name="links")
+    text = (
+        action_link("event", value=1).replace(
+            "/interview?", "https://example.com/interview?"
+        )
+        + '<a href="javascript:skip()">Skip</a>'
+        + '<a href="/interview?action=not-base64">Broken</a>'
+    )
+    actions = describe_question_result(
+        {"question": question, "question_text": text}, {}
+    )["actions"]
+    assert len(actions) == 3
+    assert all("unsupported" in a and "payload" not in a for a in actions)
+
+
+def test_screen_actions_reject_cross_interview_and_extra_navigation_parameters():
+    question = SimpleNamespace(question_type="fields", fields=[], name="links")
+    link = action_link("event", value=1)
+    text = link.replace("/interview?", "/interview?i=other.yml&amp;") + link.replace(
+        "/interview?", "/interview?reset=1&amp;"
+    )
+    described = describe_question_result(
+        {
+            "question": question,
+            "interview": "main.yml",
+            "question_text": text,
+        },
+        {},
+    )
+    assert all("unsupported" in a for a in described["actions"])
+
+
+def test_screen_action_cli_worker_operation_parity():
+    from docassemble_simulator import cli
+    from docassemble_simulator.execution import ScreenAction
+    from docassemble_simulator.worker import operation_from_request
+
+    args = cli.build_parser().parse_args(["action", "control-id"])
+    assert args.func is cli.cmd_execution
+    assert args.action_id == "control-id"
+    assert operation_from_request(
+        {"operation": "action", "action_id": "control-id"}
+    ) == ScreenAction("control-id")
+
+
 def test_row_action_cli_worker_operation_parity():
     from docassemble_simulator import cli
     from docassemble_simulator.execution import RowAction

@@ -583,6 +583,7 @@ def cmd_execution(args, root):
         Execute,
         Refresh,
         RowAction,
+        ScreenAction,
         SeedState,
         Seek,
         Start,
@@ -608,6 +609,8 @@ def cmd_execution(args, root):
         )
     elif args.command == "row-action":
         operation = RowAction(args.kind, args.target, args.row)
+    elif args.command == "action":
+        operation = ScreenAction(args.action_id)
     elif args.command == "seek":
         operation = Seek(
             args.variable, args.fresh, args.activate, args.trace, args.auto
@@ -1258,7 +1261,14 @@ def _command_trace_metadata(root, args):
 
 def _trace_operation_context(operation, command):
     """Return replay data for one public execution operation."""
-    from docassemble_simulator.execution import Answer, Execute, Refresh, Seek, Start
+    from docassemble_simulator.execution import (
+        Answer,
+        Execute,
+        Refresh,
+        ScreenAction,
+        Seek,
+        Start,
+    )
 
     if isinstance(operation, Answer):
         return {
@@ -1267,6 +1277,14 @@ def _trace_operation_context(operation, command):
             "fresh": False,
             "activate": False,
             "submitted": dict(operation.assignments),
+        }
+    if isinstance(operation, ScreenAction):
+        return {
+            "intent": "action",
+            "target": operation.action_id,
+            "fresh": False,
+            "activate": False,
+            "submitted": {},
         }
     if isinstance(operation, Seek):
         return {
@@ -1531,7 +1549,14 @@ def _trace_replay_overrides(raw_overrides, entries):
 
 
 def _trace_replay_operation(entry, submitted):
-    from docassemble_simulator.execution import Answer, Refresh, Seek, Start, Status
+    from docassemble_simulator.execution import (
+        Answer,
+        Refresh,
+        ScreenAction,
+        Seek,
+        Start,
+        Status,
+    )
     from docassemble_simulator.trace import TraceError
 
     intent = entry.intent or entry.operation
@@ -1543,6 +1568,12 @@ def _trace_replay_operation(entry, submitted):
         return Status()
     if intent == "refresh":
         return Refresh()
+    if intent == "action":
+        if not entry.target:
+            raise TraceError(f"trace step {entry.seq} has no action identifier")
+        if submitted:
+            raise TraceError("action replay does not accept field overrides")
+        return ScreenAction(entry.target)
     if intent == "answer":
         return Answer(tuple(submitted.items()))
     if intent == "defaults":
@@ -1567,7 +1598,7 @@ def _trace_replay_operation(entry, submitted):
     raise TraceError(
         f"trace step {entry.seq} records compare-only operation "
         f"{entry.operation!r}: replay accepts start, status, refresh, answer, "
-        "seek, and automatic records"
+        "action, seek, and automatic records"
     )
 
 
@@ -2515,6 +2546,11 @@ def build_parser():
             "under a different effective configuration."
         ),
     ).set_defaults(func=cmd_reset)
+    action = add_recording(
+        add("action", help="press a native action link offered on the saved screen")
+    )
+    action.add_argument("action_id", help="identifier from the active screen's actions")
+    action.set_defaults(func=cmd_execution)
     row_action = add(
         "row-action", help="press an add, delete, or edit control on the saved screen"
     )

@@ -30,6 +30,7 @@ from docassemble_simulator.execution import (
     Execute,
     Refresh,
     RowAction,
+    ScreenAction,
     SeedState,
     Seek,
     Start,
@@ -175,6 +176,11 @@ def operation_from_request(request: dict[str, Any]):
             bool(request.get("partial", False)),
             bool(request.get("defaults", False)),
         )
+    if name == "action":
+        action_id = request.get("action_id")
+        if not isinstance(action_id, str) or not action_id.strip():
+            raise WorkerProtocolError("action requires an action_id")
+        return ScreenAction(action_id)
     if name == "row-action":
         kind, target, row = (
             request.get("kind"),

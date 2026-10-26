@@ -402,6 +402,49 @@ def test_row_action_commits_only_successful_post_action_screen(answer_execution)
     assert execution.run(Status()).result == saved
 
 
+def test_screen_action_dispatches_only_offered_controls_transactionally(
+    answer_execution,
+):
+    from docassemble_simulator.execution import Execute, ScreenAction, Status
+
+    execution, selected = answer_execution
+    selected["interview"] = RowActionInterview
+    started = execution.run(Start())
+    action = started.result["actions"][0]
+    before = session_bytes(execution)
+    assert not execution.run(ScreenAction("unavailable")).ok
+    assert session_bytes(execution) == before
+    assert execution.run(ScreenAction(action["id"])).ok
+    assert execution.run(Evaluate("pressed")).result["value"] == "'_da_list_add'"
+    assert execution.run(Execute("fail_action = True")).ok
+    saved = execution.run(Status()).result
+    before = session_bytes(execution)
+    failed = execution.run(ScreenAction(saved["actions"][0]["id"]))
+    assert not failed.ok
+    assert "authored action failed" in failed.error.message
+    assert session_bytes(execution) == before
+    assert execution.run(Status()).result == saved
+
+
+def test_screen_action_rejects_offered_javascript_without_saving(answer_execution):
+    from docassemble_simulator.execution import ScreenAction
+
+    class JavascriptInterview(ScreenInterview):
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.subquestion_text = '<a href="javascript:skip()">Skip</a>'
+
+    execution, selected = answer_execution
+    selected["interview"] = JavascriptInterview
+    started = execution.run(Start())
+    before = session_bytes(execution)
+    rejected = execution.run(ScreenAction(started.result["actions"][0]["id"]))
+    assert not rejected.ok
+    assert rejected.error.kind == "answer-input"
+    assert "JavaScript" in rejected.error.message
+    assert session_bytes(execution) == before
+
+
 class ShowIfChainInterview(ScreenInterview):
     fields = (
         SimpleNamespace(saveas="a", datatype="boolean", required=True),

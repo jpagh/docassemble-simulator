@@ -171,6 +171,38 @@ Python callers use `runner.row_action("delete", "people", row=0)`.
 These additive screen facts are debug-only in screen traces, not field-fact
 comparison inputs; older traces remain readable.
 
+### Native screen actions
+
+Screens also expose `actions`: links captured from rendered question/subquestion
+text and visible note/HTML fields. Each control has an opaque `id`, `label`,
+`source`, and either its native `payload` or an `unsupported` reason.
+
+```sh
+docassemble-simulator status --json  # inspect result.actions
+docassemble-simulator action ACTION_ID --record run.trace.jsonl
+```
+
+The worker accepts `{"operation":"action","action_id":"ACTION_ID"}`;
+Python callers use `runner.action(action_id)`. Choose an identifier from the
+current saved screen, not a URL or an action name. Identifiers are deterministic
+for the same rendered screen and distinguish creation parameters and source
+locations; they are not permanent interview-wide identifiers. Old saved screens
+without captured note content need `refresh` before those links can be pressed.
+
+`action` dispatches the complete native payload through docassemble, including
+`url_ask()`'s `_da_force_ask` wrapper and ordered parameter-setting/add-item
+sequences. It does not submit unanswered fields or run form validation. A
+successful resulting screen is saved atomically; errors leave the saved session
+unchanged (external side effects of authored code are not rolled back). Missing
+identifiers, JavaScript, external/cross-interview links, extra URL navigation
+parameters, and malformed URLs are rejected explicitly. Only local native action
+links are supported, not arbitrary DOM/JavaScript interaction or CSS visibility.
+`row-action` remains available for its existing list controls.
+
+Do not evaluate a context-dependent button helper with `eval` to reconstruct a
+link: evaluation has no active question-render context. Press the link already
+rendered on the saved screen instead; no artificial `current_variable` is needed.
+
 `answer` parses JSON, then Python literals, then plain text. Its JSON result
 reports each assignment as `applied`, `unknown field`, or `parse error`, and
 rejections include the active fields, closest-name suggestions, and missing
@@ -279,10 +311,10 @@ A request may override either field with its own `"record"` and `"phase"`
 keys, so one journey can tag entries per step; an absent or `null` field uses
 the worker's `--record`/`--phase` default, and a non-string value is an input
 error. Recorded operations use the canonical one-shot spelling (`start`,
-`status`, `refresh`, `answer`, `seek`, `eval`, `exec`, `vars`, `seed`), so an
+`status`, `refresh`, `answer`, `action`, `seek`, `eval`, `exec`, `vars`, `seed`), so an
 alias request such as `"operation":"evaluate"` records what `eval` records.
 Unlike the one-shot commands, which accept `--record` only on `start`,
-`refresh`, `answer`, `seek`, and `exec`, the worker accepts a record for any
+`refresh`, `answer`, `action`, `seek`, and `exec`, the worker accepts a record for any
 execution request, so a journey sidecar can also carry `status` responses and
 `eval`/`vars`/`seed` failures recorded against the unchanged active screen.
 A `status` record replays as a read-only screen observation; the rest, like a
@@ -296,7 +328,7 @@ failure is a typed `input` response (and is logged to stderr), never a silent
 already failed, its response keeps that error and gains a typed
 `recording-failure` diagnostic instead, so the recording failure never erases
 what the operation did. A scenario whose
-journey reaches only the five one-shot-recordable commands is equivalent to
+journey reaches only the one-shot-recordable commands is equivalent to
 recording it one process per operation, including an automatic seek's expanded
 `auto` steps, its trailing post-walk marker, and a failed answer recorded
 against the unchanged active screen.
@@ -474,7 +506,7 @@ docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl \
 docassemble-simulator trace compare golden.trace.jsonl run.trace.jsonl --update
 ```
 
-`--record PATH` is accepted by `start`, `refresh`, `answer`, `seek`, and
+`--record PATH` is accepted by `start`, `refresh`, `answer`, `action`, `seek`, and
 `exec`, and takes an optional `--phase NAME` used by phased comparison. The
 persistent `worker`/`run`/`journey` commands accept the same flags (or
 per-request `record`/`phase` fields) and record an equivalent sidecar. In a
@@ -490,7 +522,8 @@ record includes sequence, operation, explicit **intent**, phase, submitted
 assignments, outcome, screen outcome, and canonical **screen identity** with the
 rule that produced it. Intent distinguishes ordinary answers (`answer`),
 browser-shaped default submissions (`defaults`), expanded automatic submissions
-(`auto`), and seeks (including their target, fresh, and activation context).
+(`auto`), native actions (`action`, with the control identifier in `target`),
+and seeks (including their target, fresh, and activation context).
 The first line is metadata (interview definition, config fingerprint,
 docassemble/AssemblyLine/simulator versions, and the trace schema version);
 appending to a trace whose metadata disagrees with the current run is an input
@@ -530,7 +563,7 @@ the `trace-mismatch` error details.
 
 `trace replay GOLDEN` starts a fresh isolated session, applies each recorded
 walk intent (start, status, refresh, answer and its browser-defaults variant,
-seek, and expanded automatic submissions), and stops at the
+action, seek, and expanded automatic submissions), and stops at the
 first identity, field-fact, flow, or rejected-assignment divergence. Automatic
 steps initialize their recorded seek target in one operation-local namespace,
 compare each pre-submission screen, and then apply the recorded transaction;
@@ -551,7 +584,7 @@ outcome, and Active seek unchanged. Use
 Replay validates the interview and configuration
 fingerprint metadata, never writes the golden or the user's Saved session, and
 exits non-zero on divergence. A replayable golden is a walk recording (start,
-status, refresh, answer and its browser-defaults variant, seek, and expanded
+status, refresh, answer and its browser-defaults variant, action, seek, and expanded
 automatic submissions); a `status` record is a read-only observation of the
 saved screen. A sidecar can also carry records replay cannot reconstruct — the
 worker accepts a record for any execution request, and `exec` is

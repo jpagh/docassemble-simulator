@@ -4608,6 +4608,139 @@ def _clean_table_row_payload(value):
     return value
 
 
+def test_note_action_sequence_creates_selectable_trust_and_replays(
+    family_python, real_workspace, monkeypatch, tmp_path
+):
+    from docassemble_simulator import SimulatorRunner
+    from docassemble_simulator.trace import load_trace
+
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+    interpreter = family_python.interpreter
+    root = real_workspace
+    questions = root / "docassemble" / "regression" / "data" / "questions"
+    (questions / "screen_actions.yml").write_text("""---
+objects:
+  - people: DAList.using(object_type=DAObject, complete_attribute='complete', auto_gather=False, elements=[])
+---
+code: |
+  for person in people.elements:
+    person.complete
+  people.gathered = True
+---
+mandatory: True
+question: Choose a trust
+fields:
+  - Trust: selected_trust
+    datatype: object_radio
+    choices: |
+      [item for item in people.elements if item.entity == 'trust']
+  - note: |
+      ${ action_button_html(url_ask([{'action': 'people.new_item_parameters', 'arguments': {'new_item_entity': 'trust'}}, {'action': '_da_list_add', 'arguments': {'list': 'people'}}]), label='Add trust') }
+  - html: |
+      ${ action_button_html(url_action('broken_action'), label='Broken action') }
+  - note: |
+      ${ action_button_html(url_action('hidden_action'), label='Hidden action') }
+    show if:
+      code: 'False'
+---
+mandatory: True
+question: Selection complete
+---
+event: x.new_item_parameters
+generic object: DAList
+code: |
+  for key, value in action_arguments().items():
+    setattr(x, key, value)
+---
+code: |
+  people[i].entity = people.new_item_entity
+  del people.new_item_entity
+---
+question: Trust name
+fields:
+  - Name: people[i].name
+---
+question: Trust details
+fields:
+  - Description: people[i].description
+---
+code: |
+  people[i].complete = bool(people[i].entity and people[i].name and people[i].description)
+---
+event: broken_action
+code: |
+  people.broken = True
+  raise ValueError('authored action failed')
+""")
+    cli_started = _run(
+        interpreter, root, "--offline", "--interview", "screen_actions.yml", "start"
+    )
+    cli_added = _run(
+        interpreter,
+        root,
+        "--offline",
+        "--interview",
+        "screen_actions.yml",
+        "action",
+        cli_started["result"]["actions"][0]["id"],
+    )
+    assert cli_added["result"]["question_text"] == "Trust name"
+    trace = tmp_path / "actions.trace.jsonl"
+    with SimulatorRunner(
+        root,
+        interview="screen_actions.yml",
+        python=interpreter,
+        isolate=False,
+        offline=True,
+        timeout=60,
+    ) as runner:
+        started = runner.request("start", record=str(trace))
+        assert started.ok, started.error
+        actions = started.result["actions"]
+        assert [a["label"] for a in actions] == ["Add trust", "Broken action"]
+        assert actions[0]["payload"]["action"] == "_da_force_ask"
+        assert not runner.action("missing").ok
+        assert runner.status().result == started.result
+        failed = runner.action(actions[1]["id"])
+        assert not failed.ok
+        assert "authored action failed" in failed.error["message"]
+        assert runner.status().result == started.result
+        assert runner.evaluate("hasattr(people, 'broken')").result["value"] == "False"
+        added = runner.request("action", action_id=actions[0]["id"], record=str(trace))
+        assert added.ok, added.error
+        assert added.result["question_text"] == "Trust name"
+        assert runner.evaluate("people[0].entity").result["value"] == "'trust'"
+        assert not runner.action(actions[0]["id"]).ok
+        named = runner.request(
+            "answer", assignments={"people[0].name": "Family Trust"}, record=str(trace)
+        )
+        assert named.ok, named.error
+        assert named.result["question_text"] == "Trust details"
+        described = runner.request(
+            "answer",
+            assignments={"people[0].description": "Test trust"},
+            record=str(trace),
+        )
+        assert described.ok, described.error
+        assert described.result["question_text"] == "Choose a trust"
+        choices = described.result["fields"][0]["choices"]
+        assert choices[0]["label"] == "Family Trust"
+        selected = runner.request(
+            "answer",
+            assignments={"selected_trust": choices[0]["value"]},
+            record=str(trace),
+        )
+        assert selected.ok, selected.error
+        assert selected.result["question_text"] == "Selection complete"
+        assert runner.evaluate("selected_trust.entity").result["value"] == "'trust'"
+    entries = load_trace(trace).entries
+    assert entries[1].intent == "action"
+    assert entries[1].target == actions[0]["id"]
+    replay = _run(interpreter, root, "--offline", "trace", "replay", str(trace))
+    assert replay["ok"], replay
+
+
 def test_table_row_actions_across_families(family_python, real_workspace, monkeypatch):
     """Rendered table buttons and template add links share transactional transport."""
     for key, value in _environment().items():

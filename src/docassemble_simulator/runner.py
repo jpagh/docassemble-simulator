@@ -570,6 +570,10 @@ class SimulatorRunner:
             options["assignments"] = assignments
         return self.request("answer", **options)
 
+    def action(self, action_id: str):
+        """Press one native link discovered on the active saved screen."""
+        return self.request("action", action_id=action_id)
+
     def row_action(self, kind: str, target: str, *, row: int | None = None):
         return self.request("row-action", kind=kind, target=target, row=row)
 
