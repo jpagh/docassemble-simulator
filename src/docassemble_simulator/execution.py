@@ -783,15 +783,14 @@ class InterviewExecution:
         return self._dispatch_action(payload["namespace"], control)
 
     def _screen_action(self, operation: ScreenAction):
-        from docassemble_simulator._screen_actions import screen_actions
-
         payload = self._store.load()
         screen = payload.get("outcome") or {}
-        # Derive from captured rendered text, never trust a supplied URL/payload.
+        # Only controls captured during native presentation are authorized.
+        # Do not re-render Markdown or accept a caller's URL/payload here.
         control = next(
             (
                 action
-                for action in screen_actions(screen)
+                for action in screen.get("actions", [])
                 if action["id"] == operation.action_id
             ),
             None,

@@ -63,18 +63,35 @@ def _decode(href: str, interview: str | None) -> tuple[dict | None, str | None]:
         return None, "malformed native action URL"
 
 
+def _markdown_html(text: str) -> str:
+    """Use docassemble's configured Markdown engine, not another render pipeline.
+
+    Pure description callers without a loaded runtime can still inspect HTML.
+    Execution captures the resulting controls while its native context is live.
+    """
+    try:
+        from docassemble.base.functions import this_thread
+    except ImportError:
+        return text
+    markdown = getattr(this_thread, "markdown", None)
+    return markdown.reset().convert(text) if markdown is not None else text
+
+
 def screen_actions(screen: dict) -> list[dict]:
     """Return screen-local controls, preserving native wrappers and arguments."""
     sources = [(key, screen.get(key)) for key in ("question_text", "subquestion_text")]
     sources.extend(
         (field["source"], field["content"])
         for field in screen.get("fields", [])
-        if field.get("visible") is not False and "content" in field
+        if field.get("visible") is True and "content" in field
     )
     actions = []
     for source, text in sources:
         parser = _Links()
-        parser.feed(str(text or ""))
+        text = str(text or "")
+        if source in ("question_text", "subquestion_text") or source.endswith(":note"):
+            text = _markdown_html(text)
+        parser.feed(text)
         for index, (href, label) in enumerate(parser.links):
             payload, reason = _decode(href, screen.get("interview"))
             identity = json.dumps(

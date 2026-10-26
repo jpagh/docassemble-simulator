@@ -689,8 +689,8 @@ def describe_fields(
                 if rendered is not None:
                     described["content"] = rendered
                     described["source"] = f"field:{number}:{kind}"
-                    if number in (extras.get("ok") or {}):
-                        described["visible"] = bool(extras["ok"][number])
+                    if number in (extras.get("ok") or {}) and not extras["ok"][number]:
+                        described["visible"] = False
             constraints = {}
             for key in (
                 "min",

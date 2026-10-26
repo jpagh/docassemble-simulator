@@ -4608,6 +4608,65 @@ def _clean_table_row_payload(value):
     return value
 
 
+def test_markdown_screen_actions_and_browser_visibility_across_families(
+    family_python, real_workspace, monkeypatch
+):
+    from docassemble_simulator import SimulatorRunner
+
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+    questions = real_workspace / "docassemble" / "regression" / "data" / "questions"
+    (questions / "markdown_actions.yml").write_text("""---
+mandatory: True
+code: |
+  show_action = False
+  hide_action = True
+---
+mandatory: True
+question: |
+  [Question action](${ url_action('note_event', value='question') })
+subquestion: |
+  [Subquestion action][sub-action]
+
+  [sub-action]: ${ url_action('note_event', value='subquestion') }
+
+  `[Not a link](${ url_action('note_event', value='code') })`
+fields:
+  - note: |
+      [Note **action**](${ url_action('note_event', value='trust') })
+  - note: |
+      [Hidden action](${ url_action('note_event', value='hidden') })
+    show if: show_action
+  - note: |
+      [Hidden action](${ url_action('note_event', value='hidden') })
+    hide if: hide_action
+  - html: |
+      [Raw HTML is not Markdown](${ url_action('note_event', value='raw') })
+---
+event: note_event
+code: |
+  last_action = action_arguments()['value']
+""")
+    with SimulatorRunner(
+        real_workspace,
+        interview="markdown_actions.yml",
+        python=family_python.interpreter,
+        isolate=False,
+        offline=True,
+        timeout=60,
+    ) as runner:
+        started = runner.start()
+        assert started.ok, started.error
+        actions = started.result["actions"]
+        assert [a["label"] for a in actions] == [
+            "Question action",
+            "Subquestion action",
+            "Note action",
+        ]
+        assert runner.action(actions[-1]["id"]).ok
+        assert runner.evaluate("last_action").result["value"] == "'trust'"
+
+
 def test_note_action_sequence_creates_selectable_trust_and_replays(
     family_python, real_workspace, monkeypatch, tmp_path
 ):

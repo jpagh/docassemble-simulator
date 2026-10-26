@@ -174,7 +174,8 @@ comparison inputs; older traces remain readable.
 ### Native screen actions
 
 Screens also expose `actions`: links captured from rendered question/subquestion
-text and visible note/HTML fields. Each control has an opaque `id`, `label`,
+text and visible note/HTML fields, including inline and reference-style Markdown
+links interpreted by docassemble's configured Markdown engine. Each control has an opaque `id`, `label`,
 `source`, and either its native `payload` or an `unsupported` reason.
 
 ```sh

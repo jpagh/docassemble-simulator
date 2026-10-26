@@ -150,6 +150,32 @@ def test_screen_actions_exclude_hidden_notes_and_distinguish_creation_parameters
     assert described["actions"][0]["id"] != other["actions"][0]["id"]
 
 
+def test_screen_actions_do_not_offer_notes_hidden_by_browser_show_if():
+    question = SimpleNamespace(
+        question_type="fields",
+        name="conditional",
+        fields=[
+            SimpleNamespace(
+                number=0,
+                datatype="note",
+                extras={
+                    "show_if_var": base64.b64encode(b"show_button").decode(),
+                    "show_if_val": True,
+                    "show_if_sign": 1,
+                },
+            )
+        ],
+    )
+    result = {
+        "question": question,
+        # Native ok only evaluates code show-if; browser show-if remains rendered.
+        "extras": {"ok": {0: True}, "note": {0: action_link("hidden_action")}},
+    }
+    assert describe_question_result(result, {"show_button": False})["actions"] == []
+    assert describe_question_result(result, {})["actions"] == []
+    assert len(describe_question_result(result, {"show_button": True})["actions"]) == 1
+
+
 def test_screen_actions_report_unsupported_links_without_accepting_arbitrary_urls():
     question = SimpleNamespace(question_type="fields", fields=[], name="links")
     text = (
