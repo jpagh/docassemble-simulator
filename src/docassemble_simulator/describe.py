@@ -664,8 +664,13 @@ def describe_fields(
             if expanded:
                 number = getattr(field, "number", None)
                 if number in (extras.get("ok") or {}):
-                    described["visible"] = bool(extras["ok"][number])
-                    described.pop("visibility_note", None)
+                    native_visible = bool(extras["ok"][number])
+                    # Native ok excludes code show-if, not browser conditions.
+                    if not native_visible or "show_if_var" not in (
+                        getattr(field, "extras", {}) or {}
+                    ):
+                        described["visible"] = native_visible
+                        described.pop("visibility_note", None)
                 if number in (extras.get("required") or {}):
                     described["required"] = bool(extras["required"][number])
                     if "visibility" in described:

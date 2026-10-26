@@ -4667,6 +4667,63 @@ code: |
         assert runner.evaluate("last_action").result["value"] == "'trust'"
 
 
+@pytest.mark.parametrize("visible", [True, False, None])
+def test_generated_note_actions_preserve_browser_visibility(
+    family_python, real_workspace, monkeypatch, visible
+):
+    from docassemble_simulator import SimulatorRunner
+
+    for key, value in _environment().items():
+        monkeypatch.setenv(key, value)
+    questions = real_workspace / "docassemble" / "regression" / "data" / "questions"
+    initial = f"flag = {visible!r}" if visible is not None else "pass"
+    (questions / "generated_actions.yml").write_text(
+        """---
+mandatory: True
+code: |
+  INITIAL_VALUE
+---
+id: generated controls
+mandatory: True
+question: Generated controls
+fields:
+  - code: |
+      [
+        {'note': action_button_html(url_action('note_event'), label='Generated show'), 'show if': 'flag'},
+        {'note': action_button_html(url_action('note_event'), label='Generated hide'), 'hide if': 'flag'},
+      ]
+---
+event: note_event
+code: |
+  pressed = True
+""".replace("INITIAL_VALUE", initial)
+    )
+    with SimulatorRunner(
+        real_workspace,
+        interview="generated_actions.yml",
+        python=family_python.interpreter,
+        isolate=False,
+        offline=True,
+        timeout=60,
+    ) as runner:
+        started = runner.start()
+        assert started.ok, started.error
+        actions = started.result["actions"]
+        if visible is None:
+            assert actions == []
+        else:
+            assert [a["label"] for a in actions] == [
+                "Generated show" if visible else "Generated hide"
+            ]
+            changed = runner.execute(f"flag = {not visible!r}")
+            assert changed.ok, changed.error
+            assert [a["label"] for a in changed.result["actions"]] == [
+                "Generated hide" if visible else "Generated show"
+            ]
+            assert not runner.action(actions[0]["id"]).ok
+            assert runner.status().result == changed.result
+
+
 def test_note_action_sequence_creates_selectable_trust_and_replays(
     family_python, real_workspace, monkeypatch, tmp_path
 ):

@@ -5,6 +5,8 @@ import json
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
+import pytest
+
 from docassemble_simulator.describe import describe_question_result
 
 
@@ -150,7 +152,9 @@ def test_screen_actions_exclude_hidden_notes_and_distinguish_creation_parameters
     assert described["actions"][0]["id"] != other["actions"][0]["id"]
 
 
-def test_screen_actions_do_not_offer_notes_hidden_by_browser_show_if():
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize("sign", [0, 1])
+def test_screen_actions_do_not_offer_notes_hidden_by_browser_show_if(expanded, sign):
     question = SimpleNamespace(
         question_type="fields",
         name="conditional",
@@ -161,7 +165,7 @@ def test_screen_actions_do_not_offer_notes_hidden_by_browser_show_if():
                 extras={
                     "show_if_var": base64.b64encode(b"show_button").decode(),
                     "show_if_val": True,
-                    "show_if_sign": 1,
+                    "show_if_sign": sign,
                 },
             )
         ],
@@ -171,9 +175,21 @@ def test_screen_actions_do_not_offer_notes_hidden_by_browser_show_if():
         # Native ok only evaluates code show-if; browser show-if remains rendered.
         "extras": {"ok": {0: True}, "note": {0: action_link("hidden_action")}},
     }
-    assert describe_question_result(result, {"show_button": False})["actions"] == []
+    if expanded:
+        generated = question.fields[0]
+        generated.number = "0_0"
+        question.fields = [SimpleNamespace(number=0, extras={"fields_code": "unused"})]
+        result["extras"] = {
+            "sub_fields": {0: [generated]},
+            "ok": {"0_0": True},
+            "note": {"0_0": action_link("hidden_action")},
+        }
+    assert describe_question_result(result, {"show_button": sign == 0})["actions"] == []
     assert describe_question_result(result, {})["actions"] == []
-    assert len(describe_question_result(result, {"show_button": True})["actions"]) == 1
+    assert (
+        len(describe_question_result(result, {"show_button": sign == 1})["actions"])
+        == 1
+    )
 
 
 def test_screen_actions_report_unsupported_links_without_accepting_arbitrary_urls():
