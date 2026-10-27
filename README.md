@@ -156,7 +156,12 @@ docassemble-simulator seek M.family --activate
   real input/validation is needed. A rejected auto-submission rolls back its
   defaults, synthesized blanks, and validation mutations; earlier accepted
   screens remain committed in the operation-local walk. Non-activated and
-  fresh seeks do not save the walk.
+  fresh seeks do not save the walk. Automatic journeys use the same submission
+  acceptance as `answer`: an absent required object-selection input receives
+  `None` only when undefined, including resolved generic-object targets.
+  Authored validation decides whether to advance or stop with its own error,
+  not a required-missing diagnosis. Do not use `--partial` to get past an absent
+  control; that opts out of whole-screen browser behavior rather than fixing it.
 - Lazy variable seeking is reported as ordered `variable-seek` diagnostics,
   not as errors. A seek fails only when docassemble exhausts its definitions;
   that produces an `unresolved-variable` error containing the sought variable.
@@ -578,6 +583,11 @@ first identity, field-fact, flow, or rejected-assignment divergence. Automatic
 steps initialize their recorded seek target in one operation-local namespace,
 compare each pre-submission screen, and then apply the recorded transaction;
 a failed automatic submission is therefore not silently replaced by a seek.
+Absent object-selection controls follow the same empty-field handling on replay,
+without a partial-submission workaround. An authored rejection is recorded as a
+failed automatic attempt and replay must reproduce that rejection, not bypass
+validation or continue the walk. A clean replay of such a recording means the
+expected stop matched, not that the rejected screen was accepted.
 The recorded automatic group is also a hard submission bound: once the recorded
 attempts are exhausted, an unexpected screen is observed and compared with the
 recorded post-walk outcome instead of being submitted, so a changed interview
