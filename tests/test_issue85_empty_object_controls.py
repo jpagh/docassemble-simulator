@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import textwrap
-
 import pytest
+from empty_control_helpers import saved_sessions, start_empty_control_journey
 from test_real_runtime import (  # noqa: F401 - fixtures registered by import
     family_python,
     real_python,
@@ -38,16 +37,8 @@ question: Selection complete
 
 
 def _journey(tmp_path, family, start_worker, interview=INTERVIEW):
-    package = tmp_path / "docassemble" / "issue85"
-    questions = package / "data" / "questions"
-    questions.mkdir(parents=True)
-    (package / "__init__.py").write_text("")
-    (questions / "main.yml").write_text(textwrap.dedent(interview))
-    return start_worker(
-        family.interpreter,
-        tmp_path,
-        family=family.probe,
-        arguments=("--offline", "--seek-diagnostics", "off"),
+    return start_empty_control_journey(
+        tmp_path, family, start_worker, "issue85", interview
     )
 
 
@@ -170,13 +161,6 @@ def test_absent_control_preserves_defined_selection_without_browser_constraints(
     )
 
 
-def _saved_sessions(root):
-    return {
-        path.name: path.read_bytes()
-        for path in (root / ".simulator" / "sessions").glob("*.pkl")
-    }
-
-
 def test_absent_trust_reports_authored_validation_and_rolls_back(
     family_python,  # noqa: F811 - imported fixture
     tmp_path,
@@ -191,7 +175,7 @@ def test_absent_trust_reports_authored_validation_and_rolls_back(
     journey = _journey(tmp_path, family_python, worker_journey, interview)
     assert journey.start()["ok"]
     before = journey.status()["result"]
-    saved = _saved_sessions(tmp_path)
+    saved = saved_sessions(tmp_path)
     for options in ({}, {"strict": True}):
         rejected = journey.answer(defaults=True, **options)
         assert not rejected["ok"] and rejected["error"]["kind"] == "validation", (
@@ -201,7 +185,7 @@ def test_absent_trust_reports_authored_validation_and_rolls_back(
             "You must select at least one Trust"
         ], rejected
         assert journey.status()["result"] == before
-        assert _saved_sessions(tmp_path) == saved
+        assert saved_sessions(tmp_path) == saved
         assert (
             journey.evaluate("(defined('selected_trust'), defined('validated'))")[
                 "result"
@@ -222,12 +206,12 @@ def test_input_rejection_guidance_does_not_demand_an_absent_control(
     journey = _journey(tmp_path, family_python, worker_journey)
     assert journey.start()["ok"]
     before = journey.status()["result"]
-    saved = _saved_sessions(tmp_path)
+    saved = saved_sessions(tmp_path)
     rejected = journey.answer("off_screen=1")
     assert not rejected["ok"] and rejected["error"]["kind"] == "answer-input", rejected
     assert rejected["error"]["details"]["missing_required"] == [], rejected
     assert journey.status()["result"] == before
-    assert _saved_sessions(tmp_path) == saved
+    assert saved_sessions(tmp_path) == saved
     assert journey.evaluate("defined('selected_trust')")["result"]["value"] == "False"
 
 
@@ -257,7 +241,7 @@ def test_actual_required_inputs_still_reject_omission_and_blank(
     assert field["required"] is True, field
     assert field.get("rendered_input") is not False, field
     before = journey.status()["result"]
-    saved = _saved_sessions(tmp_path)
+    saved = saved_sessions(tmp_path)
     for assignments in ((), ("selected_trust=",), ("selected_trust=None",)):
         rejected = journey.answer(*assignments, defaults=not assignments)
         assert not rejected["ok"] and rejected["error"]["kind"] == "validation", (
@@ -267,4 +251,4 @@ def test_actual_required_inputs_still_reject_omission_and_blank(
             rejected
         )
         assert journey.status()["result"] == before
-        assert _saved_sessions(tmp_path) == saved
+        assert saved_sessions(tmp_path) == saved

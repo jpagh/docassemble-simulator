@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import textwrap
-
 import pytest
-from test_issue85_empty_object_controls import _saved_sessions
+from empty_control_helpers import saved_sessions, start_empty_control_journey
 from test_real_runtime import (  # noqa: F401 - fixtures registered by import
     family_python,
     real_python,
@@ -56,16 +54,8 @@ validation code: |
 
 
 def _journey(tmp_path, family, start_worker, interview=INTERVIEW):
-    package = tmp_path / "docassemble" / "issue86"
-    questions = package / "data" / "questions"
-    questions.mkdir(parents=True)
-    (package / "__init__.py").write_text("")
-    (questions / "main.yml").write_text(textwrap.dedent(interview))
-    return start_worker(
-        family.interpreter,
-        tmp_path,
-        family=family.probe,
-        arguments=("--offline", "--seek-diagnostics", "off"),
+    return start_empty_control_journey(
+        tmp_path, family, start_worker, "issue86", interview
     )
 
 
@@ -88,7 +78,7 @@ def _selection_interview(generic, datatype):
 
 def _assert_replay(journey, family, root, record):
     original = record.read_bytes()
-    saved = _saved_sessions(root)
+    saved = saved_sessions(root)
     golden = load_trace(record)
     code, replay = _command(family.interpreter, root, "trace", "replay", str(record))
     assert code == 0, replay
@@ -102,7 +92,7 @@ def _assert_replay(journey, family, root, record):
     assert worker_replay["ok"], worker_replay
     assert worker_replay["result"] == replay["result"]
     assert record.read_bytes() == original
-    assert _saved_sessions(root) == saved
+    assert saved_sessions(root) == saved
     assert list((root / ".simulator").glob("trace-replay-*")) == []
 
 
@@ -122,7 +112,7 @@ def test_automatic_seek_and_replay_accept_absent_required_selection(
     )
     record = tmp_path / "accepted.jsonl"
     assert journey.request("start", record=str(record))["ok"]
-    saved = _saved_sessions(tmp_path)
+    saved = saved_sessions(tmp_path)
     for attempt in range(2):
         walked = journey.request(
             "seek",
@@ -143,7 +133,7 @@ def test_automatic_seek_and_replay_accept_absent_required_selection(
             assert screen["fields"][0]["rendered_input"] is False
             assert result["auto_trace"][0]["ok"] is True
         if not activate:
-            assert _saved_sessions(tmp_path) == saved
+            assert saved_sessions(tmp_path) == saved
     selection = "rav.selected_trust" if generic else "selected_trust"
     if activate:
         assert (
@@ -188,7 +178,7 @@ def test_automatic_seek_and_replay_preserve_authored_empty_selection_rejection(
     journey = _journey(tmp_path, family_python, worker_journey, interview)
     record = tmp_path / "rejected.jsonl"
     assert journey.request("start", record=str(record))["ok"]
-    saved = _saved_sessions(tmp_path)
+    saved = saved_sessions(tmp_path)
     walked = journey.request(
         "seek",
         variable="journey_complete",
@@ -219,7 +209,7 @@ def test_automatic_seek_and_replay_preserve_authored_empty_selection_rejection(
         == "(False, False, False, False, False, False)"
     )
     if not activate:
-        assert _saved_sessions(tmp_path) == saved
+        assert saved_sessions(tmp_path) == saved
     expected_screen = "Choose a trust" if activate else "Saved screen"
     assert journey.status()["result"]["question_text"] == expected_screen
     refreshed = journey.request("refresh", record=str(record))
@@ -240,7 +230,7 @@ def test_automatic_seek_and_replay_preserve_authored_empty_selection_rejection(
     # A now-accepted transition must not silently satisfy a recorded rejection.
     source = tmp_path / "docassemble" / "issue86" / "data" / "questions" / "main.yml"
     source.write_text(interview.replace("if validated is None:", "if False:"))
-    saved = _saved_sessions(tmp_path)
+    saved = saved_sessions(tmp_path)
     original = record.read_bytes()
     code, diverged = _command(
         family_python.interpreter, tmp_path, "trace", "replay", str(record)
@@ -251,6 +241,6 @@ def test_automatic_seek_and_replay_preserve_authored_empty_selection_rejection(
     worker_diverged = journey.request("trace-replay", golden=str(record))
     assert not worker_diverged["ok"], worker_diverged
     assert worker_diverged["error"] == diverged["error"]
-    assert _saved_sessions(tmp_path) == saved
+    assert saved_sessions(tmp_path) == saved
     assert record.read_bytes() == original
     assert list((tmp_path / ".simulator").glob("trace-replay-*")) == []
