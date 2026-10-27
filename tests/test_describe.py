@@ -357,3 +357,25 @@ class TestFieldVisibleBareVariableForm:
     def test_no_condition_defaults_visible(self):
         visible, note = field_visible(_field(), {})
         assert (visible, note) == (True, None)
+
+
+def test_unresolved_choice_metadata_does_not_describe_an_absent_input():
+    """Missing resolved native facts are not proof that a control is absent (#85)."""
+    field = _field(
+        number=0,
+        saveas=safeid("selected_trust"),
+        datatype="object_radio",
+        choicetype="compute",
+        choices=[],
+        required=True,
+    )
+    question = SimpleNamespace(
+        question_type="fields",
+        name="unresolved choices",
+        fields=[field],
+        validation_code=None,
+    )
+    result = describe_question_result({"question": question}, {})
+    described = result["fields"][0]
+    assert described["required"] is True
+    assert described.get("rendered_input") is not False

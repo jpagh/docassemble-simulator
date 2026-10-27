@@ -21,6 +21,36 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
     and an untouched file field becomes `None`. A rendered default that cannot
     be applied falls back to the datatype's blank,
   - remaining visible required fields reject the submission as a `validation` failure naming each field. A required multiple-choice group (`checkboxes`, `multiselect`, `object_checkboxes`, `object_multiselect`) is empty when it holds no true selection, mirroring the browser's "check at least one option" rule; the submission is rejected with the same naming.
+- **Amendment (issue #85): authored requiredness is not proof of an input.**
+  Screen descriptions capture `rendered_input: false` when the native
+  `InterviewStatus.is_empty_mc` decision suppresses a choice control: its
+  `choicetype` is `compute`/`manual`, its field number is present in resolved
+  `selectcompute`, that resolved list is empty, and its input type is neither
+  `combobox` nor `datalist`. Missing or empty normalized `choices` metadata is
+  not enough. This fact is captured for ordinary assembly, sought screens,
+  and the exact ask-time generated sub-fields, separately from `required`.
+  A resolved nonempty list or a combobox/datalist is described with
+  `rendered_input: true`; unresolved choice metadata does not assert absence.
+  Existing screen outcomes without the fact retain their previous behavior.
+
+  Whole-screen submission defines an undefined absent `object`/`object_radio`
+  target as `None` before authored validation, even when authored as required.
+  An already-defined value (including `None`) is preserved. Generic targets
+  use the same resolved destination as explicit assignments. Absent controls
+  have no enforceable required input or browser constraints, nor a missing-input
+  warning (including under `--strict` and in early assignment-error guidance).
+  Authored validation still runs: accepting `None` advances; rejecting it
+  reports the author's own error and rolls back the namespace and screen.
+  `--no-validate` skips only authored validation, not empty-field handling.
+  Actual required inputs, offered null selections (#83), hidden-field policy,
+  and empty object-group clearing/gathering (ADR-0014) are unchanged.
+
+  This follows installed docassemble 1.9.13/1.10.13: `parse.py`'s
+  `InterviewStatus.is_empty_mc` (1.9:510-521; 1.10:302-313), the formatter's
+  early `hiddens`/`continue` before emitting a field (both families:
+  `standardformatter.py:1293-1304`), and the empty-object POST path that
+  evaluates the target before assigning `None` only on failure (1.9
+  `server.py:8266-8272`; 1.10 `interview/views.py:1760-1766`).
 - An unknown-field or parse-error rejection retains the per-assignment dispositions and active-field guidance, and adds `missing_required` from those same live Screen facts. Valid assignments and valid rendered defaults count for that guidance; hidden and optional fields do not. This early assessment does not run authored validation or commit any attempted value.
 - The submission is scoped to the fields the screen described, including resolved generic-object targets (`x.date` and `rav.date`). A variable that is not on the active screen is an `answer-input` failure. Screens with no described fields (continue, field-less deadend) keep accepting explicit assignments; `exec` remains the escape hatch for deliberate state surgery.
 - `answer --partial` restores the previous per-field behavior: only the submitted fields are applied, missing required fields become warnings, and lazy re-seeking may re-present the same screen. `--strict` keeps promoting those warnings to errors.

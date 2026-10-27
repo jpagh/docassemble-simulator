@@ -659,6 +659,17 @@ def describe_fields(
             if choices is None:
                 choices = selectcompute.get(str(getattr(field, "number", "")))
             described = describe_field(field, user_dict, choices=choices)
+            # Mirror InterviewStatus.is_empty_mc in both supported runtimes:
+            # only resolved native compute/manual choices suppress an input.
+            # Normalized description choices cannot distinguish unresolved
+            # choices, and combobox/datalist controls still render an input.
+            if getattr(field, "choicetype", None) in {"compute", "manual"}:
+                if getattr(field, "inputtype", None) in {"combobox", "datalist"}:
+                    described["rendered_input"] = True
+                elif getattr(field, "number", None) in selectcompute:
+                    described["rendered_input"] = bool(
+                        list(selectcompute[field.number])
+                    )
             if expansion_error:
                 described["error"] = expansion_error
             if expanded:

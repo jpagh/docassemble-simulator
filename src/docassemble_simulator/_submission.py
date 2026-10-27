@@ -458,7 +458,11 @@ def _constraint_errors(namespace, screen):
     targets = _screen_field_targets(screen)
     for field in screen.get("fields") or []:
         variable = field.get("variable")
-        if not variable or field.get("visible") is False:
+        if (
+            not variable
+            or field.get("visible") is False
+            or field.get("rendered_input") is False
+        ):
             continue
         found, value = _field_value(namespace, variable, targets)
         if not found or _is_empty_value(value):
@@ -575,7 +579,7 @@ def _required_violations(
         variable = field.get("variable")
         if not isinstance(variable, str) or not variable:
             continue
-        if field.get("visible") is False:
+        if field.get("visible") is False or field.get("rendered_input") is False:
             continue
         datatype = str(field.get("type", "")).lower()
         if datatype == "signature":
@@ -627,7 +631,8 @@ def _submit_screen_fields(namespace, screen, interview):
     Defaults become the submitted values (the browser prefills them), optional
     blanks become the value the browser would post for the datatype, and
     signature fields become ``DAEmpty()`` so documents can still render them.
-    Required fields with no value are left for the required gate.
+    Absent object inputs become None even when authored as required; actual
+    required inputs with no value are left for the required gate.
     """
     screen = _apply_rendered_defaults(namespace, screen, interview)
     blanks = []
@@ -644,6 +649,14 @@ def _submit_screen_fields(namespace, screen, interview):
             _clear_empty_object_group(
                 namespace, targets.get(variable, variable), datatype
             )
+            continue
+        if field.get("rendered_input") is False and datatype in {
+            "object",
+            "object_radio",
+        }:
+            # Native empty_fields handling defines only undefined selections;
+            # _blankable_fields preserves existing values and resolves aliases.
+            blanks.append((variable, None))
             continue
         signature = datatype == "signature"
         if required and not signature:
