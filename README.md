@@ -123,7 +123,14 @@ docassemble-simulator seek M.family --activate
   explicitly emptied (`field=` or `field=None`), reject the submission, except
   that a nonblank `None` or `null` token explicitly selecting an offered
   null-valued radio choice is answered and stores `None`. A required checkbox
-  group needs at least one true selection.
+  group needs at least one true selection. When native resolved choices suppress
+  an input, authored requiredness remains in the screen description but does not
+  demand an impossible answer (`rendered_input: false`). An undefined absent
+  `object`/`object_radio` selection becomes `None`; an existing value is preserved.
+  Browser constraints do not apply to an absent input, but authored validation
+  still runs and may reject it (for example, “You must select at least one Trust”).
+  No `--partial` or relaxed strictness is needed. Missing normalized choices alone
+  do not establish absence; comboboxes and datalists still offer inputs.
   Hidden `show if` fields are neither assigned nor required, and signature
   fields become `DAEmpty()` so documents still render.
   Fields that are not on the active screen are rejected; use `exec` for
