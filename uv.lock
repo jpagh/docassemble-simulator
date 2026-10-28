@@ -2873,7 +2873,7 @@ wheels = [
 
 [[package]]
 name = "docassemble-simulator"
-version = "26.10.7"
+version = "26.10.8"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
