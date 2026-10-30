@@ -12,11 +12,12 @@ import os
 import subprocess
 import sys
 import textwrap
-import tomllib
 from pathlib import Path
 
 import pytest
 from gate_fixtures import fake_interpreter, write_executable
+
+from docassemble_simulator._compat import tomllib
 
 PROJECT = Path(__file__).resolve().parents[1]
 GATE = PROJECT / "scripts" / "test-runtime"
@@ -115,7 +116,8 @@ def _run_gate(
 def test_runtime_gate_task_provisions_lanes_before_running_the_gate():
     tasks = tomllib.loads((PROJECT / ".mise.toml").read_text())["tasks"]
     gate = tasks["test:runtime"]
-    assert set(gate["depends"]) == {"sync:da19", "sync:da110"}
+    assert set(gate["depends"]) == {"sync:da19", "sync:da110", "test:py310"}
+    assert "--python 3.10" in tasks["test:py310"]["run"]
     assert gate["run"] == "scripts/test-runtime"
 
     for task_name, group, environment in (

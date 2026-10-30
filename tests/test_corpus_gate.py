@@ -13,10 +13,11 @@ import os
 import subprocess
 import sys
 import textwrap
-import tomllib
 from pathlib import Path
 
 from gate_fixtures import fake_interpreter, write_executable
+
+from docassemble_simulator._compat import tomllib
 
 PROJECT = Path(__file__).resolve().parents[1]
 GATE = PROJECT / "scripts" / "test-corpus"

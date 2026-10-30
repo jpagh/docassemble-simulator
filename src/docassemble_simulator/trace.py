@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import re
-import tomllib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from docassemble_simulator._compat import tomllib
 
 __all__ = [
     "TRACE_SCHEMA_VERSION",

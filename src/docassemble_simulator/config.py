@@ -6,12 +6,13 @@ import copy
 import hashlib
 import os
 import re
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from docassemble_simulator._compat import tomllib
 
 
 def deep_merge(base: dict, override: dict) -> None:

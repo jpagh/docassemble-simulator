@@ -22,3 +22,14 @@ as a mise tool: Homebrew provides it, and Homebrew's formula ships the zsh
 completion that mise's package lacks. Install it with Homebrew (`brew install
 gh`). The script checks for `gh` up front and aborts before any bump or push if
 it is missing, so a missing CLI never leaves a half-published release.
+
+The GitHub release created by `mise run release` triggers
+`.github/workflows/python-publish.yml`, which builds the wheel and sdist and
+publishes them to PyPI using trusted publishing. The PyPI pending trusted
+publisher must name owner `jpagh`, repository `docassemble-simulator`, workflow
+`python-publish.yml`, and environment `pypi`. The release gate
+(`mise run test:runtime`) includes `mise run test:py310`, the CPython 3.10 fast
+lane for legacy docassemble 1.9.x targets.
+
+`mise run test:py310` provisions `.venv-310`, so `.venv-*/` is ignored rather
+than only the named runtime lane environments.

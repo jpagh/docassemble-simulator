@@ -15,4 +15,4 @@ wheels/
 
 # Virtual environments
 .venv
-.venv-da*/
+.venv-*/

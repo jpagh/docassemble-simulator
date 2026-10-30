@@ -20,14 +20,12 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import Path
-from typing import Self
 
+from docassemble_simulator._compat import StrEnum, tomllib
 from docassemble_simulator._environment import target_interpreter_environment
 
 
@@ -171,7 +169,7 @@ class StagedCorpus:
             self.root.chmod(self.root.stat().st_mode | 0o700)
             shutil.rmtree(self.root, ignore_errors=True)
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> StagedCorpus:  # noqa: PYI034 - Self is 3.11+
         return self
 
     def __exit__(self, *_args) -> None:

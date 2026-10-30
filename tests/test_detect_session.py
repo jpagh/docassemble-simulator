@@ -77,7 +77,9 @@ def _runtime(monkeypatch):
 
     def as_datetime(value):
         parsed = datetime.date.fromisoformat(value)
-        return DADateTime(parsed.year, parsed.month, parsed.day, tzinfo=datetime.UTC)
+        return DADateTime(
+            parsed.year, parsed.month, parsed.day, tzinfo=datetime.timezone.utc
+        )
 
     parse = sys.modules["docassemble.base.parse"]
     parse.get_initial_dict = lambda: {

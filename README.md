@@ -1,6 +1,6 @@
 # docassemble-simulator
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/jpagh/docassemble-simulator/blob/main/LICENSE)
 
 Run a docassemble interview locally without a server. The simulator uses the
 real docassemble compiler, assembly/seek machinery, validation behavior, and
@@ -9,28 +9,39 @@ agents.
 
 ## Install
 
-The simulator is not published to PyPI yet. Install it from the public GitHub
-repository into the target package's interpreter.
+Install the simulator from PyPI into the target package's interpreter; it must
+run in the same environment as the interview package, so a global installation
+(`uv tool install`, `pipx`) is not a substitute. Python 3.10 or newer is
+required.
 
 For a uv-managed interview package:
 
 ```sh
 # Run these in the interview package's project environment.
-uv add --dev "git+https://github.com/jpagh/docassemble-simulator"
+uv add --dev docassemble-simulator
 uv run sim check
 ```
 
-The canonical command is also available as `docassemble-simulator`. For a
-non-uv project, install it into the target package interpreter:
+For a non-uv project, install it into the target package interpreter:
 
 ```sh
-/path/to/package/.venv/bin/python -m pip install \
-  "git+https://github.com/jpagh/docassemble-simulator"
+/path/to/package/.venv/bin/python -m pip install docassemble-simulator
 /path/to/package/.venv/bin/sim check
 ```
 
-Pin a release tag when reproducibility matters, for example
-`git+https://github.com/jpagh/docassemble-simulator@v26.9.0`.
+`sim` is the short alias for the canonical `docassemble-simulator` command;
+both are installed and run the same CLI. Use the long name in scripts or
+environments where `sim` might collide with another tool.
+
+To track unreleased changes, install from the public GitHub repository instead:
+
+```sh
+uv add --dev "git+https://github.com/jpagh/docassemble-simulator"
+```
+
+Pin a version when reproducibility matters, for example
+`docassemble-simulator==26.10.9` or
+`git+https://github.com/jpagh/docassemble-simulator@v26.10.8`.
 
 `why VARIABLE` lists variable-resolution candidates in the same order the real
 runtime will try them, including explicit ordering directives, applicable
@@ -55,8 +66,7 @@ Tolerated lazy references remain diagnostics without a culprit. With seek
 capture disabled, the simulator does not fabricate attribution when the target
 runtime does not retain the ordered history.
 
-The simulator must run in the same environment as the target package; a global
-installation is not a substitute. If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
+If `docassemble-base` or `docassemble-webapp` is absent, the CLI acquires the
 missing fixed package names with `uv pip` (or the interpreter's `pip`) without
 upgrading installed packages. Use `--offline` or `[simulator].offline = true`
 to disable acquisition. An installed package that fails because of a native
@@ -67,7 +77,7 @@ server interface) and modern 1.10.x (hook interface). Supported
 AssemblyLine-backed Interviews are exercised as a tested matrix of
 `docassemble-base`/`docassemble-webapp`/`docassemble.AssemblyLine`/
 `docassemble.ALToolbox` versions; see
-[docs/runtime-compatibility.md](docs/runtime-compatibility.md). The simulator
+[docs/runtime-compatibility.md](https://github.com/jpagh/docassemble-simulator/blob/main/docs/runtime-compatibility.md). The simulator
 reproduces the docassemble webapp's startup module preload so installed custom
 datatypes (for example ALToolbox `BirthDate`) register before parsing, then
 compiles a minimal AssemblyLine birthdate-metadata probe before the target
@@ -614,7 +624,7 @@ compare-only: replay reports the first such step as the typed `input` error
 silently skipping it.
 
 The identity rules and the evidence behind them are documented in
-[docs/screen-trace-identity-study.md](docs/screen-trace-identity-study.md).
+[docs/screen-trace-identity-study.md](https://github.com/jpagh/docassemble-simulator/blob/main/docs/screen-trace-identity-study.md).
 
 ### Retaining replay attachments
 
@@ -1020,7 +1030,7 @@ scripts/test-real-runtime /path/to/1.10/package/.venv/bin/python \
 The repo can provision both target interpreters itself from the `da19` /
 `da110` dependency groups in `pyproject.toml`, which also pin the tested
 `docassemble.AssemblyLine` / `docassemble.ALToolbox` pair for each family
-(see [docs/runtime-compatibility.md](docs/runtime-compatibility.md)):
+(see [docs/runtime-compatibility.md](https://github.com/jpagh/docassemble-simulator/blob/main/docs/runtime-compatibility.md)):
 
 ```sh
 mise run test:all-da
@@ -1080,16 +1090,20 @@ runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
 `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the script itself.
 
 Releases are cut with `mise run release`. A release first visibly runs the
-slow two-family runtime compatibility gate (`mise run test:runtime`, excluding
-the external corpus), then bumps the patch digit, pushes the commit and
-annotated tag, and publishes the GitHub release with notes generated from the
-commits since the previous tag. A failed or interrupted gate leaves version
-files and release Git state unchanged. Run `mise run test:corpus` separately
-when the external corpus gate is needed; it is not part of release validation.
+slow two-family runtime compatibility gate (`mise run test:runtime`, which
+also runs the CPython 3.10 fast lane, excluding the external corpus), then
+bumps the patch digit, pushes the commit and annotated tag, and publishes the
+GitHub release with notes generated from the commits since the previous tag.
+Publishing the GitHub release triggers
+`.github/workflows/python-publish.yml`, which verifies the release tag matches
+`project.version`, builds the wheel and sdist, and uploads them to PyPI with
+trusted publishing. A failed or interrupted gate leaves version files and
+release Git state unchanged. Run `mise run test:corpus` separately when the
+external corpus gate is needed; it is not part of release validation.
 `mise run bump` still bumps and pushes without creating a release, and
 `scripts/release --dry-run` previews the next bump without provisioning
 interpreters or running either slow gate.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/jpagh/docassemble-simulator/blob/main/LICENSE).

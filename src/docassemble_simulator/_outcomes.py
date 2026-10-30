@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
+from docassemble_simulator._compat import StrEnum
 from docassemble_simulator._diagnostics import Diagnostic
 
 

@@ -9,8 +9,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+from docassemble_simulator._compat import tomllib
 
 
 def _import_error(module_name: str):

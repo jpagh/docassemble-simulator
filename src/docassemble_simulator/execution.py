@@ -1378,7 +1378,7 @@ def _fresh_namespace() -> dict[str, Any]:
     internal = initial["_internal"]
     defaults = {
         "gather": [],
-        "modtime": datetime.datetime.now(tz=datetime.UTC),
+        "modtime": datetime.datetime.now(tz=datetime.timezone.utc),
         "tracker": 0,
         "steps": 1,
         "question_queue": [],

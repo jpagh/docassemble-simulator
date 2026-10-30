@@ -3,10 +3,11 @@
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
+
+from docassemble_simulator._compat import tomllib
 
 PROJECT = Path(__file__).resolve().parents[1]
 

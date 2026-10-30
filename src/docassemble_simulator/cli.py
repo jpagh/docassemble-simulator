@@ -2378,7 +2378,9 @@ def build_parser():
     parser = UsageParser(
         prog="docassemble-simulator",
         description=(
-            "Run and render docassemble interviews locally. Config is discovered "
+            "Run and render docassemble interviews locally. "
+            "sim is the short alias for docassemble-simulator; both run this same CLI. "
+            "Config is discovered "
             "from global and walking-up project TOML files; defaults provide "
             "fake Redis, local storage, and foreground background actions, with "
             "no server database substituted. "

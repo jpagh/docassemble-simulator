@@ -14,7 +14,7 @@
     run         = "bump-my-version bump patch && git push --follow-tags"
 
 [tasks.release]
-    description = "Bump the patch digit, push the commit and tag, and publish the GitHub release"
+    description = "Bump the patch digit, push the commit and tag, and publish the GitHub release (which publishes to PyPI)"
     # `gh` is intentionally not declared here: it is provided by Homebrew and
     # only needs to be on PATH. scripts/release checks for it and aborts early.
     tools       = { uv = "latest" }
@@ -43,9 +43,13 @@
     description = "Run tests without real runtimes or the external corpus"
     run         = "uv run pytest -q -m 'not real_runtime and not corpus'"
 
+[tasks."test:py310"]
+    description = "Run the fast suite on CPython 3.10 for legacy docassemble 1.9.x targets"
+    run         = "env -u VIRTUAL_ENV UV_PROJECT_ENVIRONMENT=.venv-310 uv run --python 3.10 pytest -q -m 'not real_runtime and not corpus'"
+
 [tasks."test:runtime"]
-    description = "Two-family runtime compatibility gate: provisions both lanes and fails if one is skipped"
-    depends     = ["sync:da19", "sync:da110"]
+    description = "Two-family runtime gate plus the CPython 3.10 fast lane: provisions both lanes and fails if a family is skipped"
+    depends     = ["sync:da19", "sync:da110", "test:py310"]
     run         = "scripts/test-runtime"
 
 [tasks."test:corpus"]

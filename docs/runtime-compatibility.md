@@ -20,8 +20,11 @@ groups in `pyproject.toml` and exercised by the runtime gate
 
 Both lanes run on CPython 3.12+; the AssemblyLine release requires it. The
 `da19` / `da110` groups attach the AssemblyLine packages only on Python 3.12+
-for that reason. Anything outside a tested row is unclaimed: the simulator
-reports the installed pair instead of guessing.
+for that reason. The simulator package itself supports CPython 3.10 and newer:
+a legacy 1.9.x target that does not use AssemblyLine can run there, and
+`mise run test:py310` (also part of the release gate) exercises the fast suite
+on 3.10. Anything outside a tested row is unclaimed: the simulator reports the
+installed pair instead of guessing.
 
 The matrix deliberately keeps a family split. `docassemble.AssemblyLine 4.8.0`
 reaches `docassemble.ALToolbox 0.19.0`, whose `markitdown[pdf]` chain needs a

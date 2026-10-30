@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Bump the patch version, push the commit and tag, and publish the GitHub
-# release with notes generated from the commits since the previous tag.
+# release with notes generated from the commits since the previous tag. The
+# release event then triggers the PyPI publish workflow.
 #
 # Requires the GitHub CLI (`gh`) on PATH; it is deliberately not managed by
 # mise (Homebrew's formula ships the zsh completion that mise's package lacks).

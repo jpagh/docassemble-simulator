@@ -1,0 +1,36 @@
+# Releases are cut with `mise run release`, which creates the GitHub Release
+# that triggers this workflow.
+name: Publish Python Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/docassemble-simulator
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+      - name: Check the release tag matches the package version
+        if: github.event_name == 'release'
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version="$(uv version --short)"
+          if [ "v${version}" != "${tag}" ]; then
+            echo "Release tag '${tag}' does not match pyproject.toml version '${version}'." >&2
+            echo "Run 'mise run release' so the tag and version agree." >&2
+            exit 1
+          fi
+      - name: Build package
+        run: uv build
+      - name: Publish to PyPI
+        run: uv publish --check-url https://pypi.org/simple/

@@ -55,6 +55,9 @@ def test_installed_alias_help_needs_no_runtime(installed_scripts):
         assert result.returncode == 0, result.stderr
         assert "--offline" in result.stdout
         assert "start" in result.stdout
+        assert "sim is the short alias for docassemble-simulator" in " ".join(
+            result.stdout.split()
+        )
     python = "python.exe" if os.name == "nt" else "python"
     probe = subprocess.run(
         [str(installed_scripts / python), "-c", "import docassemble.base"],
