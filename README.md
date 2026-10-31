@@ -178,7 +178,9 @@ docassemble-simulator seek M.family --activate
   control; that opts out of whole-screen browser behavior rather than fixing it.
 - Lazy variable seeking is reported as ordered `variable-seek` diagnostics,
   not as errors. A seek fails only when docassemble exhausts its definitions;
-  that produces an `unresolved-variable` error containing the sought variable.
+  that produces an `unresolved-variable` error containing the sought variable,
+  except for a generated-PDF boundary, which reports `pdf-unavailable` with
+  the capability message below.
 - `eval` and `vars` rehydrate the namespace but never save it.
 - `exec` assembles and saves by default. `--no-assemble` performs a state-only
   commit after successful Python execution.
@@ -698,9 +700,9 @@ may add a top-level `attachments` manifest:
 
 Exit codes are `0` for success (including interview completion and resolved
 lazy seeks), `1` for usage, workspace, configuration, or missing-state
-failures, `2` for validation, unresolved-variable, execution, seek, compile,
-runtime-compatibility, render, or worker-timeout failures, and `3` for
-unexpected simulator faults. Argument-parsing
+failures, `2` for validation, unresolved-variable, pdf-unavailable,
+execution, seek, compile, runtime-compatibility, render, or worker-timeout
+failures, and `3` for unexpected simulator faults. Argument-parsing
 failures follow the same envelope when `--json` is present and exit `1`; normal
 `--help` output remains a successful exit.
 
@@ -814,7 +816,10 @@ invoke an external converter or fabricate a PDF. When an AssemblyLine document
 or bundle asks for a generated PDF and has a DOCX rendering, the simulator
 skips the PDF conversion, returns the real DOCX artifact (including merged DOCX
 and DOCX ZIP bundles), and records a `pdf-skip` diagnostic. PDF-only
-attachments still raise `PDFConversionUnavailable`.
+attachments, a `.pdf` reference to a stripped attachment, and a PDF
+concatenation over only stripped attachments report the typed `pdf-unavailable`
+failure (exit 2) with the capability message published by `info`;
+finalization raises `PDFConversionUnavailable` underneath.
 
 ## Workspace configuration and defaults
 
@@ -1090,7 +1095,16 @@ choose its root or `--refresh-nltk-cache` to publish a new generation. Use
 `--jobs N` for bounded parallel case execution (serial by default),
 `--match`, `--shard INDEX/COUNT`, and
 `--expectations tests/demo_corpus_expectations.toml` for focused or reviewed
-runs. Set `DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
+runs. The reviewed baseline pins 21 narrow expectations (18 capability
+boundaries and 3 deliberate error demonstrations): PDF-only attachments,
+stripped `.pdf` link requests, manual PDF concatenations, rtf-to-docx
+converter requests, and the examples that intentionally divide by zero or
+create an infinite loop. Optional packages, network, credentials, database,
+session, and ML-service failures are not expectations; each result row derives
+an evidence-based `blocker` (`environment`, `service`, `network`, or none)
+only from its own diagnostic context, and the summary reports blocker counts
+alongside expected/unexpected counts. Set
+`DASIMULATOR_DEMO_FIXTURES` for the default fixture root and
 `DASIMULATOR_DEMO_PYTHON` for the interpreter used by the script itself.
 
 Releases are cut with `mise run release`. A release first visibly runs the

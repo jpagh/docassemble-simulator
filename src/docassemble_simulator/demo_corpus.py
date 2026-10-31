@@ -22,7 +22,7 @@ import tempfile
 import time
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from docassemble_simulator._compat import StrEnum, tomllib
@@ -106,6 +106,14 @@ class CorpusErrorKind(StrEnum):
     RUNTIME_DRIFT = "runtime-drift"
 
 
+class CorpusBlocker(StrEnum):
+    """An environmental cause derived from a failure's observed evidence."""
+
+    ENVIRONMENT = "environment"
+    SERVICE = "service"
+    NETWORK = "network"
+
+
 @dataclass(frozen=True)
 class CaseResult:
     """Serializable result of one isolated subprocess invocation."""
@@ -125,12 +133,14 @@ class CaseResult:
     expectation: str | None = None
     expectation_category: str | None = None
     runtime_drift: bool = False
+    blocker: CorpusBlocker | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "phase", RunPhase(self.phase))
         object.__setattr__(
             self, "classification", CorpusClassification(self.classification)
         )
+        object.__setattr__(self, "blocker", derive_blocker(self))
 
     def as_dict(self) -> dict:
         return {
@@ -142,6 +152,7 @@ class CaseResult:
             "returncode": self.returncode,
             "elapsed_seconds": round(self.elapsed_seconds, 6),
             "classification": self.classification,
+            "blocker": self.blocker.value if self.blocker is not None else None,
             "error_kind": self.error_kind,
             "message": self.message,
             "envelope": self.envelope,
@@ -220,6 +231,180 @@ class Expectation:
             and (self.error_kind is None or result.error_kind == self.error_kind)
             and (self.message is None or self.message in (result.message or ""))
         )
+
+
+# Blockers are evidence labels, never exemptions.  Each rule requires the
+# diagnostic context that identifies an environment dependency or a stubbed
+# service; a class or attribute name alone is not enough.  Missing LibreOffice
+# is deliberately absent: converter availability is a reviewed capability
+# boundary (ADR-0001), not an environmental attribution.
+_NAMESPACE_MISSING_MODULE = re.compile(
+    r"namespace rehydration failed: modulenotfounderror: no module named '([^']+)'",
+    re.IGNORECASE,
+)
+_CORE_MODULE_PREFIX = "docassemble"
+_HARNESS_ERROR_KINDS = frozenset(
+    {
+        CorpusErrorKind.CRASH.value,
+        CorpusErrorKind.PROTOCOL.value,
+        CorpusErrorKind.TIMEOUT.value,
+        CorpusErrorKind.RUNTIME_DRIFT.value,
+        "fault",
+    }
+)
+_FAULT_CLASSIFICATIONS = frozenset(
+    {
+        CorpusClassification.CRASH.value,
+        CorpusClassification.PROTOCOL_ERROR.value,
+        CorpusClassification.TIMEOUT.value,
+    }
+)
+_NETWORK_DNS_ERRORS = (
+    "nodename nor servname provided",
+    "name or service not known",
+    "temporary failure in name resolution",
+)
+_NETWORK_CONNECTION_ERRORS = (
+    "connection refused",
+    "network is unreachable",
+    "no route to host",
+    "certificate verify failed",
+)
+
+
+def _missing_optional_module(evidence: str) -> bool:
+    """Whether namespace rehydration failed on a non-core optional module."""
+    match = _NAMESPACE_MISSING_MODULE.search(evidence)
+    if match is None:
+        return False
+    root = match.group(1).split(".", 1)[0]
+    return not root.startswith(_CORE_MODULE_PREFIX)
+
+
+def _has_environment_evidence(evidence: str) -> bool:
+    if _missing_optional_module(evidence):
+        return True
+    if "could not resolve authentication method" in evidence and "api_key" in evidence:
+        return True
+    if (
+        "is not configured in the configuration" in evidence
+        and "application " in evidence
+    ):
+        return True
+    if (
+        "'nonetype' object has no attribute 'google_cloud_credentials'" in evidence
+        and "google_api().google_cloud_credentials" in evidence
+    ):
+        return True
+    return (
+        "error loading wordnet" in evidence or "error loading omw-1.4" in evidence
+    ) and "urlopen error" in evidence
+
+
+def _has_service_evidence(evidence: str) -> bool:
+    if "'dummyobject' object has no attribute" in evidence:
+        return True
+    if "'fakeredis' object has no attribute" in evidence and (
+        "get_server_redis_user" in evidence or "setnx(" in evidence
+    ):
+        return True
+    if (
+        "namespace rehydration failed: attributeerror: 'nonetype' object has no "
+        "attribute 'model'"
+    ) in evidence:
+        return True
+    if "'nonetype' object has no attribute 'cursor'" in evidence and (
+        "conn.cursor()" in evidence
+    ):
+        return True
+    if "'nonetype' object has no attribute 'decode'" in evidence and (
+        "get_server_redis_user" in evidence
+    ):
+        return True
+    if (
+        "keyerror: 'secret'" in evidence
+        and "current_info['secret']" in evidence
+        and "user_interviews(" in evidence
+    ):
+        return True
+    return (
+        "argument of type 'nonetype' is not a container or iterable" in evidence
+        and "in task_performed" in evidence
+        and "tasks[task]" in evidence
+    )
+
+
+def _has_network_evidence(evidence: str) -> bool:
+    if (
+        "nameresolutionerror" in evidence
+        and "httpconnection" in evidence
+        and "failed to resolve" in evidence
+    ):
+        return True
+    if "socket.gaierror" in evidence and any(
+        marker in evidence for marker in _NETWORK_DNS_ERRORS
+    ):
+        return True
+    if "urlopen error" in evidence and any(
+        marker in evidence
+        for marker in _NETWORK_DNS_ERRORS + _NETWORK_CONNECTION_ERRORS
+    ):
+        return True
+    return any(
+        marker in evidence
+        for marker in (
+            "httpconnectionpool",
+            "urlerror",
+            "sslcertverificationerror",
+        )
+    ) and any(marker in evidence for marker in _NETWORK_CONNECTION_ERRORS)
+
+
+def _failure_evidence(result: CaseResult) -> str:
+    """Collect the diagnostic text a failure itself reported."""
+    parts = [result.message or ""]
+    envelope = result.envelope
+    if isinstance(envelope, dict):
+        error = envelope.get("error")
+        if isinstance(error, dict):
+            parts.extend(
+                str(value) for value in (error.get("message"),) if value is not None
+            )
+            details = error.get("details")
+            if isinstance(details, dict):
+                parts.extend(
+                    str(value)
+                    for value in (
+                        details.get("message"),
+                        details.get("traceback_tail"),
+                    )
+                    if value is not None
+                )
+    return "\n".join(parts).lower()
+
+
+def derive_blocker(result: CaseResult) -> CorpusBlocker | None:
+    """Attribute only an observed environmental, service, or network cause.
+
+    Expectation matching and classifications stay independent: this label
+    never turns a failure into an expected result.  Timeouts, crashes,
+    protocol errors, runtime drift, and fault-tagged failures report no
+    blocker because they are simulator or harness outcomes, not evidence
+    about the environment.
+    """
+    if result.classification != CorpusClassification.FAILURE:
+        return None
+    error_kind = str(result.error_kind).lower() if result.error_kind else ""
+    if error_kind in _HARNESS_ERROR_KINDS:
+        return None
+    evidence = _failure_evidence(result)
+    if _has_environment_evidence(evidence):
+        return CorpusBlocker.ENVIRONMENT
+    if _has_service_evidence(evidence):
+        return CorpusBlocker.SERVICE
+    if _has_network_evidence(evidence):
+        return CorpusBlocker.NETWORK
+    return None
 
 
 def fixture_digest(path: Path) -> str:
@@ -1059,10 +1244,9 @@ def run_case(
 
 
 def _validate_expectation(expectation: Expectation) -> None:
-    forbidden = {"timeout", "crash", "protocol_error"}
     if (
-        expectation.classification in forbidden
-        or expectation.error_kind in forbidden
+        expectation.classification in _FAULT_CLASSIFICATIONS
+        or expectation.error_kind in _HARNESS_ERROR_KINDS
         or expectation.returncode == 3
     ):
         raise CorpusError(
@@ -1293,8 +1477,11 @@ def write_reports(
     error_kinds: dict[str, int] = {}
     outcome_kinds: dict[str, int] = {}
     expectation_categories: dict[str, int] = {}
+    blockers: dict[str, int] = {}
     for row in rows:
         counts[row["classification"]] = counts.get(row["classification"], 0) + 1
+        if row["blocker"]:
+            blockers[row["blocker"]] = blockers.get(row["blocker"], 0) + 1
         if row["error_kind"]:
             error_kinds[row["error_kind"]] = error_kinds.get(row["error_kind"], 0) + 1
         if row["expectation_category"]:
@@ -1318,9 +1505,11 @@ def write_reports(
         "counts": dict(sorted(counts.items())),
         "error_kinds": dict(sorted(error_kinds.items())),
         "outcome_kinds": dict(sorted(outcome_kinds.items())),
+        "blockers": dict(sorted(blockers.items())),
         "expectation_categories": dict(sorted(expectation_categories.items())),
         "runtime_drift": sum(row["runtime_drift"] for row in rows),
         "package_smoke": package_smoke,
+        "expected": sum(1 for row in rows if row["expectation"]),
         "unexpected": sum(
             row["classification"] not in {"success", "runtime_drift"}
             and not row["expectation"]
@@ -1339,6 +1528,8 @@ def write_reports(
         "# Demo corpus results",
         "",
         f"Total: {summary['total']}",
+        f"Expected: {summary['expected']}",
+        f"Unexpected: {summary['unexpected']}",
         "",
         "| Classification | Count |",
         "| --- | ---: |",
@@ -1355,6 +1546,10 @@ def write_reports(
     )
     markdown.extend(
         f"| {key} | {value} |" for key, value in summary["outcome_kinds"].items()
+    )
+    markdown.extend(["", "## Blockers", "", "| Blocker | Count |", "| --- | ---: |"])
+    markdown.extend(
+        f"| {key} | {value} |" for key, value in summary["blockers"].items()
     )
     (destination / "summary.md").write_text(
         "\n".join(markdown) + "\n", encoding="utf-8"

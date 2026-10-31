@@ -1,6 +1,226 @@
 # Reviewed expectations for deliberate interview failures and simulator capability
-# boundaries belong here. Each entry must identify a canonical interview and phase,
-# constrain the observed failure, and explain why it is expected.
+# boundaries belong here. Each entry identifies a canonical interview and phase,
+# constrains the observed failure (exit code, error kind, and a stable message
+# fragment), and explains why it is expected.
 #
-# This baseline is intentionally empty: optional dependencies that happen to be
-# unavailable must be reviewed against the runtime before being whitelisted.
+# PDF capability boundaries pin the typed `pdf-unavailable` message, not the
+# superseded unresolved-variable diagnostic. Optional packages, network,
+# credentials, database, session, and machine-learning service failures are not
+# listed here: environment-derived blockers stay visible and unwhitelisted.
+
+# Eleven PDF-only attachment requests (ADR-0006).  The simulator removes
+# generated PDF formats before conversion and reports the typed capability.
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/allow-emailing-false-pdf.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/attachment-notice.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/attachment.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/document-links-limited.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/formatting.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/immediate_file.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/manual-attachment-list.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/pdf-a.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.demo:data/questions/examples/tagged-pdf.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/valid-formats-code.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/valid-formats.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+# Two converter-dependent rtf-to-docx requests (ADR-0001).
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/document-docx-from-rtf.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "execution"
+    message        = "[Errno 2] No such file or directory: 'libreoffice'"
+    reason         = "ADR-0001: the simulator never invokes an external converter, and rtf-to-docx requires the absent LibreOffice converter."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/document-docx-from-rtf-standalone.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "execution"
+    message        = "[Errno 2] No such file or directory: 'libreoffice'"
+    reason         = "ADR-0001: the simulator never invokes an external converter, and rtf-to-docx requires the absent LibreOffice converter."
+    category       = "capability-boundary"
+
+# Three deliberate error demonstrations.
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/error-help.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "execution"
+    message        = "division by zero"
+    reason         = "The example deliberately divides by zero to demonstrate docassemble's error-help page."
+    category       = "deliberate-error"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/error-help-language.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "execution"
+    message        = "division by zero"
+    reason         = "The example deliberately divides by zero to demonstrate docassemble's localized error-help page."
+    category       = "deliberate-error"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/infinite-loop-2.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "execution"
+    message        = "There appears to be an infinite loop."
+    reason         = "The example deliberately creates a cyclic code dependency to demonstrate docassemble's infinite-loop detection."
+    category       = "deliberate-error"
+
+# Three attachment `.pdf` link requests whose generated PDF was stripped
+# before finalization; they report the same typed capability as #89.
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/dafile-url-for.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a .pdf reference to an attachment whose generated PDF the simulator stripped reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/dafile-url-for-temporary.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a .pdf reference to an attachment whose generated PDF the simulator stripped reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/document-variable-name-link.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a .pdf reference to an attachment whose generated PDF the simulator stripped reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+# Two manual attachments that concatenate only stripped PDF attachments.
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/document-manual.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a manual attachment that concatenates only stripped PDF attachments reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"
+
+[[expectations]]
+    interview      = "docassemble.base:data/questions/examples/document-manual-code.yml"
+    phase          = "start"
+    classification = "failure"
+    returncode     = 2
+    error_kind     = "pdf-unavailable"
+    message        = "PDF output is unavailable in the simulator"
+    reason         = "ADR-0006: a manual attachment that concatenates only stripped PDF attachments reports the typed PDF-unavailable failure."
+    category       = "capability-boundary"

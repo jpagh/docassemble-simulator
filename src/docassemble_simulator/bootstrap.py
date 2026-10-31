@@ -22,8 +22,11 @@ from docassemble_simulator._runtime import (
     install_attachment_filename_fallback,
     install_diagnostic_logging,
     install_fake_redis,
+    install_pdf_concatenate_fallback,
     install_pdf_skip_fallback,
+    install_python_module_runner,
     neutralize_argv,
+    pdf_stripped_attachment,
     prepare_environment,
     register_hooks,
 )
@@ -45,8 +48,11 @@ __all__ = [
     "install_attachment_filename_fallback",
     "install_diagnostic_logging",
     "install_fake_redis",
+    "install_pdf_concatenate_fallback",
     "install_pdf_skip_fallback",
+    "install_python_module_runner",
     "neutralize_argv",
+    "pdf_stripped_attachment",
     "prepare_environment",
     "register_hooks",
 ]

@@ -25,9 +25,11 @@ import logging
 import mimetypes
 import os
 import re
+import subprocess
 import sys
 import types
 import unicodedata
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -61,6 +63,9 @@ _PDF_SKIP_MESSAGE = (
     "instead of failing or seeking a missing PDF"
 )
 _PDF_SKIP_MARKER = "_dasimulator_docx_pdf_fallback"
+_PDF_STRIPPED_INFO_KEY = "_simulator_pdf_stripped"
+_PDF_CONCATENATE_NO_FILES = "pdf_concatenate: no valid files to concatenate"
+_PDF_CONCATENATE_MARKER = "_dasimulator_pdf_concatenate_fallback"
 
 
 def _file_metadata(reference, *, resolved_path: Path | None = None) -> dict:
@@ -616,10 +621,182 @@ def install_attachment_filename_fallback() -> None:
             name = result.get("name") or "attachment"
             filename = re.sub(r"[^\w.-]+", "_", str(name), flags=re.UNICODE).strip("._")
             result["filename"] = filename or "attachment"
-        return original(self, attachment, result, user_dict)
+        finalized = original(self, attachment, result, user_dict)
+        if had_pdf:
+            _mark_pdf_stripped_attachment(
+                attachment, user_dict, is_generic=getattr(self, "is_generic", False)
+            )
+        return finalized
 
     finalize_with_filename._dasimulator_filename_fallback = True
     Question.finalize_attachment = finalize_with_filename
+
+
+def _mark_pdf_stripped_attachment(attachment, user_dict, *, is_generic=False) -> None:
+    """Record that finalization removed this attachment's generated PDF.
+
+    A ``.pdf`` reference can only be classified as the simulator's PDF
+    boundary when the attachment was generated with a PDF format that
+    finalization stripped.  Persist that fact on the collection metadata (the
+    namespace is pickled across operations) rather than inferring it later
+    from the remaining formats, which cannot distinguish an authored
+    DOCX-only attachment from a stripped one.
+
+    The collection name is resolved exactly as docassemble's finalizer
+    resolves it: intrinsic names first, then generic/index substitutions.
+    """
+    if not isinstance(attachment, dict):
+        return
+    variable_name = attachment.get("variable_name")
+    if not variable_name:
+        return
+    try:
+        from docassemble.base.functions import intrinsic_name_of
+        from docassemble.base.parse import substitute_vars_from_user_dict
+
+        resolved_name = substitute_vars_from_user_dict(
+            intrinsic_name_of(variable_name, the_user_dict=user_dict),
+            user_dict,
+            is_generic=is_generic,
+        )
+    except Exception:  # noqa: BLE001 - a missing marker must not break finalization
+        logger.debug("could not resolve PDF-stripped attachment %r", variable_name)
+        return
+    try:
+        collection = eval(resolved_name, user_dict)
+    except Exception:  # noqa: BLE001 - a missing marker must not break finalization
+        logger.debug("could not mark PDF-stripped attachment %r", resolved_name)
+        return
+    info = getattr(collection, "info", None)
+    if isinstance(info, dict):
+        info[_PDF_STRIPPED_INFO_KEY] = True
+
+
+def _is_pdf_stripped_attachment(value) -> bool:
+    """Whether ``value`` is an attachment collection with its PDF removed."""
+    try:
+        from docassemble.base.util import DAFileCollection
+    except ImportError:
+        return False
+    if not isinstance(value, DAFileCollection):
+        return False
+    info = getattr(value, "info", None)
+    return isinstance(info, dict) and bool(info.get(_PDF_STRIPPED_INFO_KEY))
+
+
+def pdf_stripped_attachment(variable, namespace):
+    """The attachment a sought ``.pdf`` variable names, when its PDF was stripped.
+
+    Resolve only the path before the ``.pdf`` suffix.  A prefix that does not
+    resolve, or resolves to anything other than a marked attachment
+    collection, is left to docassemble's ordinary unresolved-variable failure
+    so genuine authored errors keep their provenance.
+    """
+    if not isinstance(variable, str) or not isinstance(namespace, dict):
+        return None
+    if not variable.endswith(".pdf"):
+        return None
+    try:
+        target = eval(variable.removesuffix(".pdf"), namespace)
+    except Exception:  # noqa: BLE001 - an unresolved root is not this boundary
+        return None
+    return target if _is_pdf_stripped_attachment(target) else None
+
+
+def _contains_pdf_stripped_attachment(target) -> bool:
+    """Whether a ``pdf_concatenate`` argument contains a stripped attachment."""
+    try:
+        from docassemble.base.util import DAFileCollection, DAFileList, DAList
+    except ImportError:
+        return False
+    if isinstance(target, DAFileCollection):
+        return _is_pdf_stripped_attachment(target)
+    if isinstance(target, (DAFileList, DAList)):
+        return any(_contains_pdf_stripped_attachment(item) for item in target)
+    if isinstance(target, Iterable) and not isinstance(target, (str, bytes, dict)):
+        return any(_contains_pdf_stripped_attachment(item) for item in target)
+    return False
+
+
+def _is_empty_pdf_concatenate(error: BaseException) -> bool:
+    """Whether ``error`` is docassemble's no-valid-PDF-inputs failure."""
+    try:
+        from docassemble.base.error import DAError
+    except ImportError:
+        return False
+    return isinstance(error, DAError) and str(error) == _PDF_CONCATENATE_NO_FILES
+
+
+def _materialize_pdf_target(target):
+    """Materialize one-shot iterables before upstream consumes them.
+
+    ``pdf_concatenate`` iterates its inputs inside ``get_pdf_paths``.  A
+    generator argument would otherwise be exhausted before failure
+    classification can tell that it contained a stripped attachment.  Lists
+    and tuples are rebuilt only to reach nested one-shot iterables.
+    """
+    if isinstance(target, Iterator):
+        return tuple(_materialize_pdf_target(item) for item in target)
+    if isinstance(target, list):
+        return [_materialize_pdf_target(item) for item in target]
+    if isinstance(target, tuple):
+        return tuple(_materialize_pdf_target(item) for item in target)
+    return target
+
+
+def _pdf_concatenate_with_unavailable(original):
+    """Translate an all-stripped PDF concatenation into the typed boundary.
+
+    ``pdf_concatenate`` probes ``hasattr(collection, 'pdf')`` so a stripped
+    collection contributes no path; when every input is stripped the upstream
+    function raises a low-level "no valid files" error.  Keep successful
+    concatenations and genuinely invalid calls unchanged.
+    """
+
+    @functools.wraps(original)
+    def pdf_concatenate(*args, **kwargs):
+        arguments = tuple(_materialize_pdf_target(arg) for arg in args)
+        try:
+            return original(*arguments, **kwargs)
+        except Exception as error:
+            if not _is_empty_pdf_concatenate(error):
+                raise
+            if not any(_contains_pdf_stripped_attachment(arg) for arg in arguments):
+                raise
+            raise PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE) from error
+
+    pdf_concatenate._dasimulator_pdf_concatenate_fallback = True
+    return pdf_concatenate
+
+
+def install_pdf_concatenate_fallback() -> None:
+    """Translate PDF concatenation over stripped attachments (ADR-0006).
+
+    Installation is idempotent per function object and a no-op when the
+    installed runtime has no ``pdf_concatenate``.  It runs before the preload
+    pass so package modules that bind the function at import see this seam;
+    known re-exporting modules that are already loaded are rebound too.
+    """
+    try:
+        from docassemble.base import util
+    except ImportError as error:
+        if not _is_missing_module(
+            error, "docassemble", "docassemble.base", "docassemble.base.util"
+        ):
+            raise
+        return
+    original = getattr(util, "pdf_concatenate", None)
+    if original is None or getattr(original, _PDF_CONCATENATE_MARKER, False):
+        return
+    patched = _pdf_concatenate_with_unavailable(original)
+    util.pdf_concatenate = patched
+    for module_name in (
+        "docassemble.base.legal",
+        "docassemble.AssemblyLine.al_document",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and getattr(module, "pdf_concatenate", None) is original:
+            module.pdf_concatenate = patched
 
 
 def _missing_pdf_error_type():
@@ -740,6 +917,83 @@ def install_pdf_skip_fallback() -> None:
         if original is None or getattr(original, _PDF_SKIP_MARKER, False):
             continue
         cls.as_pdf = _docx_pdf_fallback(original)
+
+
+def _python_module_runner(original):
+    """Bind ``run_python_module`` to this interpreter and active workspace.
+
+    Upstream derives the subprocess interpreter from the installed Pandoc
+    module path, which only resolves when that path contains a ``lib/python``
+    segment. A staged workspace package tree has no such segment, so the
+    derived command is the module file itself. Keep upstream's module-name
+    normalization, argument validation, combined output, and return-code
+    contract; change only the executable and working directory.
+    """
+
+    @functools.wraps(original)
+    def run_python_module(module, arguments=None):
+        from docassemble.base.error import DAError
+        from docassemble.base.functions import this_thread
+
+        if re.search(r"\.py$", module):
+            module = this_thread.current_package + "." + re.sub(r"\.py$", "", module)
+        elif re.search(r"^\.", module):
+            module = this_thread.current_package + module
+        commands = [sys.executable, "-m", module]
+        if arguments:
+            if not isinstance(arguments, list):
+                raise DAError(
+                    "run_python_module: the arguments parameter must be in "
+                    "the form of a list"
+                )
+            commands.extend(arguments)
+        output = ""
+        try:
+            # ``python -m`` puts the working directory on the child's import
+            # path, so run from the active package tree the simulator loaded.
+            output = subprocess.check_output(
+                commands, stderr=subprocess.STDOUT, cwd=_ACTIVE_ROOT.get()
+            ).decode()
+            return_code = 0
+        except subprocess.CalledProcessError as err:
+            output = err.output.decode()
+            return_code = err.returncode
+        return output, return_code
+
+    run_python_module._dasimulator_active_interpreter = True
+    return run_python_module
+
+
+def install_python_module_runner() -> None:
+    """Install the active-interpreter ``run_python_module`` runtime seam.
+
+    Idempotent through the wrapper marker. An installed runtime without the
+    upstream function is left unchanged; a missing runtime and a broken
+    dependency inside it are distinguished by the same import boundary as the
+    other runtime installers.
+    """
+    try:
+        from docassemble.base import util
+    except ImportError as error:
+        if not _is_missing_module(
+            error, "docassemble", "docassemble.base", "docassemble.base.util"
+        ):
+            raise
+        return
+    original = getattr(util, "run_python_module", None)
+    if original is None or getattr(original, "_dasimulator_active_interpreter", False):
+        return
+    patched = _python_module_runner(original)
+    util.run_python_module = patched
+    # `legal` re-exports the function object and may already be imported by a
+    # package preload; keep every loaded public reference on the same seam.
+    for module_name in ("docassemble.base.legal", "docassemble.base.functions"):
+        module = sys.modules.get(module_name)
+        if (
+            module is not None
+            and getattr(module, "run_python_module", None) is original
+        ):
+            module.run_python_module = patched
 
 
 def install_diagnostic_logging() -> None:
@@ -1659,6 +1913,11 @@ def bootstrap(
     neutralize_argv()
     apply_session_stubs(stub_define_defined=stub_define_defined)
     register_hooks()
+    install_python_module_runner()
+    # Install before the preload pass: installed packages bind
+    # ``pdf_concatenate`` at import (AssemblyLine's al_document is the
+    # concrete case), so their module-level aliases must see this seam.
+    install_pdf_concatenate_fallback()
     # Mirror the webapp's startup import pass so installed custom datatypes
     # (for example ALToolbox's BirthDate) are registered before any interview
     # is parsed. Without it, standard AssemblyLine field metadata such as
@@ -1790,8 +2049,11 @@ __all__ = [
     "install_attachment_filename_fallback",
     "install_diagnostic_logging",
     "install_fake_redis",
+    "install_pdf_concatenate_fallback",
     "install_pdf_skip_fallback",
+    "install_python_module_runner",
     "neutralize_argv",
+    "pdf_stripped_attachment",
     "prepare_environment",
     "register_hooks",
 ]

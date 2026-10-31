@@ -643,8 +643,17 @@ class InterviewExecution:
             except AssemblyLineCompatibilityError as error:
                 outcome = _compatibility_failure_outcome(error)
             except Exception as error:
+                pdf_unavailable = _pdf_unavailable_failure(error, {})
                 unresolved = _unresolved_variable(error)
-                if unresolved is not None:
+                if pdf_unavailable is not None:
+                    message, details = pdf_unavailable
+                    outcome = ExecutionOutcome(
+                        False,
+                        error=ExecutionError(
+                            ErrorKind.PDF_UNAVAILABLE, message, details
+                        ),
+                    )
+                elif unresolved is not None:
                     culprit = _unresolved_culprit(error)
                     details = {"sought_variable": unresolved}
                     if culprit is not None:
@@ -741,7 +750,10 @@ class InterviewExecution:
     def _refresh(self):
         payload = self._store.load()
         namespace = payload["namespace"]
-        with self._prepared_operation(namespace) as (interview, status):
+        with (
+            self._prepared_operation(namespace) as (interview, status),
+            _pdf_failure_boundary(namespace),
+        ):
             active = payload.get("active_seek")
             outcome = (
                 _seek(interview, namespace, status, active, False)
@@ -829,17 +841,18 @@ class InterviewExecution:
         blank_submissions = _blank_submissions(operation)
         submission_snapshot = _snapshot_namespace(namespace)
         with self._prepared_operation(namespace) as (interview, status):
-            submission = accept_screen_submission(
-                interview,
-                namespace,
-                screen,
-                assignments=operation.assignments,
-                use_code=operation.code,
-                blank_submissions=blank_submissions,
-                partial=operation.partial,
-                validate=operation.validate,
-                strict=operation.strict,
-            )
+            with _pdf_failure_boundary(namespace):
+                submission = accept_screen_submission(
+                    interview,
+                    namespace,
+                    screen,
+                    assignments=operation.assignments,
+                    use_code=operation.code,
+                    blank_submissions=blank_submissions,
+                    partial=operation.partial,
+                    validate=operation.validate,
+                    strict=operation.strict,
+                )
             if isinstance(submission, AssignmentsRejected):
                 dispositions = list(submission.dispositions)
                 try:
@@ -1000,7 +1013,10 @@ class InterviewExecution:
 
         def work():
             namespace = _fresh_namespace() if fresh else self._store.load()["namespace"]
-            with self._prepared_operation(namespace) as (interview, status):
+            with (
+                self._prepared_operation(namespace) as (interview, status),
+                _pdf_failure_boundary(namespace),
+            ):
                 outcome = walk(interview, namespace, status)
             if activation is not None:
                 activation(namespace, outcome)
@@ -1100,7 +1116,10 @@ class InterviewExecution:
         namespace = payload["namespace"]
         with self._prepared_operation(namespace):
             try:
-                value = eval(operation.expression, namespace)
+                with _pdf_failure_boundary(namespace):
+                    value = eval(operation.expression, namespace)
+            except ExecutionFailure:
+                raise
             except Exception as error:
                 raise ExecutionFailure(
                     ErrorKind.EXECUTION, f"{type(error).__name__}: {error}"
@@ -1153,7 +1172,10 @@ class InterviewExecution:
         namespace = payload["namespace"]
         with self._prepared_operation(namespace) as (interview, status):
             try:
-                __builtins__["exec"](operation.code, namespace)
+                with _pdf_failure_boundary(namespace):
+                    __builtins__["exec"](operation.code, namespace)
+            except ExecutionFailure:
+                raise
             except (
                 ValueError,
                 TypeError,
@@ -1472,6 +1494,7 @@ def _assemble(interview, namespace, status):
         if isinstance(error, DAErrorNoEndpoint):
             return {"kind": "finished", "message": first_line(error)}
         unresolved = _unresolved_variable(error)
+        pdf_unavailable = _pdf_unavailable_failure(error, namespace)
         result = {
             "kind": "error",
             "error_type": type(error).__name__,
@@ -1480,7 +1503,12 @@ def _assemble(interview, namespace, status):
                 traceback.format_exc().strip().splitlines()[-8:]
             ),
         }
-        if unresolved is not None:
+        if pdf_unavailable is not None:
+            message, details = pdf_unavailable
+            result.update(details)
+            result["failure_kind"] = ErrorKind.PDF_UNAVAILABLE
+            result["message"] = message
+        elif unresolved is not None:
             result["failure_kind"] = ErrorKind.UNRESOLVED_VARIABLE
             result["sought_variable"] = unresolved
             culprit = _unresolved_culprit(error)
@@ -2477,6 +2505,58 @@ def _unresolved_variable(error: BaseException) -> str | None:
         return str(variable)
     match = re.search(r"variable ['\"]([^'\"]+)['\"]", str(error))
     return match.group(1) if match else "<unknown>"
+
+
+@contextmanager
+def _pdf_failure_boundary(namespace: dict[str, Any]):
+    """Translate a runtime PDF boundary without hiding other failures.
+
+    Operations that call docassemble outside ``_assemble`` (active-seek
+    refresh, explicit seek/replay, evaluate) still have the working namespace
+    needed to distinguish a stripped attachment from a genuine unresolved
+    variable.  Execution failures raised inside the boundary pass through
+    unchanged.
+    """
+    try:
+        yield
+    except ExecutionFailure:
+        raise
+    except Exception as error:
+        pdf_unavailable = _pdf_unavailable_failure(error, namespace)
+        if pdf_unavailable is None:
+            raise
+        message, details = pdf_unavailable
+        raise ExecutionFailure(ErrorKind.PDF_UNAVAILABLE, message, details) from error
+
+
+def _pdf_unavailable_failure(
+    error: BaseException, namespace: dict[str, Any]
+) -> tuple[str, dict[str, Any]] | None:
+    """Translate only the simulator's generated-PDF boundary (ADR-0006).
+
+    A PDF-only attachment finalization failure is the capability itself.  An
+    exhausted ``.pdf`` seek is the capability only when the path before the
+    suffix resolves to an attachment whose generated PDF the simulator
+    stripped; any other missing variable keeps the unresolved-variable kind
+    and its provenance.
+    """
+    from docassemble_simulator._runtime import (
+        PDF_UNAVAILABLE_MESSAGE,
+        PDFConversionUnavailable,
+        pdf_stripped_attachment,
+    )
+
+    if isinstance(error, PDFConversionUnavailable):
+        return PDF_UNAVAILABLE_MESSAGE, {"error_type": type(error).__name__}
+    variable = _unresolved_variable(error)
+    if variable is None:
+        return None
+    if pdf_stripped_attachment(variable, namespace) is None:
+        return None
+    return PDF_UNAVAILABLE_MESSAGE, {
+        "sought_variable": variable,
+        "error_type": type(error).__name__,
+    }
 
 
 def _is_compile_failure(error: BaseException) -> bool:

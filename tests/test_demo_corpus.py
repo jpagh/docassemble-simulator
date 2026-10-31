@@ -6,19 +6,24 @@ import os
 import re
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from docassemble_simulator.demo_corpus import (
     CaseResult,
+    CorpusBlocker,
+    CorpusClassification,
     CorpusError,
+    CorpusErrorKind,
     Expectation,
     FixtureCase,
     RuntimePackage,
     _network_sandbox_command,
     _prepare_nltk_data,
     apply_expectations,
+    derive_blocker,
     discover_fixture_cases,
     load_expectations,
     resolve_provenance,
@@ -448,14 +453,393 @@ def test_expectations_are_narrow_and_mark_only_matching_failures(
     assert report["expectation_categories"] == {"capability-boundary": 1}
     assert "reproduction" in (tmp_path / "report/results.jsonl").read_text()
     assert report["unexpected"] == 0
+    assert report["blockers"] == {}
     assert (tmp_path / "report/results.jsonl").read_text().count("\n") == 1
 
 
-def test_load_expectations_rejects_fault_masks(tmp_path: Path) -> None:
+def _failure_result(
+    message: str,
+    *,
+    classification: str = "failure",
+    error_kind: str = "execution",
+    traceback_tail: str | None = None,
+    returncode: int = 2,
+) -> CaseResult:
+    details = {"message": message}
+    if traceback_tail is not None:
+        details["traceback_tail"] = traceback_tail
+    return CaseResult(
+        "docassemble.base:data/questions/examples/sample.yml",
+        "sample.yml",
+        "hash",
+        "start",
+        ("python",),
+        returncode,
+        0.1,
+        classification,
+        error_kind,
+        message,
+        {"ok": False, "error": {"kind": error_kind, "details": details}},
+    )
+
+
+OPENAI_AUTH_TRACEBACK = (
+    '  File ".../openai/_base_client.py", line 471, in _build_headers\n'
+    "    self._validate_headers(headers_dict, custom_headers)\n"
+    'TypeError: "Could not resolve authentication method. Expected either api_key '
+    'or admin_api_key to be set."'
+)
+OAUTH_CONFIG_TRACEBACK = (
+    '  File ".../docassemble/base/util.py", line 13716, in _get_flow\n'
+    "    raise DAError('The application ' + self.appname + "
+    '" is not configured in the Configuration")\n'
+    "docassemble.base.error.DAError: The application mygoogle is not configured "
+    "in the Configuration"
+)
+GOOGLE_CREDENTIALS_TRACEBACK = (
+    '  File ".../docassemble/base/util.py", line 9894, in http\n'
+    "    return google_auth_httplib2.AuthorizedHttp(self.cloud_credentials("
+    "scopes=[scope]), http=httplib2.Http())\n"
+    '  File ".../docassemble/base/util.py", line 9925, in cloud_credentials\n'
+    "    return google_api().google_cloud_credentials(scopes=scopes)\n"
+    "AttributeError: 'NoneType' object has no attribute 'google_cloud_credentials'"
+)
+DUMMY_OBJECT_TRACEBACK = (
+    '  File ".../docassemble/base/parse.py", line 10187, in exec_with_trap\n'
+    "    exec(the_question.compute, the_dict)\n"
+    "AttributeError: 'DummyObject' object has no attribute 'predict'"
+)
+FAKE_REDIS_TRACEBACK = (
+    '  File ".../docassemble/base/util.py", line 13801, in '
+    "_get_random_unique_id\n"
+    "    if r.setnx('da:' + self.appname + ':status:uniqueid:' + key, 'None'):\n"
+    '  File ".../docassemble/base/util.py", line 9748, in __getattr__\n'
+    "    return getattr(get_server_redis_user(), funcname)\n"
+    "AttributeError: 'FakeRedis' object has no attribute 'setnx'"
+)
+REDIS_DECODE_TRACEBACK = (
+    '  File ".../docassemble/base/util.py", line 9748, in __getattr__\n'
+    "    return getattr(get_server_redis_user(), funcname)\n"
+    "AttributeError: 'NoneType' object has no attribute 'decode'"
+)
+INDEX_CURSOR_TRACEBACK = (
+    '  File ".../docassemble/demo/index.py", line 49, in report\n'
+    "    with conn.cursor() as cur:\n"
+    "         ^^^^^^^^^^^\n"
+    "AttributeError: 'NoneType' object has no attribute 'cursor'"
+)
+SESSION_SECRET_TRACEBACK = (
+    '  File ".../docassemble/base/functions.py", line 5271, in interview_list\n'
+    "    (the_list, start_id) = user_interviews(user_id=user_id, "
+    "secret=this_thread.current_info['secret'], exclude_invalid=exclude_invalid, "
+    "action=action, filename=filename, session=session)\n"
+    "KeyError: 'secret'"
+)
+TASK_PERFORMED_TRACEBACK = (
+    '  File ".../docassemble/base/util.py", line 13478, in task_performed\n'
+    "    if task in tasks and tasks[task]:\n"
+    "TypeError: argument of type 'NoneType' is not a container or iterable"
+)
+GET_TIME_MESSAGE = (
+    "HTTPConnectionPool(host='worldclockapi.com', port=80): Max retries exceeded "
+    'with url: /api/json/est/now (Caused by NameResolutionError("HTTPConnection('
+    "host='worldclockapi.com', port=80): Failed to resolve 'worldclockapi.com' "
+    '([Errno 8] nodename nor servname provided, or not known)"))'
+)
+
+
+@pytest.mark.parametrize(
+    ("message", "traceback_tail"),
+    [
+        (
+            (
+                "namespace rehydration failed: ModuleNotFoundError: "
+                "No module named 'ics'"
+            ),
+            None,
+        ),
+        (
+            (
+                "namespace rehydration failed: ModuleNotFoundError: "
+                "No module named 'google_drive_downloader'"
+            ),
+            None,
+        ),
+        (
+            (
+                '"Could not resolve authentication method. Expected either api_key '
+                'or admin_api_key to be set."'
+            ),
+            OPENAI_AUTH_TRACEBACK,
+        ),
+        (
+            "The application mygoogle is not configured in the Configuration",
+            OAUTH_CONFIG_TRACEBACK,
+        ),
+        (
+            "'NoneType' object has no attribute 'google_cloud_credentials'",
+            GOOGLE_CREDENTIALS_TRACEBACK,
+        ),
+        (
+            (
+                "Error loading wordnet: <urlopen error [Errno 8] "
+                "nodename nor servname provided>"
+            ),
+            None,
+        ),
+    ],
+)
+def test_derive_blocker_attributes_environment_evidence(
+    message: str, traceback_tail: str | None
+) -> None:
+    result = _failure_result(message, traceback_tail=traceback_tail)
+
+    assert derive_blocker(result) == CorpusBlocker.ENVIRONMENT
+    assert result.as_dict()["blocker"] == "environment"
+
+
+@pytest.mark.parametrize(
+    ("message", "traceback_tail"),
+    [
+        (
+            (
+                "Got error 'DummyObject' object has no attribute 'predict' "
+                "Traceback (most recent call last):"
+            ),
+            DUMMY_OBJECT_TRACEBACK,
+        ),
+        (
+            "'FakeRedis' object has no attribute 'setnx'",
+            FAKE_REDIS_TRACEBACK,
+        ),
+        (
+            "Got error 'NoneType' object has no attribute 'decode'",
+            REDIS_DECODE_TRACEBACK,
+        ),
+        (
+            (
+                "namespace rehydration failed: AttributeError: 'NoneType' object "
+                "has no attribute 'Model'"
+            ),
+            None,
+        ),
+        (
+            (
+                "Got error 'NoneType' object has no attribute 'cursor' "
+                "Traceback (most recent call last):"
+            ),
+            INDEX_CURSOR_TRACEBACK,
+        ),
+        ("'secret'", SESSION_SECRET_TRACEBACK),
+        (
+            "argument of type 'NoneType' is not a container or iterable",
+            TASK_PERFORMED_TRACEBACK,
+        ),
+    ],
+)
+def test_derive_blocker_attributes_stubbed_service_evidence(
+    message: str, traceback_tail: str | None
+) -> None:
+    result = _failure_result(message, traceback_tail=traceback_tail)
+
+    assert derive_blocker(result) == CorpusBlocker.SERVICE
+    assert result.as_dict()["blocker"] == "service"
+
+
+@pytest.mark.parametrize(
+    ("message", "traceback_tail"),
+    [
+        (GET_TIME_MESSAGE, None),
+        (
+            "urllib.error.URLError: <urlopen error [Errno 111] Connection refused>",
+            None,
+        ),
+        (
+            "socket.gaierror: [Errno 8] nodename nor servname provided, or not known",
+            None,
+        ),
+    ],
+)
+def test_derive_blocker_attributes_network_evidence(
+    message: str, traceback_tail: str | None
+) -> None:
+    result = _failure_result(message, traceback_tail=traceback_tail)
+
+    assert derive_blocker(result) == CorpusBlocker.NETWORK
+    assert result.as_dict()["blocker"] == "network"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "division by zero",
+        "There appears to be an infinite loop.  Variables in stack are bar, foo.",
+        (
+            "Interview has an error.  There was a reference to a variable "
+            "'favorite_number' that could not be looked up in the question file"
+        ),
+        "'NoneType' object is not iterable",
+        "'NoneType' object is not subscriptable",
+        "object of type 'NoneType' has no len()",
+        "'NoneType' object has no attribute 'help'",
+        "failed to resolve 'friend'",
+        "'NoneType' object has no attribute 'decode'",
+        "'NoneType' object has no attribute 'cursor'",
+        "'NoneType' object has no attribute 'Model'",
+        "'NoneType' object has no attribute 'google_cloud_credentials'",
+        "ModuleNotFoundError: No module named 'ics'",
+        (
+            "namespace rehydration failed: ModuleNotFoundError: "
+            "No module named 'docassemble_simulator._runtime'"
+        ),
+        (
+            "namespace rehydration failed: ModuleNotFoundError: "
+            "No module named 'docassemble.base.util'"
+        ),
+        (
+            "namespace rehydration failed: ModuleNotFoundError: "
+            "No module named 'docassemble_mako'"
+        ),
+        "urlopen error unknown url type: 'file:///tmp/data.json'",
+        "'secret'",
+        "'discovery'",
+        "Connection refused",
+        "certificate verify failed",
+        "[Errno 2] No such file or directory: 'https://docassemble.org/logo.jpg'",
+    ],
+)
+def test_derive_blocker_without_observed_evidence_returns_none(message: str) -> None:
+    result = _failure_result(message)
+
+    assert derive_blocker(result) is None
+    assert result.as_dict()["blocker"] is None
+
+
+@pytest.mark.parametrize(
+    "classification",
+    [
+        CorpusClassification.CRASH.value,
+        CorpusClassification.TIMEOUT.value,
+        CorpusClassification.PROTOCOL_ERROR.value,
+        CorpusClassification.RUNTIME_DRIFT.value,
+    ],
+)
+def test_derive_blocker_never_attributes_simulator_faults(
+    classification: str,
+) -> None:
+    result = _failure_result(
+        "namespace rehydration failed: ModuleNotFoundError: No module named 'ics'",
+        classification=classification,
+        returncode=3,
+    )
+
+    assert derive_blocker(result) is None
+
+
+@pytest.mark.parametrize(
+    "error_kind",
+    [
+        CorpusErrorKind.CRASH.value,
+        CorpusErrorKind.PROTOCOL.value,
+        CorpusErrorKind.TIMEOUT.value,
+        CorpusErrorKind.RUNTIME_DRIFT.value,
+        "fault",
+    ],
+)
+def test_derive_blocker_never_attributes_harness_error_kinds(
+    error_kind: str,
+) -> None:
+    result = _failure_result(
+        "namespace rehydration failed: ModuleNotFoundError: No module named 'ics'",
+        error_kind=error_kind,
+    )
+
+    assert derive_blocker(result) is None
+
+
+def test_summary_reports_blockers_without_changing_expectations(
+    tmp_path: Path,
+) -> None:
+    expected = _failure_result(
+        "namespace rehydration failed: ModuleNotFoundError: No module named 'ics'"
+    )
+    expected = replace(
+        expected,
+        expectation="Reviewed optional package.",
+        expectation_category="capability-boundary",
+    )
+    unexpected_network = _failure_result(GET_TIME_MESSAGE)
+    unexpected_service = _failure_result(
+        "Got error 'DummyObject' object has no attribute 'predict'",
+        traceback_tail=DUMMY_OBJECT_TRACEBACK,
+    )
+    unexpected_plain = _failure_result("division by zero")
+    success = CaseResult(
+        "docassemble.base:data/questions/examples/ok.yml",
+        "ok.yml",
+        "hash",
+        "start",
+        ("python",),
+        0,
+        0.1,
+        "success",
+    )
+
+    report = write_reports(
+        [expected, unexpected_network, unexpected_service, unexpected_plain, success],
+        tmp_path / "report",
+    )
+
+    assert report["blockers"] == {
+        "environment": 1,
+        "network": 1,
+        "service": 1,
+    }
+    assert report["expected"] == 1
+    assert report["unexpected"] == 3
+    assert report["expectation_categories"] == {"capability-boundary": 1}
+    assert report["counts"] == {"failure": 4, "success": 1}
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "report/results.jsonl").read_text().splitlines()
+    ]
+    assert [row["blocker"] for row in rows] == [
+        "environment",
+        "network",
+        "service",
+        None,
+        None,
+    ]
+    summary_markdown = (tmp_path / "report/summary.md").read_text()
+    assert "Expected: 1" in summary_markdown
+    assert "Unexpected: 3" in summary_markdown
+    assert "| environment | 1 |" in summary_markdown
+    assert "| network | 1 |" in summary_markdown
+    assert "| service | 1 |" in summary_markdown
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        f'classification = "{CorpusClassification.TIMEOUT.value}"',
+        f'classification = "{CorpusClassification.CRASH.value}"',
+        f'classification = "{CorpusClassification.PROTOCOL_ERROR.value}"',
+        f'error_kind = "{CorpusErrorKind.TIMEOUT.value}"',
+        f'error_kind = "{CorpusErrorKind.CRASH.value}"',
+        f'error_kind = "{CorpusErrorKind.PROTOCOL.value}"',
+        f'error_kind = "{CorpusErrorKind.RUNTIME_DRIFT.value}"',
+        'error_kind = "fault"',
+        "returncode = 3",
+    ],
+)
+def test_load_expectations_rejects_fault_masks(tmp_path: Path, fields: str) -> None:
     path = tmp_path / "expectations.toml"
     path.write_text(
-        '[[expectations]]\ninterview = "x"\nphase = "start"\n'
-        'classification = "timeout"\nreason = "bad"\n'
+        "[[expectations]]\n"
+        'interview = "x"\n'
+        'phase = "start"\n'
+        f"{fields}\n"
+        'reason = "bad"\n'
     )
 
     with pytest.raises(CorpusError, match="cannot mask"):
