@@ -2378,7 +2378,9 @@ def test_answer_coerces_empty_submitted_values_per_datatype(
     assert execution.run(Evaluate("rav.agree is None")).result["value"] == "True"
 
 
-def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stubs):
+def test_required_checkbox_group_accepts_an_explicit_none_answer(
+    tmp_path, monkeypatch, da_stubs
+):
     execution, _, _ = _execution(
         tmp_path, monkeypatch, da_stubs, CheckboxGroupInterview
     )
@@ -2387,19 +2389,25 @@ def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stu
     monkeypatch.setattr(util, "DADict", PicklableStubDict)
     assert execution.run(Start()).ok
 
-    for raw in ('{"housing": false, "benefits": false}', "{}"):
+    for assignments in ((), (("x.topics", ""),)):
         before = _session_bytes(tmp_path)
         rejected = execution.run(
-            Answer((("x.service_type", "Electronic"), ("x.topics", raw)))
+            Answer((("x.service_type", "Electronic"), *assignments))
         )
 
-        assert not rejected.ok, raw
-        assert rejected.error.kind == "validation", raw
-        assert any("x.topics" in item for item in rejected.error.details["errors"]), raw
-        assert any(
-            "at least one" in item for item in rejected.error.details["errors"]
-        ), raw
-        assert _session_bytes(tmp_path) == before, raw
+        assert not rejected.ok
+        assert rejected.error.kind == "validation"
+        assert any("x.topics" in item for item in rejected.error.details["errors"])
+        assert _session_bytes(tmp_path) == before
+
+    for raw in ('{"housing": false, "benefits": false}', "{}"):
+        accepted = execution.run(
+            Answer((("x.service_type", "Electronic"), ("rav.topics", raw)))
+        )
+        assert accepted.ok, accepted.error
+        assert execution.run(Evaluate("rav.topics.elements")).result["value"] == (
+            "{'housing': False, 'benefits': False}"
+        )
 
     accepted = execution.run(
         Answer(
@@ -2424,6 +2432,38 @@ def test_required_checkbox_group_needs_a_selection(tmp_path, monkeypatch, da_stu
     optional_value = execution.run(Evaluate("rav.optional_topics.elements"))
     assert optional_value.ok, optional_value.error
     assert optional_value.result["value"] == ("{'housing': False, 'benefits': False}")
+
+
+def test_required_multiselect_still_needs_a_positive_selection(
+    tmp_path, monkeypatch, da_stubs
+):
+    class RequiredMultiselectInterview(CheckboxGroupInterview):
+        def assemble(self, namespace, interview_status):
+            super().assemble(namespace, interview_status)
+            interview_status.question.fields[1].datatype = "multiselect"
+
+    execution, _, _ = _execution(
+        tmp_path, monkeypatch, da_stubs, RequiredMultiselectInterview
+    )
+    util = sys.modules["docassemble.base.util"]
+    monkeypatch.setattr(util, "DAObject", PicklableStubObject)
+    monkeypatch.setattr(util, "DADict", PicklableStubDict)
+    assert execution.run(Start()).ok
+
+    for raw in ("{}", '{"housing": false, "benefits": false}'):
+        rejected = execution.run(
+            Answer((("x.service_type", "Electronic"), ("x.topics", raw)))
+        )
+        assert not rejected.ok
+        assert rejected.error.kind == "validation"
+        assert any(
+            "at least one" in error for error in rejected.error.details["errors"]
+        )
+
+    accepted = execution.run(
+        Answer((("x.service_type", "Electronic"), ("x.topics", '{"housing": true}')))
+    )
+    assert accepted.ok, accepted.error
 
 
 class ReviewInterview(FakeInterview):

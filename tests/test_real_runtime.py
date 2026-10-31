@@ -3386,18 +3386,19 @@ def test_answer_submits_the_whole_screen_across_families(
         "required_topics",
     ], label
 
-    # A required checkbox group with every choice false cannot be submitted;
-    # the browser requires at least one checked option.
+    # "None of the above" answers a required checkbox group with every actual
+    # choice false. Requiredness is not a minimum-positive-selection rule.
     no_selection = journey.answer(
         "person_name=Alice",
         'required_topics={"housing": false, "benefits": false}',
     )
-    assert no_selection["error"]["kind"] == "validation", (label, no_selection)
-    assert any(
-        "required_topics" in item and "at least one" in item
-        for item in no_selection["error"]["details"]["errors"]
+    assert no_selection["ok"], (label, no_selection)
+    assert no_selection["result"]["question_name"] == "ID summary", label
+    assert value("required_topics.elements") == (
+        "{'housing': False, 'benefits': False}"
     ), label
 
+    assert journey.start()["ok"], label
     accepted = journey.answer(
         "person_name=Alice",
         'required_topics={"housing": true}',
@@ -3493,6 +3494,69 @@ OBJECT_NAMESPACE_FIXTURE = (
     "    choices: |\n"
     "      [alice, carol]\n"
 )
+
+
+@pytest.mark.parametrize(
+    "options, minimum",
+    [
+        ("", False),
+        ("    none of the above: Nothing applies\n", False),
+        ("    none of the above: False\n", False),
+        ("    minlength: 1\n", True),
+        ("    none of the above: False\n    minlength: 1\n", True),
+    ],
+    ids=["default-none", "custom-none", "no-none", "minimum", "no-none-minimum"],
+)
+@pytest.mark.parametrize("datatype", ["checkboxes", "object_checkboxes"])
+def test_required_group_empty_answers_follow_browser_rules(
+    family_python, tmp_path, worker_journey, options, minimum, datatype
+):
+    case = family_python
+    package = tmp_path / "docassemble" / "emptyanswers"
+    questions = package / "data" / "questions"
+    questions.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    object_group = datatype == "object_checkboxes"
+    choices = (
+        "    choices: '[alice, bob]'\n"
+        if object_group
+        else "    choices:\n      - Alice: alice\n      - Bob: bob\n"
+    )
+    (questions / "main.yml").write_text(
+        "---\nobjects:\n  - alice: DAObject\n  - bob: DAObject\n"
+        "---\nmandatory: True\ncode: |\n  alice.name = 'Alice'\n  bob.name = 'Bob'\n"
+        "---\nid: choices\nmandatory: True\nquestion: Who?\nfields:\n"
+        f"  - People: people\n    datatype: {datatype}\n"
+        + choices
+        + options
+        + "  - Note: note\n    required: False\n"
+        + "---\nid: done\nmandatory: True\nquestion: Done\n"
+    )
+    journey = worker_journey(case.interpreter, tmp_path, family=case.probe)
+    for raw in ("[]",) if object_group else ("{}", '{"alice": false, "bob": false}'):
+        started = journey.start()
+        assert started["ok"], (case.label, started)
+        offered = started["result"]["fields"][0]["choices"]
+        # An omitted answer is not an explicit "none" answer.
+        missing = journey.answer("note=hello")
+        assert missing["error"]["kind"] == "validation", (case.label, missing)
+
+        answered = journey.answer(f"people={raw}")
+        if minimum:
+            assert answered["error"]["kind"] == "validation", (case.label, answered)
+            assert journey.status()["result"]["question_name"] == "ID choices"
+            undefined = journey.evaluate("defined('people')")
+            assert undefined["result"]["value"] == "False", (case.label, undefined)
+            choice = offered[0]["value"]
+            positive = json.dumps([choice] if object_group else {choice: True})
+            answered = journey.answer(f"people={positive}")
+        assert answered["ok"], (case.label, answered)
+        assert answered["result"]["question_name"] == "ID done", (case.label, answered)
+        if not minimum:
+            expression = "people.elements" if object_group else "people.true_values()"
+            stored = journey.evaluate(expression)
+            assert stored["result"]["value"] == "[]", (case.label, stored)
+
 
 OBJECT_NAMESPACE_HELPER = (
     "from docassemble.base.functions import get_user_dict\n"

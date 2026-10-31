@@ -20,7 +20,25 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
     hidden input); an untouched checkbox group becomes an all-false `DADict`;
     and an untouched file field becomes `None`. A rendered default that cannot
     be applied falls back to the datatype's blank,
-  - remaining visible required fields reject the submission as a `validation` failure naming each field. A required multiple-choice group (`checkboxes`, `multiselect`, `object_checkboxes`, `object_multiselect`) is empty when it holds no true selection, mirroring the browser's "check at least one option" rule; the submission is rejected with the same naming.
+  - remaining visible required fields reject the submission as a `validation` failure naming each field. A required multiselect dropdown (`multiselect`, `object_multiselect`) is empty when it holds no true selection; the submission is rejected with the same naming. Checkbox groups differ as described in the correction below.
+- **Correction: required checkbox groups can answer “none.”** An explicit
+  all-false mapping or `{}` for `checkboxes`, or an empty list for
+  `object_checkboxes`, satisfies requiredness. The browser's default “None of
+  the above” checkbox is an ignored form control, not a true entry in the
+  stored answer. With `none of the above: False`, requiredness alone does not
+  impose a minimum selection count either. Positive `minlength` constraints
+  and authored validation still reject empty selections when appropriate.
+  Omitted undefined answers and explicit blank/null tokens still fail the
+  required gate; callers must submit a group value to express “none.” Existing
+  values and rendered defaults retain their normal submission semantics.
+
+  This corrects the earlier conflation of requiredness with a positive choice
+  count. In docassemble 1.9.13 and 1.10.13, `standardformatter.py` adds the
+  checkbox `checkatleast` rule to the ignored “none” control and accepts either
+  a real choice or that control. A positive `minlength` instead adds a minimum
+  rule and suppresses “none.” Checkbox inputs have no separate required-choice
+  rule when “none” is disabled. No additional screen metadata is needed: the
+  existing rendered constraints enforce the minimum independently.
 - **Amendment (issue #85): authored requiredness is not proof of an input.**
   Screen descriptions capture `rendered_input: false` when the native
   `InterviewStatus.is_empty_mc` decision suppresses a choice control: its

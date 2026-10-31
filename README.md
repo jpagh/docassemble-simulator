@@ -133,7 +133,11 @@ docassemble-simulator seek M.family --activate
   explicitly emptied (`field=` or `field=None`), reject the submission, except
   that a nonblank `None` or `null` token explicitly selecting an offered
   null-valued radio choice is answered and stores `None`. A required checkbox
-  group needs at least one true selection. When native resolved choices suppress
+  group accepts an explicit all-false mapping or `{}` as “None of the above”
+  (`[]` for `object_checkboxes`); an omitted answer is still missing. A positive
+  `minlength` or authored validation can require actual selections. Disabling
+  “None of the above” alone does not require a true choice. Required multiselect
+  dropdowns still need a selection. When native resolved choices suppress
   an input, authored requiredness remains in the screen description but does not
   demand an impossible answer (`rendered_input: false`). An undefined absent
   `object`/`object_radio` selection becomes `None`; an existing value is preserved.

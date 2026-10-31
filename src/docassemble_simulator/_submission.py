@@ -416,8 +416,9 @@ def _is_empty_value(value):
     return isinstance(value, str) and value == ""
 
 
-#: Multiple-choice group datatypes the browser refuses to submit empty when
-#: the field is required ("check at least one option").
+#: Multiple-choice groups store selected values in dictionaries or lists.
+#: Required checkbox groups can answer "None of the above" without any true
+#: values; only multiselects require a nonempty selection by requiredness alone.
 _CHECKBOX_GROUP_DATATYPES = frozenset({"checkboxes", "multiselect"})
 _OBJECT_GROUP_DATATYPES = frozenset({"object_checkboxes", "object_multiselect"})
 _GROUP_DATATYPES = _CHECKBOX_GROUP_DATATYPES | _OBJECT_GROUP_DATATYPES
@@ -600,8 +601,15 @@ def _required_violations(
             continue
         elif targets.get(variable, variable) in blank_targets or _is_empty_value(value):
             violations.append((variable, "empty"))
-        elif datatype in _GROUP_DATATYPES and _has_no_selected_option(value):
+        elif datatype in {
+            "multiselect",
+            "object_multiselect",
+        } and _has_no_selected_option(value):
             violations.append((variable, "unselected"))
+        # An explicit all-false checkbox dictionary (or empty object list)
+        # represents "None of the above". Without that option the browser also
+        # permits unticking everything. A positive minlength is enforced by the
+        # rendered-constraint gate, not by requiredness.
     return violations
 
 
