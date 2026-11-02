@@ -22,6 +22,7 @@ class ErrorKind(StrEnum):
     RESOLUTION_CONFLICT = "resolution-conflict"
     DUPLICATE_ID = "duplicate-id"
     RUNTIME_COMPATIBILITY = "runtime-compatibility"
+    JS_CONDITION_UNSUPPORTED = "js-condition-unsupported"
     PDF_UNAVAILABLE = "pdf-unavailable"
     FAULT = "fault"
     WORKSPACE = "workspace"

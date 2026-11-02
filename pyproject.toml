@@ -20,6 +20,7 @@
         "Topic :: Software Development :: Testing",
     ]
     dependencies    = [
+        "esprima2>=6.0.0",
         "pyyaml>=6.0.3",
         "tomli>=2.3.0; python_version < '3.11'",
     ]

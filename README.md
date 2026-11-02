@@ -145,8 +145,15 @@ docassemble-simulator seek M.family --activate
   still runs and may reject it (for example, “You must select at least one Trust”).
   No `--partial` or relaxed strictness is needed. Missing normalized choices alone
   do not establish absence; comboboxes and datalists still offer inputs.
-  Hidden `show if` fields are neither assigned nor required, and signature
-  fields become `DAEmpty()` so documents still render.
+  Omitted hidden `show if` fields are neither assigned nor required, and signature
+  fields become `DAEmpty()` so documents still render. Basic declared `js show if` /
+  `js hide if` expressions also control submission visibility, using frozen rendered
+  scalar inputs and JavaScript primitive semantics. `js enable if` / `js disable if`
+  separately control eligibility without hiding inputs: disabled controls skip
+  omitted defaults/blanks, requiredness and rendered constraints. This does not
+  execute general scripts or the country/state demo's asynchronous choice updates. Unsupported conditions remain
+  inspectable and reject submission as `js-condition-unsupported`, including with
+  `--partial` or `--no-validate`; see [supported JS conditions](docs/js-conditions.md).
   Fields that are not on the active screen are rejected; use `exec` for
   deliberate state surgery. `--defaults` submits the active screen without
   explicit assignments, using visible defaults and browser-blank values;

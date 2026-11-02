@@ -128,3 +128,35 @@ Numeric min/max/step and minlength/maxlength facts use numbers when the
 rendered value parses numerically; nonnumeric bounds and scale, currency
 symbol, and field metadata retain their rendered values. Captured submission
 visibility expressions and requiredness do not enter trace comparison.
+
+## Declared JS conditions (#94)
+
+Presentation visibility and requiredness now reflect supported declared JS
+show/hide conditions. Frozen rendered expressions, trigger/binding metadata and
+unsupported diagnostics are debug facts, not comparison or identity inputs.
+Submission still evaluates an operation-local copy; a rejected POST retains the
+unchanged presentation screen in the trace. Unsupported JS is a shared
+capability-rejection verdict, so automatic seek/replay records the rejected
+attempt with its typed error before stopping and rolling back that attempt,
+just as it retains a required/validation rejection. Its walk envelope retains
+the established ok-plus-stop policy, never a silently accepted submission.
+This additive metadata does not change the trace schema, and older traces/screens
+without it remain readable.
+
+Issue #96 settles chained presentation visibility using rendered control
+eligibility, so a hidden controller's saved value no longer falsely reveals its
+dependents. These corrected presentation visibility/required facts intentionally
+participate in comparison; existing chain goldens may need review and re-recording.
+Submission settling remains operation-local: a rejected attempt records unchanged
+presentation facts and its error, never attempted POST visibility. Nonconvergence
+is an inspectable capability rejection. No identity or schema change is needed.
+
+
+Issue #97 adds separate `enabled` presentation facts as debug-only metadata,
+without changing identity, schema or field comparison projection. Optional-field
+enablement-only changes intentionally compare equal, including older traces with
+no enabled metadata. Effective requiredness is false for disabled inputs and
+restores the captured authored value when enabled; that requiredness correction
+participates in existing comparison and may require reviewed golden updates.
+Rejected submissions still trace unchanged presentation facts, not attempted POST
+eligibility. Saved screens without enabled metadata retain previous eligibility.

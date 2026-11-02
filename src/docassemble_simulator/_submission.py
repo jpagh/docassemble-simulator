@@ -21,9 +21,11 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from docassemble_simulator._js_conditions import field_eligible
 from docassemble_simulator._outcomes import (
     ErrorKind,
     ExecutionFailure,
+    Failure,
     first_line,
 )
 from docassemble_simulator.describe import (
@@ -79,8 +81,20 @@ class ValidationRejected:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class CapabilityRejected:
+    """A declared condition the simulator cannot safely accept or exempt."""
+
+    failure: Failure
+    dispositions: tuple[dict[str, Any], ...] = ()
+
+
 SubmissionVerdict = (
-    SubmissionAccepted | AssignmentsRejected | RequiredRejected | ValidationRejected
+    SubmissionAccepted
+    | AssignmentsRejected
+    | RequiredRejected
+    | ValidationRejected
+    | CapabilityRejected
 )
 
 
@@ -135,12 +149,28 @@ def accept_screen_submission(
                 item["disposition"] == "validation error" for item in dispositions
             ),
         )
-    if partial:
-        submission_screen = _submission_screen(interview, namespace, screen)
-    else:
-        # The whole screen is submitted: browser defaults and blanks for
-        # optional fields, then the required gate.
-        submission_screen = _submit_screen_fields(namespace, screen, interview)
+    screen = _with_js_input_values(screen, assignments, use_code)
+    try:
+        if partial:
+            submission_screen = _submission_screen(interview, namespace, screen)
+        else:
+            # The whole screen is submitted: browser defaults and blanks for
+            # optional fields, then the required gate.
+            submission_screen = _submit_screen_fields(namespace, screen, interview)
+    except ExecutionFailure as error:
+        if error.kind != ErrorKind.JS_CONDITION_UNSUPPORTED:
+            raise
+        return CapabilityRejected(
+            Failure(
+                error.kind,
+                str(error),
+                {
+                    **(error.details or {}),
+                    "assignments": list(dispositions),
+                },
+            ),
+            dispositions=tuple(dispositions),
+        )
     violations = _required_violations(
         namespace,
         submission_screen,
@@ -303,6 +333,39 @@ def _required_message(variable, reason):
     )
 
 
+def _with_js_input_values(screen, assignments, use_code):
+    """Keep submitted numeric spelling, which namespace parsing otherwise loses."""
+    if use_code or not any("js_condition" in f for f in screen.get("fields") or []):
+        return screen
+    specs = _field_specs(screen, _screen_field_targets(screen))
+    types = _field_types(screen, _screen_field_targets(screen))
+    values = {}
+    for variable, raw in assignments:
+        field = specs.get(variable) or {}
+        if (
+            field.get("input_type") in {"yesnomaybe", "noyesmaybe"}
+            or types.get(variable) in {"yesnomaybe", "noyesmaybe", "threestate"}
+            or field.get("input_type") == "radio"
+            and any(
+                "value" in choice and choice["value"] is None
+                for choice in field.get("choices") or []
+            )
+        ):
+            if parse_value(raw) is None:
+                values[variable] = "None" if raw.strip() else None
+            continue
+        if types.get(variable) not in {"integer", "number", "float", "currency"}:
+            continue
+        parsed = parse_value(raw)
+        if type(parsed) in (int, float):
+            values[variable] = raw.strip()
+        elif type(parsed) is str:
+            values[variable] = parsed
+        elif parsed is None:
+            values[variable] = ""
+    return {**screen, "_js_input_values": values}
+
+
 def _submission_screen(interview, namespace, screen):
     """Copy field facts with current visibility, preserving the rendered contract."""
     question = getattr(interview, "questions_by_name", {}).get(
@@ -325,6 +388,19 @@ def _submission_screen(interview, namespace, screen):
         if "submission_required" in field:
             field["required"] = field["submission_required"]
         fields.append(field)
+    from docassemble_simulator._js_conditions import settle_condition_fields
+
+    fields = settle_condition_fields(
+        fields, namespace, input_values=screen.get("_js_input_values")
+    )
+    for field in fields:
+        diagnostic = field.get("js_condition_diagnostic")
+        if diagnostic:
+            raise ExecutionFailure(
+                ErrorKind.JS_CONDITION_UNSUPPORTED,
+                diagnostic["message"],
+                {"variable": field.get("variable"), "diagnostic": diagnostic},
+            )
     return {**screen, "fields": fields}
 
 
@@ -337,7 +413,7 @@ def _apply_rendered_defaults(namespace, screen, interview):
         changed = False
         for field in current.get("fields") or []:
             variable = field.get("variable")
-            if variable in applied and field.get("visible") is False:
+            if variable in applied and not field_eligible(field):
                 _exec_in_namespace(namespace, f"del {targets.get(variable, variable)}")
                 applied.remove(variable)
                 changed = True
@@ -362,7 +438,19 @@ def _apply_rendered_defaults(namespace, screen, interview):
         if not changed:
             return current
     raise ExecutionFailure(
-        ErrorKind.VALIDATION, "rendered defaults have unstable visibility"
+        ErrorKind.VALIDATION,
+        "rendered defaults have unstable visibility",
+        {
+            "diagnostic": {
+                "code": "nonconvergence",
+                "message": "Review defaults and show/hide conditions for contradictory visibility; refresh after editing the interview",
+                "fields": [
+                    field.get("variable")
+                    for field in screen.get("fields") or []
+                    if field.get("variable")
+                ],
+            }
+        },
     )
 
 
@@ -370,6 +458,7 @@ def _early_rejection_required_guidance(
     namespace, screen, blank_submissions, interview, *, assignments=(), use_code=False
 ):
     """Assess valid assignments and defaults without validation or blank synthesis."""
+    screen = _with_js_input_values(screen, assignments, use_code)
     screen = _apply_rendered_defaults(namespace, screen, interview)
     violations = _required_violations(
         namespace,
@@ -459,11 +548,7 @@ def _constraint_errors(namespace, screen):
     targets = _screen_field_targets(screen)
     for field in screen.get("fields") or []:
         variable = field.get("variable")
-        if (
-            not variable
-            or field.get("visible") is False
-            or field.get("rendered_input") is False
-        ):
+        if not variable or not field_eligible(field):
             continue
         found, value = _field_value(namespace, variable, targets)
         if not found or _is_empty_value(value):
@@ -546,15 +631,19 @@ def _selected_null_targets(
             raw.strip()
             and parse_value(raw) is None
             and (
-                field.get("input_type") == "radio"
+                field.get("input_type") in {"radio", "yesnomaybe", "noyesmaybe"}
                 or (
                     field.get("input_type") is None
                     and field.get("type") == "threestate"
                 )
             )
-            and any(
-                "value" in choice and choice["value"] is None
-                for choice in field.get("choices") or []
+            and (
+                field.get("input_type") in {"yesnomaybe", "noyesmaybe"}
+                or field.get("type") in {"yesnomaybe", "noyesmaybe"}
+                or any(
+                    "value" in choice and choice["value"] is None
+                    for choice in field.get("choices") or []
+                )
             )
         ):
             selected.add(target)
@@ -580,7 +669,7 @@ def _required_violations(
         variable = field.get("variable")
         if not isinstance(variable, str) or not variable:
             continue
-        if field.get("visible") is False or field.get("rendered_input") is False:
+        if not field_eligible(field):
             continue
         datatype = str(field.get("type", "")).lower()
         if datatype == "signature":
@@ -621,7 +710,7 @@ def _blankable_fields(namespace, screen):
         variable = field.get("variable")
         if not isinstance(variable, str) or not variable:
             continue
-        if field.get("visible") is False:
+        if field.get("visible") is False or field.get("enabled") is False:
             continue
         if _field_value(namespace, variable, targets)[0]:
             continue

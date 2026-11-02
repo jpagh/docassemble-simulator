@@ -769,7 +769,49 @@ def describe_fields(
             logger.debug("field describe failed: %s", err)
             described = {"error": f"could not describe field: {err}"}
         fields.append(described)
-    return fields
+    # The browser receives ask()'s already rendered expression and trigger vars.
+    # Never call the TextObject again, including when accepting a submission.
+    from docassemble_simulator._js_conditions import (
+        UnsupportedCondition,
+        capture_condition,
+        rendered_target,
+        settle_condition_fields,
+    )
+
+    binding_fields = [dict(field) for field in fields]
+    for (source, _expanded, _error), described in zip(live_fields, binding_fields):
+        number = getattr(source, "number", None)
+        if number in (ask_result.get("defaults") or {}):
+            described["default"] = ask_result["defaults"][number]
+        if described.get("variable"):
+            try:
+                described["browser_target"] = rendered_target(
+                    described["variable"], user_dict
+                )
+            except UnsupportedCondition:
+                pass
+        described["browser_disabled"] = bool(
+            (extras.get("disabled") or {}).get(number, False)
+        )
+        if (
+            getattr(source, "showif_code", None) is not None
+            and described.get("visible") is False
+        ):
+            described["rendered_input"] = False
+    for (source, _expanded, _error), described in zip(live_fields, fields):
+        number = getattr(source, "number", None)
+        described["enabled"] = not bool(
+            (extras.get("disabled") or {}).get(number, False)
+        )
+        info = (extras.get("show_if_js") or {}).get(getattr(source, "number", None))
+        if info is None:
+            continue
+        described["js_condition"] = capture_condition(info, binding_fields)
+        described["js_condition"]["initial_enabled"] = described["enabled"]
+        described["submission_required"] = described.get(
+            "submission_required", described.get("required", True)
+        )
+    return settle_condition_fields(fields, user_dict)
 
 
 __all__ = [

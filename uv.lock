@@ -3016,6 +3016,7 @@ name = "docassemble-simulator"
 version = "26.10.9"
 source = { editable = "." }
 dependencies = [
+    { name = "esprima2" },
     { name = "pyyaml" },
     { name = "tomli", version = "2.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'group-21-docassemble-simulator-da110') or (python_full_version < '3.11' and extra == 'group-21-docassemble-simulator-da19') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
     { name = "tomli", version = "2.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra != 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19') or (extra == 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19')" },
@@ -3044,6 +3045,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "esprima2", specifier = ">=6.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.3.0" },
 ]
@@ -4014,6 +4016,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f5/22/900cb125c76b7aaa450ce02fd727f452243f2e91a61af068b40adba60ea9/email_validator-2.3.0.tar.gz", hash = "sha256:9fc05c37f2f6cf439ff414f8fc46d917929974a82244c20eb10231ba60c54426", size = 51238, upload-time = "2025-08-26T13:09:06.831Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/15/545e2b6cf2e3be84bc1ed85613edd75b8aea69807a71c26f4ca6a9258e82/email_validator-2.3.0-py3-none-any.whl", hash = "sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4", size = 35604, upload-time = "2025-08-26T13:09:05.858Z" },
+]
+
+[[package]]
+name = "esprima2"
+version = "6.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8b/b3/87832c18ff84010a08ea64e4c0c4c91550e0e28207b835db4849cd0aec81/esprima2-6.0.0.tar.gz", hash = "sha256:3a4f045a7171b1027ae770d4b28caf55f987f133436d569d52e221ae313d9f83", size = 60044, upload-time = "2026-04-22T01:09:19.38Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7f/10/583154299cde5ba31a2818490788398c9a9cbb01292cc485d505e03b5966/esprima2-6.0.0-py3-none-any.whl", hash = "sha256:0596fae544e0a9d7a07b1243ee9e9016b568812c20f9a06cb8f85bbb7c2ef443", size = 76031, upload-time = "2026-04-22T01:09:17.918Z" },
 ]
 
 [[package]]

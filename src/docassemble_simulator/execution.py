@@ -44,6 +44,7 @@ from docassemble_simulator._outcomes import (
 )
 from docassemble_simulator._submission import (
     AssignmentsRejected,
+    CapabilityRejected,
     RequiredRejected,
     ValidationRejected,
     _early_rejection_required_guidance,
@@ -878,6 +879,12 @@ class InterviewExecution:
                             use_code=operation.code,
                         )
                     )
+                except ExecutionFailure as failure:
+                    if failure.kind != ErrorKind.JS_CONDITION_UNSUPPORTED:
+                        raise
+                    # Requiredness cannot be computed, but the original input
+                    # rejection and active-field guidance still take precedence.
+                    details.update(failure.details or {})
                 finally:
                     # A rejected submission is not a partial commit.
                     # Guidance may inspect valid assignments and defaults
@@ -892,6 +899,9 @@ class InterviewExecution:
                     "one or more answers could not be applied",
                     details,
                 )
+            if isinstance(submission, CapabilityRejected):
+                failure = submission.failure
+                raise ExecutionFailure(failure.kind, failure.message, failure.details)
             if isinstance(submission, RequiredRejected):
                 details = {
                     "errors": list(submission.errors),
@@ -1619,7 +1629,11 @@ def _auto_submit_screen(
             blank_submissions=_blank_assignments(assignments),
         )
         if isinstance(
-            submission, AssignmentsRejected | RequiredRejected | ValidationRejected
+            submission,
+            AssignmentsRejected
+            | RequiredRejected
+            | ValidationRejected
+            | CapabilityRejected,
         ):
             _restore_namespace(namespace, snapshot)
             return None, _auto_submission_stop(submission, screen)
@@ -1641,9 +1655,25 @@ def _auto_submit_screen(
 
 
 def _auto_submission_stop(
-    submission: AssignmentsRejected | RequiredRejected | ValidationRejected, screen
+    submission: AssignmentsRejected
+    | RequiredRejected
+    | ValidationRejected
+    | CapabilityRejected,
+    screen,
 ):
     """Report one rejected automatic submission as its replay stop payload."""
+    if isinstance(submission, CapabilityRejected):
+        failure = submission.failure
+        return {
+            "reason": "unsupported JS condition",
+            "submitted": False,
+            "error": {
+                "kind": failure.kind,
+                "message": failure.message,
+                "details": failure.details,
+            },
+            "screen": screen,
+        }
     if isinstance(submission, AssignmentsRejected):
         return {
             "reason": (
@@ -1696,6 +1726,8 @@ def _auto_trace_error(stop):
     if not stop:
         return None
     reason = stop.get("reason")
+    if reason == "unsupported JS condition":
+        return stop["error"]
     if reason == "answer failed":
         return {
             "kind": "answer-input",

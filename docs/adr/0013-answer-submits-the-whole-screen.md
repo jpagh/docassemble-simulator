@@ -69,7 +69,7 @@ The CLI's `answer` operation is the simulator's browser-shaped submission path. 
   `standardformatter.py:1293-1304`), and the empty-object POST path that
   evaluates the target before assigning `None` only on failure (1.9
   `server.py:8266-8272`; 1.10 `interview/views.py:1760-1766`).
-- An unknown-field or parse-error rejection retains the per-assignment dispositions and active-field guidance, and adds `missing_required` from those same live Screen facts. Valid assignments and valid rendered defaults count for that guidance; hidden and optional fields do not. This early assessment does not run authored validation or commit any attempted value.
+- An unknown-field or parse-error rejection retains the per-assignment dispositions and active-field guidance, and adds `missing_required` from those same live Screen facts. Valid assignments and valid rendered defaults count for that guidance; hidden and optional fields do not. This early assessment does not run authored validation or commit any attempted value. If unsupported JS prevents requiredness assessment, the original assignment rejection and active-field guidance remain intact with the capability diagnostic attached instead of an uncomputable `missing_required` list.
 - The submission is scoped to the fields the screen described, including resolved generic-object targets (`x.date` and `rav.date`). A variable that is not on the active screen is an `answer-input` failure. Screens with no described fields (continue, field-less deadend) keep accepting explicit assignments; `exec` remains the escape hatch for deliberate state surgery.
 - `answer --partial` restores the previous per-field behavior: only the submitted fields are applied, missing required fields become warnings, and lazy re-seeking may re-present the same screen. `--strict` keeps promoting those warnings to errors.
 - `--no-validate` skips only the interview's `validation code`. The required-field gate and blank/default synthesis still apply because they are part of a form submission, not validation code. `--partial` is the explicit opt-out.
@@ -192,3 +192,56 @@ No custom empty value is fabricated for omitted controls.
 `--no-validate` does not bypass this form gate; `--partial` bypasses it, retaining
 its existing authored-validation and required-warning semantics. `exec` is
 unchanged. Constraint facts are debug-only in trace comparison (ADR-0012).
+
+## Declared JS show/hide (#94)
+
+Supported bounded JS expressions now feed the same operation-local submission
+visibility as native show/hide, through the shared acceptance sequence. Ask-time
+rendered expressions and scalar bindings are frozen in screen facts; submission
+never rerenders their Mako. Actual rendered inputs and upstream trigger metadata,
+not namespace membership, activate evaluation. No-trigger show-if and hide-if
+both retain the upstream initially hidden wrapper state. Unsupported syntax,
+bindings or values reject as `js-condition-unsupported`, including in partial,
+strict or no-validate mode; they are not a false result or validation exemption.
+Explicit assignments still take precedence, including to hidden described fields.
+See [the supported language and boundaries](../js-conditions.md). Indexed/grouped
+bindings are covered by #95. Enablement is described in the #97 amendment below.
+
+## Chained JS visibility (#96)
+
+Presentation and submission now share bounded, ordered visibility settling.
+Hidden controllers read as browser null, not their saved or explicitly assigned
+namespace value; rendered dependency identities still register triggers. Each
+pass starts at upstream's initially hidden JS state, not stale saved visibility.
+Repeated states or exhaustion of twice the field count plus one rounds produce
+an actionable `js-condition-unsupported` / `nonconvergence` diagnostic. No general
+browser event loop is emulated. A resolving explicit assignment can still submit
+an initially contradictory screen.
+
+The existing default loop consumes that settled visibility, removes only defaults
+introduced by the operation when hidden, and preserves explicit/saved values.
+Requiredness, optional blanks and constraints use the final shared decision.
+Early input-error guidance uses the same settling without committing; ordinary
+answers, automatic seek/replay and workers retain their transaction policies.
+Rejected POSTs never replace saved presentation facts with attempted visibility.
+Activated automatic walks may retain their target/attempt metadata. JS enablement uses this eligibility lookup separately from binding identity
+without treating disablement as hiding (#97).
+
+
+## Separate JS enablement (#97)
+
+Enable/disable conditions settle `enabled` separately from visibility. With no
+actual rendered trigger both signs preserve upstream initial input enablement;
+only triggered evaluations apply sign inversion. Disabled inputs remain rendered
+and visible but are ineligible for omitted defaults, optional blanks, browser
+requiredness and rendered constraints. Disabled/hidden controller lookup yields
+null, never saved values. Re-enabling restores captured authored requiredness.
+Operation-introduced defaults are removed when disabled, but explicit assignments
+and pre-existing values are preserved. Explicit assignments to described disabled
+fields remain authorized under the existing policy and skip rendered constraints
+while disabled; assignment/custom-type hooks and authored validation still apply.
+This is a deliberate API capability beyond browser POST, not a claim that browsers
+submit disabled controls. Ordinary answers, automatic seek/replay and workers use
+the same settled acceptance. Missing legacy enabled metadata defaults eligible.
+See the bounded language and browser evidence in `docs/js-conditions.md`; the
+country/state asynchronous choice script and general JavaScript remain unsupported.
