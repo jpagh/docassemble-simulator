@@ -298,16 +298,12 @@ def _binding(field: dict):
     target = rendered_target(field.get("browser_target", name), {})
     datatype = str(field.get("type", "text")).lower()
     input_type = field.get("input_type")
+    # A choice list alone uses standardformatter's default <select>, not radio.
     if datatype in {"checkboxes", "multiselect"}:
         kind = "group"
     elif datatype in _CHECKBOX and input_type in (None, "yesno", "noyes"):
         kind = "checkbox"
-    elif (
-        datatype in _RADIO
-        or input_type in _RADIO | {"radio"}
-        or field.get("choices")
-        and input_type not in ("dropdown", "combobox")
-    ):
+    elif datatype in _RADIO or input_type in _RADIO | {"radio"}:
         if datatype.startswith("object"):
             raise UnsupportedCondition(
                 "binding", f"Object control is not supported: {name}"
@@ -350,6 +346,7 @@ def _binding(field: dict):
         ),
         "kind": kind,
         "default": default,
+        "default_set": "default" in field,
         "datatype": input_type or datatype,
         "step": (field.get("constraints") or {}).get("step"),
     }
@@ -503,6 +500,13 @@ def _browser_value(binding, namespace, input_values):
         if submitted is None:
             return None if kind == "radio" else ""
         if kind == "radio" and binding.get("nullable") and not missing:
+            return "None"
+        if (
+            kind == "text"
+            and "None" in binding["choices"]
+            and (not missing or binding.get("default_set", False))
+        ):
+            # input_for selects the "None" option only for an established null.
             return "None"
         return None if kind == "radio" else ""
     if type(value) is bool:

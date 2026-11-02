@@ -335,7 +335,7 @@ The expectation is not a general whitelist for other failures.
 | PDF-only attachment (ADR-0006) | 11 | `allow-emailing-false-pdf.yml`, `attachment-notice.yml`, `attachment.yml`, `document-links-limited.yml`, `formatting.yml`, `immediate_file.yml`, `manual-attachment-list.yml`, `pdf-a.yml`, `tagged-pdf.yml`, `valid-formats-code.yml`, `valid-formats.yml` |
 | Stripped `.pdf` link (ADR-0006) | 3 | `dafile-url-for.yml`, `dafile-url-for-temporary.yml`, `document-variable-name-link.yml` |
 | Manual concatenation of stripped PDFs (ADR-0006) | 2 | `document-manual.yml`, `document-manual-code.yml` |
-| RTF-to-DOCX converter capability (ADR-0001) | 2 | `document-docx-from-rtf.yml`, `document-docx-from-rtf-standalone.yml` |
+| RTF-to-DOCX dependency exemption (ADR-0001) | 2 | `document-docx-from-rtf.yml`, `document-docx-from-rtf-standalone.yml` |
 | Deliberate error demonstration | 3 | `error-help.yml`, `error-help-language.yml`, `infinite-loop-2.yml` |
 | **Total** | **21** | |
 
@@ -357,10 +357,14 @@ and is now resolved: they are reviewed capability boundaries with the typed
 `pdf-unavailable` error, not unresolved-variable findings. The simulator does
 not fabricate a PDF and does not provide or bundle an external PDF converter.
 The two RTF-to-DOCX examples still attempt the absent `libreoffice` executable
-and fail with `ENOENT`; that absent converter is the ADR-0001 capability
-boundary, not a successful conversion. The simulator only falls back to DOCX
-where ADR-0011 applies. PDF-only and manual-PDF cases keep the ADR-0006 typed
-failure.
+and fail with `ENOENT`. Their retained expectations are a separately approved
+dependency/capability exemption, documented in ADR-0001: LibreOffice/server
+conversion infrastructure is unavailable in the audit environment. PDF stubbing
+does not cover this upstream conversion path; no successful conversion or
+interception of all external converter calls is claimed. This narrow exemption
+does not whitelist other optional-package or service failures. The simulator
+only falls back to DOCX where ADR-0011 applies. PDF-only and manual-PDF cases
+keep the ADR-0006 typed failure.
 
 ## Declared boundaries
 
@@ -639,8 +643,8 @@ preliminary start artifact. Each fixture appears exactly once.
 | `attachment.yml` | execution | Reviewed expectation: PDF-only attachment; typed `pdf-unavailable` (ADR-0006) |
 | `dafile-url-for-temporary.yml` | unresolved-variable | Reviewed expectation: stripped `.pdf` link; typed `pdf-unavailable` (ADR-0006) |
 | `dafile-url-for.yml` | unresolved-variable | Reviewed expectation: stripped `.pdf` link; typed `pdf-unavailable` (ADR-0006) |
-| `document-docx-from-rtf-standalone.yml` | execution | Reviewed expectation: RTF-to-DOCX converter capability; LibreOffice absent (ADR-0001) |
-| `document-docx-from-rtf.yml` | execution | Reviewed expectation: RTF-to-DOCX converter capability; LibreOffice absent (ADR-0001) |
+| `document-docx-from-rtf-standalone.yml` | execution | Reviewed expectation: approved RTF-to-DOCX dependency exemption; upstream attempts absent LibreOffice, not covered by PDF stubbing (ADR-0001) |
+| `document-docx-from-rtf.yml` | execution | Reviewed expectation: approved RTF-to-DOCX dependency exemption; upstream attempts absent LibreOffice, not covered by PDF stubbing (ADR-0001) |
 | `document-links-limited.yml` | execution | Reviewed expectation: PDF-only attachment; typed `pdf-unavailable` (ADR-0006) |
 | `document-manual-code.yml` | execution | Reviewed expectation: manual concatenation of stripped PDFs; typed `pdf-unavailable` (ADR-0006) |
 | `document-manual.yml` | execution | Reviewed expectation: manual concatenation of stripped PDFs; typed `pdf-unavailable` (ADR-0006) |

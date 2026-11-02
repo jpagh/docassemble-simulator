@@ -48,6 +48,18 @@ Implemented in `bootstrap.py`:
 Tests cover PDF-only omission and DOCX preservation. The README and render
 fidelity documentation describe PDF conversion as deployment/server scope.
 
+## Distinct RTF-to-DOCX dependency exemption
+
+The PDF stub does not cover upstream RTF-to-DOCX conversion. The corpus examples
+`document-docx-from-rtf.yml` and `document-docx-from-rtf-standalone.yml` still
+attempt to invoke `libreoffice` and report an execution failure when it is absent.
+Retain their two narrowly matched corpus expectations as an approved dependency /
+capability exemption: LibreOffice and its server conversion infrastructure are
+not available in the audit environment. This is not PDF stubbing, a successful
+conversion, or a guarantee that every external converter call is intercepted.
+It does not change runtime behavior, bundle a converter, or exempt unrelated
+optional-package and service failures.
+
 ## Considered options
 
 - **Install or invoke LibreOffice:** rejected because it makes the simulator environment heavyweight and reproduces a server concern.

@@ -5,8 +5,9 @@
 #
 # PDF capability boundaries pin the typed `pdf-unavailable` message, not the
 # superseded unresolved-variable diagnostic. Optional packages, network,
-# credentials, database, session, and machine-learning service failures are not
-# listed here: environment-derived blockers stay visible and unwhitelisted.
+# credentials, database, session, and machine-learning service failures stay
+# visible and unwhitelisted, except for the two explicitly approved RTF-to-DOCX
+# dependency exemptions below; those are distinct from PDF stubbing.
 
 # Eleven PDF-only attachment requests (ADR-0006).  The simulator removes
 # generated PDF formats before conversion and reports the typed capability.
@@ -120,7 +121,8 @@
     reason         = "ADR-0006: a PDF-only attachment is a simulator capability boundary and reports the typed PDF-unavailable failure."
     category       = "capability-boundary"
 
-# Two converter-dependent rtf-to-docx requests (ADR-0001).
+# Two approved RTF-to-DOCX dependency/capability exemptions (ADR-0001).
+# Upstream attempts conversion; the PDF stub does not cover this path.
 [[expectations]]
     interview      = "docassemble.base:data/questions/examples/document-docx-from-rtf.yml"
     phase          = "start"
@@ -128,7 +130,7 @@
     returncode     = 2
     error_kind     = "execution"
     message        = "[Errno 2] No such file or directory: 'libreoffice'"
-    reason         = "ADR-0001: the simulator never invokes an external converter, and rtf-to-docx requires the absent LibreOffice converter."
+    reason         = "ADR-0001 RTF-to-DOCX dependency exemption: upstream attempts LibreOffice conversion, but LibreOffice/server conversion infrastructure is unavailable in the audit environment. This path is not covered by PDF stubbing."
     category       = "capability-boundary"
 
 [[expectations]]
@@ -138,7 +140,7 @@
     returncode     = 2
     error_kind     = "execution"
     message        = "[Errno 2] No such file or directory: 'libreoffice'"
-    reason         = "ADR-0001: the simulator never invokes an external converter, and rtf-to-docx requires the absent LibreOffice converter."
+    reason         = "ADR-0001 RTF-to-DOCX dependency exemption: upstream attempts LibreOffice conversion, but LibreOffice/server conversion infrastructure is unavailable in the audit environment. This path is not covered by PDF stubbing."
     category       = "capability-boundary"
 
 # Three deliberate error demonstrations.

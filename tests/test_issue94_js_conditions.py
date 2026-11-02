@@ -431,3 +431,140 @@ def test_unsupported_js_guidance_preserves_original_assignment_rejection(
         assert value("any(name in globals() for name in ('entry', 'filing_date', 'validation_ran'))") == 'False'
         """,
     )
+
+
+@pytest.mark.parametrize("mode", ["answer", "replay"])
+@pytest.mark.parametrize("submitted", [None, "True", "False"])
+def test_standardformatter_implicit_select_app_js_blank_and_boolean_strings_submit(
+    family_python,  # noqa: F811
+    tmp_path,
+    mode,
+    submitted,
+):
+    _execute(
+        family_python,
+        tmp_path,
+        _submission_interview("""
+        question: Implicit choice dropdown
+        fields:
+          - Entry: entry
+            required: False
+            choices:
+              - Affirmative: True
+              - Negative: False
+          - Blank: blank
+            js show if: val('entry') === ''
+          - Selected: selected
+            js show if: val('entry') === 'True' || val('entry') === 'False'
+          - Radio only: radio_only
+            js show if: val('entry') === null || val('entry') === true || val('entry') === false
+        ---
+        mandatory: True
+        question: Accepted
+        """),
+        f"""
+        started = execution.run(Start())
+        assert started.ok, started
+        fields = started.result['fields']
+        assert fields[1]['visible'] is True, fields
+        assert fields[2]['visible'] is False, fields
+        assert fields[3]['visible'] is False, fields
+        execution = InterviewExecution(root, 'docassemble.acceptance:data/questions/main.yml')
+        assignments = () if {submitted!r} is None else (('entry', {submitted!r}),)
+        required = 'blank' if {submitted!r} is None else 'selected'
+        rejected = execution.run(Answer(assignments, defaults=True))
+        assert not rejected.ok and rejected.error.kind == 'validation', rejected
+        assert rejected.error.details['missing_required'] == [required], rejected
+        assert execution.run(Status()).result == started.result
+        assert value("'entry' in globals()") == 'False'
+        assignments += ((required, 'ok'),)
+        operation = Answer(assignments) if {mode!r} == 'answer' else ReplayAutomatic(
+            'entry', submissions=(assignments,), activate=True,
+            expectations=(expectation(started.result),),
+        )
+        accepted = execution.run(operation)
+        assert accepted.ok and 'replay_divergence' not in accepted.result, accepted
+        assert value(required) == "'ok'"
+        assert value("'radio_only' in globals()") == 'False'
+        """,
+    )
+
+
+@pytest.mark.parametrize("mode", ["answer", "replay"])
+@pytest.mark.parametrize("source", ["missing", "value", "default"])
+@pytest.mark.parametrize("submitted", ["", "None"])
+def test_standardformatter_select_app_js_null_option_and_blank_submission(
+    family_python,  # noqa: F811
+    tmp_path,
+    mode,
+    source,
+    submitted,
+):
+    established = (
+        ""
+        if source != "value"
+        else """\
+---
+mandatory: True
+code: |
+  entry = None
+"""
+    )
+    default = "default: null" if source == "default" else ""
+    _execute(
+        family_python,
+        tmp_path,
+        established
+        + f"""\
+---
+mandatory: True
+id: null-choice
+question: Null choice dropdown
+fields:
+  - Entry: entry
+    required: False
+    {default}
+    choices:
+      - Null option: null
+      - Other: other
+  - Blank: blank
+    js show if: val('entry') === ''
+  - Selected null: selected
+    js show if: val('entry') === 'None'
+  - Null control: null_control
+    js show if: val('entry') === null
+  - Unrelated: unrelated
+---
+mandatory: True
+question: Accepted
+""",
+        f"""
+        started = execution.run(Start())
+        assert started.ok, started
+        fields = started.result['fields']
+        assert fields[1]['visible'] is {source == "missing"!r}, fields
+        assert fields[2]['visible'] is {source != "missing"!r}, fields
+        assert fields[3]['visible'] is False, fields
+        execution = InterviewExecution(root, 'docassemble.acceptance:data/questions/main.yml')
+        untouched = execution.run(Answer((('unrelated', 'ok'),)))
+        required = 'blank' if {source!r} == 'missing' else 'selected'
+        assert not untouched.ok and untouched.error.details['missing_required'] == [required], untouched
+        assert execution.run(Status()).result == started.result
+        assignments = (('entry', {submitted!r}), ('unrelated', 'ok'))
+        required = 'blank' if {submitted!r} == '' else 'selected'
+        rejected = execution.run(Answer(assignments))
+        assert not rejected.ok and rejected.error.kind == 'validation', rejected
+        assert rejected.error.details['missing_required'] == [required], rejected
+        assert execution.run(Status()).result == started.result
+        assignments += ((required, 'ok'),)
+        operation = Answer(assignments) if {mode!r} == 'answer' else ReplayAutomatic(
+            'unrelated', submissions=(assignments,), activate=True,
+            expectations=(expectation(started.result),),
+        )
+        accepted = execution.run(operation)
+        assert accepted.ok and 'replay_divergence' not in accepted.result, accepted
+        assert value(required) == "'ok'"
+        assert value('entry') == {"''" if submitted == "" else "None"!r}
+        assert value("'null_control' in globals()") == 'False'
+        """,
+    )

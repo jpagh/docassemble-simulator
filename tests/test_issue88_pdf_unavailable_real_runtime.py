@@ -271,46 +271,30 @@ def issue88_workspace(tmp_path, real_python):  # noqa: F811 - imported fixture
     }
     for name, text in fixtures.items():
         (questions / name).write_text(text)
-    generated = subprocess.run(
-        [
-            str(real_python),
-            "-c",
-            (
-                "import sys\n"
-                "from docx import Document\n"
-                "document = Document()\n"
-                "document.add_paragraph(sys.argv[1])\n"
-                "document.save(sys.argv[2])\n"
-            ),
-            "complaint: {{ complaint.pdf }}",
-            str(templates / "summary.docx"),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_environment(),
-    )
-    assert generated.returncode == 0, generated.stdout + generated.stderr
-    generated = subprocess.run(
-        [
-            str(real_python),
-            "-c",
-            (
-                "import sys\n"
-                "from docx import Document\n"
-                "document = Document()\n"
-                "document.add_paragraph(sys.argv[1])\n"
-                "document.save(sys.argv[2])\n"
-            ),
-            "Indexed document.",
-            str(templates / "plain.docx"),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_environment(),
-    )
-    assert generated.returncode == 0, generated.stdout + generated.stderr
+    for text, destination in (
+        ("complaint: {{ complaint.pdf }}", "summary.docx"),
+        ("Indexed document.", "plain.docx"),
+    ):
+        generated = subprocess.run(
+            [
+                str(real_python),
+                "-c",
+                (
+                    "import sys\n"
+                    "from docx import Document\n"
+                    "document = Document()\n"
+                    "document.add_paragraph(sys.argv[1])\n"
+                    "document.save(sys.argv[2])\n"
+                ),
+                text,
+                str(templates / destination),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_environment(),
+        )
+        assert generated.returncode == 0, generated.stdout + generated.stderr
     return tmp_path
 
 

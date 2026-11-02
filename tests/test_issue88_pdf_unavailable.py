@@ -5,13 +5,12 @@ from __future__ import annotations
 import re
 import sys
 import types
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from docassemble_simulator import _runtime as runtime_module
-from docassemble_simulator._outcomes import ErrorKind, ExecutionFailure
+from docassemble_simulator._outcomes import ErrorKind
 from docassemble_simulator._runtime import (
     PDF_UNAVAILABLE_MESSAGE,
     PDFConversionUnavailable,
@@ -22,8 +21,9 @@ from docassemble_simulator._runtime import (
 from docassemble_simulator.execution import (
     Evaluate,
     Execute,
-    InterviewExecution,
     Refresh,
+    Seek,
+    Start,
 )
 
 
@@ -282,78 +282,74 @@ def test_pdf_concatenate_installation_is_idempotent_and_rebinds_reexports(
 
 
 def test_refresh_translates_a_pdf_conversion_failure_to_the_capability(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, da_stubs
 ):
-    from docassemble_simulator import execution as execution_module
+    from test_detect_session import FakeInterview, _execution
 
-    execution = InterviewExecution.__new__(InterviewExecution)
-    execution.root = tmp_path
-    payload = {"namespace": {}, "active_seek": "target", "outcome": {}}
-    execution._store = SimpleNamespace(
-        load=lambda: payload,
-        save=lambda *args, **kwargs: None,
-    )
+    class SeekingInterview(FakeInterview):
+        fail = False
 
-    @contextmanager
-    def prepared(namespace):
-        yield SimpleNamespace(), SimpleNamespace()
+        def askfor(self, variable, *args, **kwargs):
+            if self.fail:
+                raise PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE)
+            return {"type": "continue"}
 
-    execution._prepared_operation = prepared
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+    assert execution.run(Start()).ok
+    assert execution.run(Seek("target", activate=True)).ok
+    SeekingInterview.fail = True
 
-    def failing_seek(*args, **kwargs):
-        raise PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE)
+    outcome = execution.run(Refresh())
 
-    monkeypatch.setattr(execution_module, "_seek", failing_seek)
-
-    with pytest.raises(ExecutionFailure) as raised:
-        execution._refresh()
-
-    assert raised.value.kind == ErrorKind.PDF_UNAVAILABLE
-    assert str(raised.value) == PDF_UNAVAILABLE_MESSAGE
+    assert not outcome.ok
+    assert outcome.error.kind == ErrorKind.PDF_UNAVAILABLE
+    assert outcome.error.message == PDF_UNAVAILABLE_MESSAGE
 
 
 def test_refresh_translates_a_stripped_pdf_seek_to_the_capability(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, da_stubs
 ):
-    from docassemble_simulator import execution as execution_module
+    from test_detect_session import FakeInterview, _execution
 
-    _install_stub_runtime(monkeypatch)
-    execution = InterviewExecution.__new__(InterviewExecution)
-    execution.root = tmp_path
-    payload = {
-        "namespace": {"complaint": _marked_collection()},
-        "active_seek": "complaint.pdf",
-        "outcome": {},
-    }
-    execution._store = SimpleNamespace(
-        load=lambda: payload,
-        save=lambda *args, **kwargs: None,
+    class SeekingInterview(FakeInterview):
+        fail = False
+
+        def populate_non_pickleable(self, namespace):
+            namespace["complaint"] = _marked_collection()
+
+        def askfor(self, variable, *args, **kwargs):
+            if self.fail:
+                raise _DAErrorMissingVariable("missing complaint.pdf", "complaint.pdf")
+            return {"type": "continue"}
+
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, SeekingInterview)
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.error"],
+        "DAErrorMissingVariable",
+        _DAErrorMissingVariable,
+        raising=False,
     )
+    monkeypatch.setattr(
+        sys.modules["docassemble.base.util"],
+        "DAFileCollection",
+        _DAFileCollection,
+        raising=False,
+    )
+    assert execution.run(Start()).ok
+    assert execution.run(Seek("complaint.pdf", activate=True)).ok
+    SeekingInterview.fail = True
 
-    @contextmanager
-    def prepared(namespace):
-        yield SimpleNamespace(), SimpleNamespace()
+    outcome = execution.run(Refresh())
 
-    execution._prepared_operation = prepared
-
-    def failing_seek(*args, **kwargs):
-        raise _DAErrorMissingVariable("missing complaint.pdf", "complaint.pdf")
-
-    monkeypatch.setattr(execution_module, "_seek", failing_seek)
-
-    with pytest.raises(ExecutionFailure) as raised:
-        execution._refresh()
-
-    assert raised.value.kind == ErrorKind.PDF_UNAVAILABLE
-    assert raised.value.details["sought_variable"] == "complaint.pdf"
+    assert not outcome.ok
+    assert outcome.error.kind == ErrorKind.PDF_UNAVAILABLE
+    assert outcome.error.details["sought_variable"] == "complaint.pdf"
 
 
 def test_refresh_reports_the_capability_through_execution(
     tmp_path, monkeypatch, da_stubs
 ):
     from test_detect_session import FakeInterview, _execution
-
-    from docassemble_simulator.execution import Seek, Start
 
     class SeekingInterview(FakeInterview):
         def askfor(self, variable, *args, **kwargs):
@@ -377,51 +373,26 @@ def test_refresh_reports_the_capability_through_execution(
     assert outcome.error.message == PDF_UNAVAILABLE_MESSAGE
 
 
-def test_evaluate_translates_a_pdf_conversion_failure_to_the_capability(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "operation", [Evaluate("fail()"), Execute("fail()", assemble=False)]
+)
+def test_evaluate_and_execute_translate_a_pdf_conversion_failure_to_the_capability(
+    tmp_path, monkeypatch, da_stubs, operation
 ):
-    execution = InterviewExecution.__new__(InterviewExecution)
-    execution.root = tmp_path
-    namespace = {
-        "fail": lambda: (_ for _ in ()).throw(
-            PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE)
-        )
-    }
-    execution._store = SimpleNamespace(load=lambda: {"namespace": namespace})
+    from test_detect_session import FakeInterview, _execution
 
-    @contextmanager
-    def prepared(active_namespace):
-        yield SimpleNamespace(), SimpleNamespace()
+    def fail():
+        raise PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE)
 
-    execution._prepared_operation = prepared
+    class PdfFailureInterview(FakeInterview):
+        def populate_non_pickleable(self, namespace):
+            namespace["fail"] = fail
 
-    with pytest.raises(ExecutionFailure) as raised:
-        execution._evaluate(Evaluate("fail()"))
+    execution, _, _ = _execution(tmp_path, monkeypatch, da_stubs, PdfFailureInterview)
+    assert execution.run(Start()).ok
 
-    assert raised.value.kind == ErrorKind.PDF_UNAVAILABLE
-    assert str(raised.value) == PDF_UNAVAILABLE_MESSAGE
+    outcome = execution.run(operation)
 
-
-def test_execute_translates_a_pdf_conversion_failure_to_the_capability(
-    tmp_path, monkeypatch
-):
-    execution = InterviewExecution.__new__(InterviewExecution)
-    execution.root = tmp_path
-    namespace = {
-        "fail": lambda: (_ for _ in ()).throw(
-            PDFConversionUnavailable(PDF_UNAVAILABLE_MESSAGE)
-        )
-    }
-    execution._store = SimpleNamespace(load=lambda: {"namespace": namespace})
-
-    @contextmanager
-    def prepared(active_namespace):
-        yield SimpleNamespace(), SimpleNamespace()
-
-    execution._prepared_operation = prepared
-
-    with pytest.raises(ExecutionFailure) as raised:
-        execution._execute(Execute("fail()", assemble=False))
-
-    assert raised.value.kind == ErrorKind.PDF_UNAVAILABLE
-    assert str(raised.value) == PDF_UNAVAILABLE_MESSAGE
+    assert not outcome.ok
+    assert outcome.error.kind == ErrorKind.PDF_UNAVAILABLE
+    assert outcome.error.message == PDF_UNAVAILABLE_MESSAGE

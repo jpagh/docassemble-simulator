@@ -7,20 +7,23 @@ import pytest
 
 from docassemble_simulator.describe import describe_question_result
 
+_UNSET = object()
+
 
 def screen(
     expression,
     *,
-    count=None,
+    count=_UNSET,
     sign=True,
     triggers=None,
     datatype="integer",
     input_type=None,
     absent=False,
     conditional=False,
-    rendered_default=None,
+    rendered_default=_UNSET,
     mode=0,
     disabled=False,
+    choices=None,
 ):
     def field(name, number, datatype):
         return SimpleNamespace(
@@ -33,6 +36,7 @@ def screen(
 
     controller = field("count", 0, datatype)
     controller.inputtype = input_type
+    controller.choices = choices
     if absent:
         controller.choicetype = "manual"
     if conditional:
@@ -44,7 +48,7 @@ def screen(
         {
             "question": question,
             "selectcompute": {0: []} if absent else {},
-            "defaults": {0: rendered_default},
+            "defaults": {} if rendered_default is _UNSET else {0: rendered_default},
             "extras": {
                 "disabled": {1: disabled},
                 "show_if_js": {
@@ -57,7 +61,7 @@ def screen(
                 },
             },
         },
-        {} if count is None else {"count": count},
+        {} if count is _UNSET else {"count": count},
     )
 
 
@@ -183,6 +187,56 @@ def test_app_js_val_checkbox_and_radio_boolean_values(input_type, value, expecte
         'val("count") === true', datatype="boolean", input_type=input_type, count=value
     )
     assert observed["fields"][1]["visible"] is expected
+
+
+@pytest.mark.parametrize("input_type", [None, "dropdown", "radio"])
+@pytest.mark.parametrize("value", [None, True, False])
+def test_standardformatter_select_and_app_js_val_distinguish_boolean_choice_strings(
+    input_type, value
+):
+    if input_type == "radio":
+        expected = "null" if value is None else str(value).lower()
+        different = '""' if value is None else f'"{value}"'
+    else:
+        expected = '""' if value is None else f'"{value}"'
+        different = "null" if value is None else str(value).lower()
+    observed = screen(
+        f'val("count") === {expected} && val("count") !== {different}',
+        datatype="text",
+        input_type=input_type,
+        count=value,
+        choices=[{"Yes": True}, {"No": False}],
+    )
+    assert observed["fields"][1]["visible"] is True
+
+
+@pytest.mark.parametrize("input_type", [None, "dropdown"])
+def test_standardformatter_unanswered_choice_select_has_blank_not_null(input_type):
+    observed = screen(
+        'val("count") === "" && val("count") !== null',
+        datatype="text",
+        input_type=input_type,
+        choices=["US", "CA"],
+    )
+    assert observed["fields"][1]["visible"] is True
+
+
+@pytest.mark.parametrize("input_type", [None, "dropdown"])
+@pytest.mark.parametrize("null_choice", [None, "None"])
+@pytest.mark.parametrize("source", ["missing", "value", "default"])
+def test_standardformatter_select_app_js_selected_null_differs_from_unanswered(
+    input_type, null_choice, source
+):
+    expected = '""' if source == "missing" else '"None"'
+    observed = screen(
+        f'val("count") === {expected} && val("count") !== null',
+        datatype="text",
+        input_type=input_type,
+        count=None if source == "value" else _UNSET,
+        rendered_default=None if source == "default" else _UNSET,
+        choices=[(null_choice, "No selection"), ("other", "Other")],
+    )
+    assert observed["fields"][1]["visible"] is True
 
 
 def test_empty_choice_control_does_not_bind_even_with_namespace_value():
