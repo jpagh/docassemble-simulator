@@ -281,7 +281,7 @@ def _configured_bindings(config, template, command_bindings):
         defaults = {
             key: value for key, value in table.items() if isinstance(value, str)
         }
-        candidate = table.get(template, {})
+        candidate = table.get(template, {}) if isinstance(template, str) else {}
         if isinstance(candidate, dict):
             specific = {
                 key: value for key, value in candidate.items() if isinstance(value, str)
@@ -889,9 +889,16 @@ def _render_worker_request(args, worker, request):
     from docassemble_simulator.worker import WorkerProtocolError
 
     try:
-        template, source, assemble, save_snapshot, output, expect_missing, bindings = (
-            _worker_render_fields(request)
-        )
+        (
+            template,
+            source,
+            assemble,
+            save_snapshot,
+            output,
+            expect_missing,
+            bindings,
+            attachment,
+        ) = _worker_render_fields(request)
     except InputFailure as error:
         raise WorkerProtocolError(str(error)) from error
     render_request = _render_request(
@@ -904,6 +911,7 @@ def _render_worker_request(args, worker, request):
         bindings=_configured_bindings(
             getattr(args, "_simulator_config", {}), template, bindings
         ),
+        attachment=attachment,
     )
     outcome = InterviewRenderer(worker.root, worker.execution).render(render_request)
     # ``sim render --json`` drops absent fields (a null artifact when --output
@@ -920,9 +928,27 @@ def _worker_render_fields(request):
         SnapshotSource,
     )
 
-    template = request.get("template")
-    if not isinstance(template, str) or not template.strip():
-        raise InputFailure("render requires a template")
+    raw_template = _worker_field(request, "template")
+    if raw_template is not None:
+        if not isinstance(raw_template, str) or not raw_template.strip():
+            raise InputFailure("render template must be a non-empty string")
+        template = raw_template.strip()
+    else:
+        template = None
+
+    raw_attachment = _worker_field(request, "attachment")
+    if raw_attachment is not None:
+        if not isinstance(raw_attachment, str) or not raw_attachment.strip():
+            raise InputFailure("render attachment must be a non-empty string")
+        attachment = raw_attachment.strip()
+    else:
+        attachment = None
+
+    if template is not None and attachment is not None:
+        raise InputFailure("render accepts either template or attachment, not both")
+    if template is None and attachment is None:
+        raise InputFailure("render requires a template or attachment")
+
     source_name = request.get("source")
     if source_name is None:
         source_name = "saved"
@@ -934,6 +960,8 @@ def _worker_render_fields(request):
     elif normalized == "fresh":
         source = FreshSource()
     elif normalized in {"fixture", "snapshot"}:
+        if normalized == "fixture" and attachment is not None:
+            raise InputFailure("fixture render source cannot be used with attachment")
         path = _worker_optional_path(request, "path")
         if path is None:
             raise InputFailure(f"render source {normalized} requires a path")
@@ -950,6 +978,7 @@ def _worker_render_fields(request):
         _worker_optional_path(request, "output"),
         _worker_optional_string(request, "expect_missing", "expect-missing"),
         _parse_bindings(_worker_binding_pairs(request.get("bindings"))),
+        attachment,
     )
 
 
@@ -2269,11 +2298,12 @@ def _render_request(
     output=None,
     expect_missing=None,
     bindings=(),
+    attachment=None,
 ):
     """Build one render request; a fixture source never assembles.
 
     Shared by ``sim render`` and the worker's ``render`` handler so the two
-    cannot drift on the seven request fields or the fixture rule.
+    cannot drift on the eight request fields or the fixture rule.
     """
     from docassemble_simulator.render import FixtureSource, RenderRequest
 
@@ -2285,6 +2315,7 @@ def _render_request(
         output,
         expect_missing,
         tuple(bindings),
+        attachment,
     )
 
 
@@ -2319,6 +2350,7 @@ def cmd_render(args, root):
             args.template,
             _parse_bindings(args.bind),
         ),
+        attachment=args.attachment,
     )
     outcome = InterviewRenderer(root, _execution(args, root)).render(request)
     payload = (
@@ -2941,19 +2973,36 @@ def build_parser():
         "render",
         help="render a DOCX from one explicit state source",
         description=(
-            "Render DOCX only. PDF conversion is unavailable and no external "
-            "converter is invoked. Use --bind NAME=EXPRESSION for explicit "
-            "ephemeral template bindings; configured defaults come from "
+            "Render DOCX only, either directly from TEMPLATE or through a "
+            "compiled interview attachment (--attachment VAR, or automatic "
+            "attachment resolution for saved-session and snapshot sources). "
+            "PDF conversion is unavailable and no external converter is "
+            "invoked. Use --bind NAME=EXPRESSION for explicit ephemeral "
+            "template bindings; configured defaults come from "
             "[simulator.render_bindings]. See README § Rendering."
         ),
         epilog=(
             "The persistent worker accepts the same request as "
-            '{"operation":"render", ...}: template, source, path, bindings, '
-            "no_assemble, output, save_snapshot, and expect_missing. See README "
-            "§ Persistent journeys and the standard runner."
+            '{"operation":"render", ...}: template or attachment, source, '
+            "path, bindings, no_assemble, output, save_snapshot, and "
+            "expect_missing. See README § Persistent journeys and the "
+            "standard runner."
         ),
     )
-    render.add_argument("template")
+    render.add_argument(
+        "template",
+        nargs="?",
+        help="DOCX template filename under data/templates (omit when using --attachment)",
+    )
+    render.add_argument(
+        "--attachment",
+        metavar="VAR",
+        help=(
+            "assemble one compiled attachment variable through docassemble's "
+            "attachment machinery (mutually exclusive with TEMPLATE; cannot be "
+            "used with --fixture)"
+        ),
+    )
     render_source = render.add_mutually_exclusive_group()
     render_source.add_argument("--fresh", action="store_true")
     render_source.add_argument("--snapshot", dest="snapshot_source")

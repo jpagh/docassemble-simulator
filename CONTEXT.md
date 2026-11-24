@@ -23,4 +23,8 @@
 - **Snapshot**: A versioned, interview-specific namespace capture used as an explicit render source; it is not a saved session.
 - **Artifact**: A successfully rendered DOCX written to an explicit target path.
 - **Published attachment**: A generated local interview file exposed to the user as a logical download result; intermediate rendering files are not published attachments.
+- **Attachment entry**: One compiled `attachments:` list item on a `Question` (its `variable name` template, `docx template file`, `fields`, `field code`, `redact`, and index within the block).
+- **Attachment target**: An attachment entry plus the concrete `x` expression and index values that turn its variable-name template into one interview variable.
+- **Attachment candidate**: An attachment target that the render namespace already holds as an assembled `DAFileCollection`, identified by the collection's `instanceName`.
+- **Attachment render**: A render that assembles one attachment target through docassemble's attachment machinery instead of evaluating the raw template.
 - **PDF skip**: The simulator policy that satisfies a generated-PDF request for a DOCX-backed document with that document's DOCX rendering instead of failing the flow; it never fabricates a PDF, never invokes a converter, and records a `pdf-skip` diagnostic.

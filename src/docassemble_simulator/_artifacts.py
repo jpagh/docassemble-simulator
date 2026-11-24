@@ -253,6 +253,46 @@ def validate_docx_structure(path: str | Path) -> list[Diagnostic]:
     return diagnostics
 
 
+def docx_paragraph_count(path: str | Path) -> int:
+    """Count WordprocessingML paragraphs in ``word/document.xml``."""
+    paragraph_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
+    try:
+        with ZipFile(path) as archive:
+            root = ET.fromstring(archive.read("word/document.xml"))
+    except (BadZipFile, KeyError, OSError, ET.ParseError):
+        return 0
+    return sum(1 for _ in root.iter(paragraph_tag))
+
+
+def publish_attachment(
+    path: str | Path, filename: str | None = None
+) -> PublishedAttachment:
+    """Record one local rendered artifact in the active published-attachment list."""
+    resolved = Path(path).resolve()
+    display_name = Path(filename).name if filename else resolved.name
+    suffix = Path(display_name).suffix or resolved.suffix
+    extension = suffix.lstrip(".").lower()
+    mimetype = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
+    uri = resolved.as_uri()
+    diagnostics = (
+        tuple(validate_docx_structure(resolved)) if extension == "docx" else ()
+    )
+    structure = "n/a" if extension != "docx" else ("warning" if diagnostics else "ok")
+    attachment = PublishedAttachment(
+        display_name,
+        extension,
+        mimetype,
+        resolved,
+        uri,
+        diagnostics,
+        structure,
+    )
+    published = _PUBLISHED.get()
+    if published is not None and all(item.path != resolved for item in published):
+        published.append(attachment)
+    return attachment
+
+
 def activate_file_registry(directory: str | Path) -> LocalFileRegistry:
     registry = LocalFileRegistry(directory)
     _ACTIVE_REGISTRY.set(registry)
@@ -269,5 +309,7 @@ __all__ = [
     "activate_file_registry",
     "active_file_registry",
     "capture_published_attachments",
+    "docx_paragraph_count",
+    "publish_attachment",
     "validate_docx_structure",
 ]

@@ -228,6 +228,15 @@ class _RenderPreparation:
     protected: tuple[ProtectedPath, ...] = ()
 
 
+@dataclass(frozen=True)
+class _RenderContext:
+    """Package-private live render context passed only to render's callback."""
+
+    namespace: dict[str, Any]
+    interview: Any
+    status: Any
+
+
 Operation = (
     Start
     | Status
@@ -1224,7 +1233,7 @@ class InterviewExecution:
     def _with_render_state(
         self,
         preparation: _RenderPreparation,
-        action: Callable[[dict[str, Any]], Any],
+        action: Callable[[_RenderContext], Any],
     ) -> ExecutionOutcome:
         """Invoke render's private action while prepared context remains active."""
         with (
@@ -1242,7 +1251,7 @@ class InterviewExecution:
     def _with_render_state_impl(
         self,
         preparation: _RenderPreparation,
-        action: Callable[[dict[str, Any]], Any],
+        action: Callable[[_RenderContext], Any],
     ) -> ExecutionOutcome:
         try:
             protected = preparation.protected + (
@@ -1310,7 +1319,9 @@ class InterviewExecution:
                         )
                 if preparation.save_snapshot:
                     self._store.save_snapshot(preparation.save_snapshot, namespace)
-                return ExecutionOutcome(True, action(namespace))
+                return ExecutionOutcome(
+                    True, action(_RenderContext(namespace, interview, status))
+                )
         except AssemblyLineCompatibilityError as error:
             return _compatibility_failure_outcome(error)
         except ExecutionFailure as error:

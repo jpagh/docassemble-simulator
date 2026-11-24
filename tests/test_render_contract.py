@@ -445,3 +445,201 @@ def test_render_failure_identifies_the_requested_template(
         "error_type": "UndefinedError",
         "paragraph": 7,
     }
+
+
+def test_attachment_render_validates_mutual_exclusion_and_fixture_rejection(tmp_path):
+    execution = _workspace(tmp_path)
+    fixture = tmp_path / "fixture.py"
+    fixture.write_text("x = 1\n")
+
+    both = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest("form.docx", SavedSessionSource(), False, attachment="doc")
+    )
+    assert both.ok is False
+    assert both.error.kind == "input"
+    assert "not both" in both.error.message
+
+    neither = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(None, SavedSessionSource(), False)
+    )
+    assert neither.ok is False
+    assert neither.error.kind == "input"
+
+    with_fixture = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(None, FixtureSource(fixture), False, attachment="doc")
+    )
+    assert with_fixture.ok is False
+    assert with_fixture.error.kind == "input"
+    assert "fixture" in with_fixture.error.message
+
+
+def test_attachment_render_protects_template_and_session_destinations(tmp_path):
+    execution = _workspace(tmp_path)
+    template_dest = tmp_path / "docassemble" / "pkg" / "data" / "templates" / "out.docx"
+
+    outcome = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(
+            None,
+            FreshSource(),
+            False,
+            output=template_dest,
+            attachment="doc",
+        )
+    )
+
+    assert outcome.ok is False
+    assert outcome.error.kind == "input"
+    assert "template directories" in outcome.error.message
+    assert not template_dest.exists()
+
+
+def test_attachment_render_maps_expect_missing_alias_and_publishes_artifact(
+    tmp_path, monkeypatch, da_stubs
+):
+    from zipfile import ZipFile
+
+    _install_fake_runtime(monkeypatch)
+    source_docx = tmp_path / "numbered.docx"
+    with ZipFile(source_docx, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>",
+        )
+
+    class FakeFileRef:
+        is_code = False
+
+        def original_reference(self):
+            return "form.docx"
+
+    class FakeDocxFile:
+        filename = "Rendered_Form.docx"
+
+        def path(self):
+            return str(source_docx)
+
+    class FakeCollection:
+        def __init__(self, instance_name):
+            self.instanceName = instance_name
+            self.docx = FakeDocxFile()
+
+    class FakeStage:
+        def __init__(self):
+            self.instanceName = "documents['stage']"
+
+    class FakeQuestion:
+        name = "q_attach"
+        is_generic = True
+
+        def __init__(self, *, fail_missing: bool = False):
+            self.fail_missing = fail_missing
+            self.attachments = [
+                {
+                    "variable_name": "x.original[0].doc",
+                    "question_name": "q_attach",
+                    "indexno": 0,
+                    "options": {"docx_template_file": [FakeFileRef()]},
+                }
+            ]
+
+        def prepare_attachment(self, attachment, user_dict):
+            return {"field_data": {"S": user_dict["x"]}, "formats_to_use": ["docx"]}
+
+        def finalize_attachment(self, attachment, prepared, user_dict):
+            if self.fail_missing:
+                err = RuntimeError("'documents['stage'].notary_block_yn' is undefined")
+                err.filename = "form.docx"
+                raise err
+            user_dict["documents"]["stage"].original[0].doc = FakeCollection(
+                "documents['stage'].original[0].doc"
+            )
+            return {
+                "formats_to_use": ["docx"],
+                "file": {"docx": 1},
+                "filename": "Rendered_Form",
+            }
+
+    def make_interview(fail_missing: bool):
+        question = FakeQuestion(fail_missing=fail_missing)
+
+        class FakeAttachInterview:
+            source = SimpleNamespace(path="main.yml", package="docassemble.pkg")
+            all_questions = (question,)
+
+            def populate_non_pickleable(self, namespace):
+                stage = FakeStage()
+                stage.original = [SimpleNamespace()]
+                namespace["documents"] = {"stage": stage}
+
+        return FakeAttachInterview()
+
+    cache = types.ModuleType("docassemble.base.interview_cache")
+    cache.get_interview = lambda identity: make_interview(fail_missing=False)
+    monkeypatch.setitem(sys.modules, "docassemble.base.interview_cache", cache)
+
+    execution = _workspace(tmp_path)
+    output_path = tmp_path / "exported.docx"
+    outcome = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(
+            None,
+            FreshSource(),
+            False,
+            output=output_path,
+            attachment="documents['stage'].original[0].doc",
+        )
+    )
+
+    assert outcome.ok is True
+    assert outcome.result == RenderResult(
+        "form.docx",
+        1,
+        output_path.resolve(),
+        attachment="documents['stage'].original[0].doc",
+    )
+    assert output_path.is_file()
+    assert len(outcome.attachments) == 1
+    assert outcome.attachments[0].filename == "Rendered_Form.docx"
+    assert outcome.attachments[0].path == output_path.resolve()
+
+    # Now verify --expect-missing alias matching (S.notary_block_yn -> documents['stage'].notary_block_yn)
+    cache.get_interview = lambda identity: make_interview(fail_missing=True)
+    matched = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(
+            None,
+            FreshSource(),
+            False,
+            expect_missing="S.notary_block_yn",
+            attachment="documents['stage'].original[0].doc",
+        )
+    )
+    assert matched.ok is True
+    assert matched.result == RenderResult(
+        "form.docx",
+        0,
+        None,
+        attachment="documents['stage'].original[0].doc",
+    )
+
+    mismatched = InterviewRenderer(tmp_path, execution).render(
+        RenderRequest(
+            None,
+            FreshSource(),
+            False,
+            expect_missing="S.other_flag",
+            attachment="documents['stage'].original[0].doc",
+        )
+    )
+    assert mismatched.ok is False
+    assert mismatched.error.kind == "render"
+    assert mismatched.error.details["template"] == "form.docx"
+    assert mismatched.error.details["paragraph"] is None
+    assert (
+        mismatched.error.details["sought_variable"]
+        == "documents['stage'].notary_block_yn"
+    )
+    assert mismatched.error.details["expected_missing"] == "S.other_flag"
+    assert (
+        mismatched.error.details["resolved_expected_missing"]
+        == "documents['stage'].other_flag"
+    )

@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shutil
 import tempfile
 import traceback
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
+from docassemble_simulator._artifacts import publish_attachment
+from docassemble_simulator._attachments import (
+    AttachmentInputError,
+    AttachmentTarget,
+    assemble_attachment,
+    enumerate_entries,
+    resolve_automatic_target,
+    resolve_expect_missing_alias,
+    resolve_explicit_target,
+)
 from docassemble_simulator._files import (
     ProtectedDirectory,
     ProtectedPath,
     atomic_replace,
 )
 from docassemble_simulator._outcomes import ErrorKind, Failure, Outcome
-from docassemble_simulator._runtime import _is_missing_module
+from docassemble_simulator._runtime import PDFConversionUnavailable, _is_missing_module
 from docassemble_simulator.execution import (
     FixtureSource,
     FreshSource,
@@ -271,6 +285,17 @@ def write_artifact(
     )
 
 
+def copy_artifact(source: str | Path, output: str | Path) -> Path:
+    """Copy a rendered docx atomically to an exact target path."""
+    source_path = Path(source).resolve()
+    target = Path(output).resolve()
+    return atomic_replace(
+        target,
+        lambda temporary: shutil.copyfile(source_path, temporary),
+        lock_destination=True,
+    )
+
+
 def paragraph_count(docx_template) -> int:
     """Return the count recorded during preparation."""
     return int(getattr(docx_template, "_dasimulator_paragraphs", 0))
@@ -278,13 +303,14 @@ def paragraph_count(docx_template) -> int:
 
 @dataclass(frozen=True)
 class RenderRequest:
-    template: str
+    template: str | None
     source: RenderSource
     assemble: bool
     save_snapshot: Path | None = None
     output: Path | None = None
     expect_missing: str | None = None
     bindings: tuple[tuple[str, str], ...] = ()
+    attachment: str | None = None
 
 
 RenderFailure = Failure
@@ -296,6 +322,7 @@ class RenderResult:
     template: str
     paragraphs: int
     artifact: Path | None = None
+    attachment: str | None = None
 
 
 def _apply_bindings(
@@ -332,18 +359,49 @@ class InterviewRenderer:
     def render(self, request: RenderRequest):
         from docassemble_simulator.execution import _RenderPreparation
 
+        template = (
+            request.template.strip()
+            if isinstance(request.template, str) and request.template.strip()
+            else None
+        )
+        attachment = (
+            request.attachment.strip()
+            if isinstance(request.attachment, str) and request.attachment.strip()
+            else None
+        )
+        if template is not None and attachment is not None:
+            return _render_failure(
+                "input",
+                "specify either TEMPLATE or --attachment, not both",
+            )
+        if template is None and attachment is None:
+            return _render_failure(
+                "input",
+                "specify either TEMPLATE or --attachment",
+            )
+
         if isinstance(request.source, FixtureSource):
+            if attachment is not None:
+                return _render_failure(
+                    "input",
+                    "fixture rendering cannot assemble attachments; omit --attachment "
+                    "or use a saved-session, snapshot, or fresh source",
+                )
             if request.assemble:
                 return _render_failure("input", "fixture rendering cannot assemble")
             if not request.source.path.is_file():
                 return _render_failure(
                     "input", f"fixture script not found: {request.source.path}"
                 )
-        try:
-            template_path = find_template(self.root, request.template)
-        except TemplateNotFoundError as error:
-            return _render_failure("input", str(error))
-        protected = [ProtectedPath(template_path, "a template or render input")]
+
+        template_path = None
+        protected: list[ProtectedPath | ProtectedDirectory] = []
+        if template is not None:
+            try:
+                template_path = find_template(self.root, template)
+            except TemplateNotFoundError as error:
+                return _render_failure("input", str(error))
+            protected.append(ProtectedPath(template_path, "a template or render input"))
         if isinstance(request.source, (FixtureSource, SnapshotSource)):
             protected.append(
                 ProtectedPath(
@@ -356,69 +414,60 @@ class InterviewRenderer:
             for directory in _template_directories(self.root)
         )
 
-        def action(namespace):
-            prepared = None
+        def action(context):
+            namespace = context.namespace
+            interview = context.interview
             try:
                 _apply_bindings(namespace, request.bindings)
-                prepared = prepare_docx_template(template_path)
-                rendered = render_template(
-                    prepared, namespace, template=request.template
-                )
-                if request.expect_missing:
-                    raise RenderExpectationError(
-                        f"expected missing variable {request.expect_missing!r}, but render succeeded"
-                    )
-                artifact = (
-                    write_artifact(rendered, request.output) if request.output else None
-                )
-                return RenderOutcome(
-                    True,
-                    RenderResult(
-                        request.template,
-                        paragraph_count(rendered),
-                        artifact,
-                    ),
-                )
-            except RenderError as error:
-                if request.expect_missing and missing_error_matches(
-                    error, request.expect_missing
-                ):
-                    return RenderOutcome(
-                        True,
-                        RenderResult(
-                            request.template,
-                            paragraph_count(prepared),
-                        ),
-                    )
-                details = {
-                    "template": _attributed_template(
-                        self.root, error, request.template
-                    ),
-                    "error_type": error.error_type,
-                    "paragraph": error.paragraph,
-                }
-                if error.render_pass is not None:
-                    details["render_pass"] = error.render_pass
-                return RenderOutcome(
-                    False,
-                    error=RenderFailure(ErrorKind.RENDER, str(error), details),
-                )
-            except (RenderExpectationError, OSError, RenderBindingError) as error:
-                kind = (
-                    ErrorKind.INPUT
-                    if isinstance(error, RenderBindingError)
-                    else ErrorKind.RENDER
-                )
-                details = {
-                    "template": request.template,
+            except RenderBindingError as error:
+                details: dict[str, Any] = {
                     "error_type": type(error).__name__,
+                    "binding": error.name,
                 }
-                if isinstance(error, RenderBindingError):
-                    details["binding"] = error.name
+                if template is not None:
+                    details["template"] = template
+                if attachment is not None:
+                    details["attachment"] = attachment
                 return RenderOutcome(
                     False,
-                    error=RenderFailure(kind, str(error), details),
+                    error=RenderFailure(ErrorKind.INPUT, str(error), details),
                 )
+
+            if attachment is not None:
+                try:
+                    entries = enumerate_entries(interview)
+                    target = resolve_explicit_target(entries, attachment)
+                except AttachmentInputError as error:
+                    return RenderOutcome(
+                        False,
+                        error=RenderFailure(ErrorKind.INPUT, str(error), error.details),
+                    )
+                return self._render_attachment(
+                    namespace,
+                    target,
+                    request,
+                    requested_template=None,
+                )
+
+            assert template is not None and template_path is not None
+            if isinstance(request.source, (SavedSessionSource, SnapshotSource)):
+                try:
+                    entries = enumerate_entries(interview)
+                    auto_target = resolve_automatic_target(entries, namespace, template)
+                except AttachmentInputError as error:
+                    return RenderOutcome(
+                        False,
+                        error=RenderFailure(ErrorKind.INPUT, str(error), error.details),
+                    )
+                if auto_target is not None:
+                    return self._render_attachment(
+                        namespace,
+                        auto_target,
+                        request,
+                        requested_template=template,
+                    )
+
+            return self._render_direct(namespace, template, template_path, request)
 
         destinations = tuple(
             path for path in (request.save_snapshot, request.output) if path is not None
@@ -452,6 +501,181 @@ class InterviewRenderer:
             )
         return _render_failure("fault", "render action returned an invalid outcome")
 
+    def _render_direct(
+        self,
+        namespace: dict[str, Any],
+        template: str,
+        template_path: Path,
+        request: RenderRequest,
+    ) -> RenderOutcome:
+        prepared = None
+        try:
+            prepared = prepare_docx_template(template_path)
+            rendered = render_template(prepared, namespace, template=template)
+            if request.expect_missing:
+                raise RenderExpectationError(
+                    f"expected missing variable {request.expect_missing!r}, "
+                    "but render succeeded"
+                )
+            artifact = (
+                write_artifact(rendered, request.output) if request.output else None
+            )
+            return RenderOutcome(
+                True,
+                RenderResult(
+                    template,
+                    paragraph_count(rendered),
+                    artifact,
+                ),
+            )
+        except RenderError as error:
+            if request.expect_missing and missing_error_matches(
+                error, request.expect_missing
+            ):
+                return RenderOutcome(
+                    True,
+                    RenderResult(
+                        template,
+                        paragraph_count(prepared),
+                    ),
+                )
+            details = {
+                "template": _attributed_template(self.root, error, template),
+                "error_type": error.error_type,
+                "paragraph": error.paragraph,
+            }
+            if error.render_pass is not None:
+                details["render_pass"] = error.render_pass
+            return RenderOutcome(
+                False,
+                error=RenderFailure(ErrorKind.RENDER, str(error), details),
+            )
+        except (RenderExpectationError, OSError) as error:
+            details = {
+                "template": template,
+                "error_type": type(error).__name__,
+            }
+            return RenderOutcome(
+                False,
+                error=RenderFailure(ErrorKind.RENDER, str(error), details),
+            )
+
+    def _render_attachment(
+        self,
+        namespace: dict[str, Any],
+        target: AttachmentTarget,
+        request: RenderRequest,
+        *,
+        requested_template: str | None,
+    ) -> RenderOutcome:
+        prepared_bindings: dict[str, Any] = {}
+        state: dict[str, Any] = {"canonical": target.variable}
+        fallback_template = (
+            requested_template or target.entry.first_template or target.variable
+        )
+        try:
+            assembly = assemble_attachment(
+                namespace,
+                target,
+                prepared_bindings=prepared_bindings,
+                state=state,
+            )
+            if request.expect_missing:
+                raise RenderExpectationError(
+                    f"expected missing variable {request.expect_missing!r}, "
+                    "but render succeeded"
+                )
+            if request.output is not None:
+                artifact = copy_artifact(assembly.docx_path, request.output)
+                publish_attachment(artifact, assembly.filename)
+            else:
+                artifact = None
+                publish_attachment(assembly.docx_path, assembly.filename)
+            result_template = requested_template or assembly.template
+            return RenderOutcome(
+                True,
+                RenderResult(
+                    result_template,
+                    assembly.paragraphs,
+                    artifact,
+                    attachment=assembly.canonical_variable,
+                ),
+            )
+        except AttachmentInputError as error:
+            return RenderOutcome(
+                False,
+                error=RenderFailure(ErrorKind.INPUT, str(error), error.details),
+            )
+        except PDFConversionUnavailable as error:
+            return RenderOutcome(
+                False,
+                error=RenderFailure(
+                    ErrorKind.PDF_UNAVAILABLE,
+                    str(error),
+                    {
+                        "error_type": type(error).__name__,
+                        "attachment": state.get("canonical") or target.variable,
+                    },
+                ),
+            )
+        except (RenderExpectationError, OSError) as error:
+            return RenderOutcome(
+                False,
+                error=RenderFailure(
+                    ErrorKind.RENDER,
+                    str(error),
+                    {
+                        "template": fallback_template,
+                        "error_type": type(error).__name__,
+                    },
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - attachment assembly may raise any template/runtime error
+            error_type = type(error).__name__
+            message = str(error).strip() or error_type
+            paragraph = _exception_line(error)
+            sought_variable = _extract_sought_variable(error)
+            attributed = _attachment_attributed_template(
+                self.root, error, fallback_template
+            )
+            resolved_alias = (
+                resolve_expect_missing_alias(
+                    request.expect_missing, prepared_bindings, namespace
+                )
+                if request.expect_missing
+                else None
+            )
+            if request.expect_missing and _attachment_missing_matches(
+                message,
+                sought_variable,
+                request.expect_missing,
+                resolved_alias,
+            ):
+                return RenderOutcome(
+                    True,
+                    RenderResult(
+                        fallback_template,
+                        0,
+                        None,
+                        attachment=state.get("canonical") or target.variable,
+                    ),
+                )
+            details: dict[str, Any] = {
+                "template": attributed,
+                "error_type": error_type,
+                "paragraph": paragraph,
+            }
+            if sought_variable is not None:
+                details["sought_variable"] = sought_variable
+            if request.expect_missing:
+                details["expected_missing"] = request.expect_missing
+                if resolved_alias is not None:
+                    details["resolved_expected_missing"] = resolved_alias
+            return RenderOutcome(
+                False,
+                error=RenderFailure(ErrorKind.RENDER, message, details),
+            )
+
 
 def _render_failure(kind: ErrorKind | str, message: str) -> RenderOutcome:
     return RenderOutcome(False, error=RenderFailure(ErrorKind(kind), message, {}))
@@ -478,6 +702,76 @@ def _attributed_template(root: Path, error: RenderError, requested: str) -> str:
     ):
         return error.template
     return requested
+
+
+def _attachment_attributed_template(
+    root: Path, error: BaseException, fallback: str
+) -> str:
+    """Attribute an attachment render failure to a DOCX basename when reliable."""
+    filename = _exception_template(error)
+    if filename is not None:
+        candidate = Path(filename).expanduser()
+        template_dirs = _template_directories(root)
+        if candidate.is_file():
+            resolved = candidate.resolve()
+            if any(resolved.is_relative_to(directory) for directory in template_dirs):
+                return resolved.name
+        else:
+            # docassemble sets TemplateError.filename to comma-joined basenames.
+            first = filename.split(",", 1)[0].strip()
+            if first:
+                for directory in template_dirs:
+                    if (directory / first).is_file():
+                        return Path(first).name
+    return Path(fallback).name if fallback.endswith(".docx") else fallback
+
+
+def _extract_sought_variable(error: BaseException) -> str | None:
+    """Extract the missing variable or attribute name from a template/DA error."""
+    variable = getattr(error, "variable", None)
+    if isinstance(variable, str) and variable.strip():
+        return variable.strip()
+    message = str(error)
+    match = re.search(
+        r"'(.*)' (?:is not defined|referenced before assignment|is undefined|where it is not)",
+        message,
+    )
+    if match:
+        return match.group(1)
+    attr_match = re.search(
+        r"object '([^']+)' has no attribute '([^']+)'",
+        message,
+    )
+    if attr_match:
+        return f"{attr_match.group(1)}.{attr_match.group(2)}"
+    try:
+        from docassemble.base.parse import extract_missing_name
+
+        extracted = extract_missing_name(error)
+        if isinstance(extracted, str) and extracted.strip():
+            return extracted.strip()
+    except Exception as exc:  # noqa: BLE001 - optional docassemble helper
+        logger.debug("extract_missing_name failed: %s", exc)
+    return None
+
+
+def _attachment_missing_matches(
+    message: str,
+    sought_variable: str | None,
+    expected: str,
+    resolved_alias: str | None,
+) -> bool:
+    """Whether an attachment render error satisfies ``--expect-missing``."""
+    candidates = [expected]
+    if resolved_alias and resolved_alias != expected:
+        candidates.append(resolved_alias)
+    render_error = RenderError(message)
+    for candidate in candidates:
+        if missing_error_matches(render_error, candidate):
+            return True
+        if sought_variable is not None and sought_variable == candidate:
+            return True
+    return False
 
 
 def _exception_template(error: BaseException) -> str | None:

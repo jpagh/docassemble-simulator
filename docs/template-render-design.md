@@ -1,6 +1,6 @@
 # Template Render Command — Design
 
-Status: implemented — v1 shipped as the render command; §9 remains explicit future work.
+Status: implemented — v1 shipped as the render command; attachment-aware DOCX rendering from §9 is designed and implemented per `docs/attachment-render-plan.md` and ADR-0019.
 Date: 2026-08-24
 Scope: add a `render` command to `docassemble-simulator` that renders a converted `.docx`
 template through the real docxtpl + docassemble Jinja pipeline, making the simulator a
@@ -265,11 +265,13 @@ Existing test suite must stay green; no existing command's behavior changes.
 
 ## 9. Future work (explicitly out of v1)
 
-- Full attachment assembly: run the package's own attachments builder / `generate_attachments`
-  after `kind: "finished"` so multi-attachment bundles, redacted pairs, CRIFS /
-  `include_docx_template` prepends, and docxcompose merges produce byte-identical
-  server outputs. This is the “server's terminal phase” and the eventual superset of both
-  `template-render-harness.py` and `probe-render-session.py`.
+- Single-entry attachment-aware DOCX rendering (explicit `--attachment VAR` and
+  automatic template-to-attachment resolution for saved sessions and snapshots,
+  honoring `field code:`, `fields:`, `redact:`, generic `x`, indexed `[i]`,
+  `include_docx_template`, and `current_context().attachment`) is specified in
+  `docs/attachment-render-plan.md` and recorded in
+  `docs/adr/0019-attachment-aware-render.md`. Whole-block multi-attachment
+  generation (`--attachment-all`) and `attachment code:` bundles remain future work.
 - Doc-key resolution (`render --dockey family_parenting_plan`) mapping to the attachment's
   template filename from the interview definitions rather than the filename convention.
 - Fillable-PDF (`pdf template file`) rendering, which uses different machinery.

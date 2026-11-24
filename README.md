@@ -386,23 +386,25 @@ re-launching the interpreter:
 ```sh
 printf '%s\n' \
   '{"operation":"render","template":"form.docx","source":"saved","no_assemble":true,"output":"artifact.docx"}' \
+  '{"operation":"render","attachment":"documents[\x27stage\x27].original[0].petition","output":"petition.docx"}' \
   '{"operation":"render","template":"form.docx","source":"fresh","no_assemble":true}' \
   '{"operation":"shutdown"}' \
   | sim --root ./my-project --interview docassemble.my_project:data/questions/main.yml run
 ```
 
-The `render` request mirrors `sim render`: `template` (required), `source`
-(`saved` by default, or `fresh`, `fixture` + `path`, `snapshot` + `path`),
+The `render` request mirrors `sim render`: specify exactly one of `template` or
+`attachment`, plus `source` (`saved` by default, or `fresh`, `fixture` + `path`,
+`snapshot` + `path`; `fixture` cannot be combined with `attachment`),
 `no_assemble`, `output`, `save_snapshot`, `expect_missing`, and `bindings` (an
 object of `NAME: EXPRESSION`, or an array of `NAME=EXPRESSION` strings). The
 per-request `timeout` applies as it does to every operation, and a `fixture`
 source never assembles, exactly as the `--fixture` flag does. For the same
 project and inputs, the response `result` is the `sim render --json` result
-(same artifact path and shape), with `diagnostics` and `attachments`
-forwarded. A malformed request or a render failure arrives as a typed
-`input`/`render` error, never a raw exception or protocol noise. Rendering
-reads the worker's saved session and never mutates it beyond what the
-`sim render` source policy already does.
+(same artifact path, `attachment`, and shape), with `diagnostics` and
+`attachments` forwarded. A malformed request or a render failure arrives as a
+typed `input`/`render`/`pdf-unavailable` error, never a raw exception or
+protocol noise. Rendering reads the worker's saved session and never mutates it
+beyond what the `sim render` source policy already does.
 
 A worker also serves the read-only catalog and project inspection commands, so
 a warm journey can list, check, and explain its interview without a fresh
@@ -717,6 +719,7 @@ failures follow the same envelope when `--json` is present and exit `1`; normal
 
 ```sh
 docassemble-simulator render form.docx
+docassemble-simulator render --attachment "documents['stage'].original[0].petition" --output artifacts/petition.docx
 docassemble-simulator render form.docx --fresh
 docassemble-simulator render form.docx --snapshot state.pkl
 docassemble-simulator render form.docx --fixture fixture.py
@@ -728,23 +731,115 @@ docassemble-simulator render form.docx --bind client_name=clients[0].name
 
 A render request has orthogonal concerns:
 
+- **target:** specify exactly one of positional `TEMPLATE` (under
+  `data/templates/`) or `--attachment VAR` (a compiled `attachments:` variable);
+  passing both or neither is an `input` error;
 - **source:** saved session (default), `--fresh`, `--snapshot PATH`, or
-  `--fixture PATH`; choose exactly one;
+  `--fixture PATH`; choose exactly one (`--fixture` cannot be combined with
+  `--attachment`);
 - **assembly:** enabled for saved, fresh, and snapshot sources unless
-  `--no-assemble`; fixtures never assemble;
+  `--no-assemble`; fixtures never assemble (`--no-assemble` skips the interview
+  assemble pass while still running targeted attachment assembly);
 - **snapshot effect:** `--save-snapshot PATH` writes prepared state atomically
   before template evaluation;
 - **artifact effect:** `--output PATH` names the exact DOCX target and is written
   atomically only after successful evaluation and expectations;
 - **expectation:** `--expect-missing VARIABLE` makes that strict undefined error
-  the expected result;
+  the expected result (in attachment mode it matches both the literal operand
+  and the alias resolved through the attachment's `field code:`/`fields:`
+  bindings, such as `S.notary_block_yn` → `documents['petition'].notary_block_yn`);
 - **bindings:** `--bind NAME=EXPRESSION` (repeatable) evaluates an expression
-  in the ephemeral render namespace. Configured defaults come from
-  `[simulator.render_bindings]`, with `[simulator.render_bindings."form.docx"]`
-  overriding them for one template; command-line bindings win over both. The
-  legacy top-level `[render-bindings]` spelling supplies the whole table
-  instead of `[simulator.render_bindings]`, so the two do not merge. Bindings
-  are never saved.
+  in the ephemeral render namespace before assembly/evaluation. Configured
+  defaults come from `[simulator.render_bindings]`, with
+  `[simulator.render_bindings."form.docx"]` overriding them only when `TEMPLATE`
+  is given; command-line bindings win over both. The legacy top-level
+  `[render-bindings]` spelling supplies the whole table instead of
+  `[simulator.render_bindings]`, so the two do not merge. Bindings are never
+  saved.
+
+### Attachment-aware DOCX rendering
+
+When `--attachment VAR` is passed — or when `render TEMPLATE` targets a saved
+session or snapshot and `TEMPLATE` statically matches a compiled `attachments:`
+entry — the simulator renders through docassemble's own attachment machinery
+(`Question.prepare_attachment()` + `Question.finalize_attachment()`). That
+evaluates attachment-scoped `field code:`, `fields:`, `redact:`, generic `x`,
+index variables (`[i]`…`[n]`), `include_docx_template`, and
+`current_context().attachment` without manual `--bind` reconstruction.
+
+Automatic resolution rules for `render TEMPLATE` (saved-session and snapshot
+sources only; fixture and fresh `TEMPLATE` renders stay on the direct path):
+
+- **0 matching `attachments:` entries** (e.g. a standalone partial or
+  `attachment code:` template) → direct render path unchanged.
+- **Exactly 1 assembled candidate** in the session namespace → attachment render
+  of that variable.
+- **0 assembled candidates, 1 concrete entry** (no generic `x` or `[i]`
+  placeholders) → attachment render of that concrete variable.
+- **>1 assembled candidates** (e.g. original and redacted twins, or multiple
+  stages) → `input` error listing `details.candidates` and prompting for
+  `--attachment`.
+- **0 assembled candidates and generic/indexed entries** (e.g. `--no-assemble`
+  on an unfinished session) → `input` error explaining that the session has no
+  assembled instance and suggesting `--attachment`.
+
+Example `--json` responses:
+
+```json
+{"ok": true, "command": "render",
+ "result": {"template": "petition.docx",
+            "paragraphs": 14,
+            "artifact": "/tmp/petition-orig.docx",
+            "attachment": "documents['petition'].original[0].petition"},
+ "attachments": [{"filename": "Petition_Original.docx", "extension": "docx", "structure": "ok"}]}
+```
+
+```json
+{"ok": false, "command": "render",
+ "error": {"kind": "input",
+           "message": "petition.docx matches 2 attachment variables; pass --attachment",
+           "details": {"template": "petition.docx",
+                       "candidates": ["documents['petition'].original[0].petition",
+                                      "documents['petition'].redacted[0].petition"]}}}
+```
+
+```json
+{"ok": false, "command": "render",
+ "error": {"kind": "render",
+           "message": "'documents['petition'].notary_block_yn' is undefined",
+           "details": {"template": "petition.docx",
+                       "error_type": "UndefinedError",
+                       "sought_variable": "documents['petition'].notary_block_yn",
+                       "expected_missing": "S.other_flag",
+                       "resolved_expected_missing": "documents['petition'].other_flag"}}}
+```
+
+Attachment-render boundaries and documented deviations (see ADR-0019):
+
+- **DOCX only:** `valid formats` containing `pdf` renders DOCX only without
+  invoking a converter; PDF-only attachments report `pdf-unavailable` (exit 2).
+  `manual` / `manual code`, fillable PDF (`pdf template file`), `raw`, and
+  non-DOCX attachments are rejected as `input` errors before assembly.
+- **Single-entry assembly only:** only the targeted attachment entry is
+  assembled; sibling entries in the same declaring block are not finalized (any
+  already-cached siblings in the session are reused untouched).
+- **No asking semantics:** question-level `exec_setup` (`undefine`, `need`,
+  `reconsider`) is skipped; `prepare_attachment` still evaluates authored
+  `code`, `fields`, `field code`, and `valid formats` inside the ephemeral
+  namespace.
+- **Fresh re-render & numbered files:** the target variable is undefined in the
+  ephemeral namespace before assembly so `interview.cache_documents` never
+  returns a stale file after template edits. Each targeted render writes one
+  numbered DOCX file under `.simulator/files/` and publishes one entry in
+  `attachments` (never mutating the saved session).
+- **Error attribution:** on the docxtpl attachment path, `paragraph` is usually
+  unavailable (`null` / omitted in JSON) while `template` names the DOCX
+  basename (including subdocs when docassemble sets `filename`) and
+  `sought_variable` carries the missing attribute or variable. Nested attribute
+  failures (e.g. `S.cos.filer`) report the first missing attribute
+  (`documents[...].cos`), matching docassemble's `DAStrictUndefined` message.
+- **Non-static templates:** `docx template file: {code: ...}` cannot be matched
+  automatically by filename, but works with explicit `--attachment VAR`.
 
 Rendering never writes, replaces, or deletes a saved session. Fresh rendering is
 ephemeral. Snapshot payloads are versioned and interview-specific. Snapshot and

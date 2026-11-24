@@ -162,11 +162,69 @@ def test_worker_render_accepts_hyphenated_no_assemble(tmp_path, monkeypatch):
     assert captured[-1].assemble is False
 
 
+def test_worker_render_maps_attachment_request_and_omits_template_bindings(
+    tmp_path, monkeypatch
+):
+    artifact = tmp_path / "out.docx"
+    captured = _capture_render(
+        monkeypatch,
+        RenderOutcome(
+            True,
+            RenderResult(
+                "petition.docx",
+                14,
+                artifact,
+                attachment="documents['stage'].original[0].petition",
+            ),
+        ),
+    )
+    config = {
+        "simulator": {
+            "render_bindings": {
+                "global_val": "'ok'",
+                "petition.docx": {"per_template": "'skip'"},
+            }
+        }
+    }
+    worker = _worker(tmp_path, _render_handlers(_args(config)))
+
+    response = worker.handle(
+        {
+            "operation": "render",
+            "attachment": "documents['stage'].original[0].petition",
+            "output": str(artifact),
+        }
+    )
+
+    assert captured[-1] == RenderRequest(
+        None,
+        SavedSessionSource(),
+        True,
+        output=artifact.resolve(),
+        bindings=(("global_val", "'ok'"),),
+        attachment="documents['stage'].original[0].petition",
+    )
+    assert response["ok"] is True
+    assert response["result"] == {
+        "template": "petition.docx",
+        "paragraphs": 14,
+        "artifact": str(artifact),
+        "attachment": "documents['stage'].original[0].petition",
+    }
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
         ({"operation": "render"}, "template"),
         ({"template": "  "}, "template"),
+        ({"attachment": "  "}, "attachment"),
+        ({"attachment": 7}, "attachment"),
+        ({"template": "form.docx", "attachment": "doc"}, "not both"),
+        (
+            {"attachment": "doc", "source": "fixture", "path": "fixture.py"},
+            "fixture",
+        ),
         ({"template": "form.docx", "source": 7}, "source"),
         ({"template": "form.docx", "source": "bogus"}, "unknown render source"),
         ({"template": "form.docx", "source": "fixture"}, "fixture requires a path"),

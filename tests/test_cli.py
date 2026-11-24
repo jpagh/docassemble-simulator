@@ -610,6 +610,7 @@ def test_render_help_documents_fixture_bindings_and_worker_request_shape():
     assert "never assembles" in help_text
     assert "README" in help_text
     assert "render_bindings" in help_text
+    assert "--attachment" in help_text
     assert '"operation":"render"' in help_text
     assert "Persistent journeys" in help_text
 
@@ -718,6 +719,92 @@ def test_render_human_output_presents_typed_result_fields(
     assert cli.cmd_render(args, tmp_path) == 0
     output = capsys.readouterr().out
     assert output == "template: form.docx\nparagraphs: 4\n"
+
+
+def test_render_attachment_cli_maps_request_and_table_defaults(
+    monkeypatch, tmp_path, capsys
+):
+    from docassemble_simulator import render as render_module
+
+    captured = []
+    monkeypatch.setattr(cli, "_execution", lambda args, root: object())
+    monkeypatch.setattr(
+        render_module.InterviewRenderer,
+        "render",
+        lambda self, request: (
+            captured.append(request)
+            or render_module.RenderOutcome(
+                True,
+                render_module.RenderResult(
+                    "petition.docx",
+                    12,
+                    tmp_path / "out.docx",
+                    attachment="documents['stage'].original[0].petition",
+                ),
+            )
+        ),
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "render",
+            "--attachment",
+            "documents['stage'].original[0].petition",
+            "--output",
+            str(tmp_path / "out.docx"),
+            "--json",
+        ]
+    )
+    args._simulator_config = {
+        "simulator": {
+            "render_bindings": {
+                "shared": "'default'",
+                "petition.docx": {"only_template": "'ignored'"},
+            }
+        }
+    }
+
+    assert cli.cmd_render(args, tmp_path) == 0
+    assert captured[0].template is None
+    assert captured[0].attachment == "documents['stage'].original[0].petition"
+    assert captured[0].bindings == (("shared", "'default'"),)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "ok": True,
+        "command": "render",
+        "result": {
+            "template": "petition.docx",
+            "paragraphs": 12,
+            "artifact": str(tmp_path / "out.docx"),
+            "attachment": "documents['stage'].original[0].petition",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["render", "--json"], "TEMPLATE or --attachment"),
+        (
+            ["render", "form.docx", "--attachment", "doc", "--json"],
+            "not both",
+        ),
+        (
+            ["render", "--attachment", "doc", "--fixture", "fix.py", "--json"],
+            "fixture",
+        ),
+    ],
+)
+def test_render_cli_rejects_invalid_attachment_combinations(
+    monkeypatch, tmp_path, capsys, argv, message
+):
+    monkeypatch.setattr(cli, "_execution", lambda args, root: object())
+    args = cli.build_parser().parse_args(argv)
+
+    assert cli.cmd_render(args, tmp_path) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error"]["kind"] == "input"
+    assert message in payload["error"]["message"]
 
 
 def test_config_report_redacts_effective_and_shadowed_secrets_in_json(tmp_path, capsys):
