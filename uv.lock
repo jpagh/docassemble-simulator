@@ -4,19 +4,19 @@ requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.13.*' and sys_platform != 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.12.*' and sys_platform != 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version == '3.11.*' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
-    "python_full_version < '3.11' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
     "python_full_version >= '3.14' and sys_platform != 'win32' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.13.*' and sys_platform == 'win32' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.13.*' and sys_platform != 'win32' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.12.*' and sys_platform == 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.12.*' and sys_platform != 'win32' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.12.*' and sys_platform == 'win32' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.12.*' and sys_platform != 'win32' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version == '3.11.*' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version == '3.11.*' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
+    "python_full_version < '3.11' and extra != 'group-21-docassemble-simulator-da110' and extra == 'group-21-docassemble-simulator-da19'",
     "python_full_version < '3.11' and extra == 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
     "extra != 'group-21-docassemble-simulator-da110' and extra != 'group-21-docassemble-simulator-da19'",
 ]
@@ -1705,7 +1705,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/28/d7/b9ac913c71ea7704f
 
 [[package]]
 name = "docassemble-simulator"
-version = "26.11.1"
+version = "26.11.2"
 source = { editable = "." }
 dependencies = [
     { name = "esprima2" },
