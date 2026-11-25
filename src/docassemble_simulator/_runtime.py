@@ -90,7 +90,6 @@ def _file_metadata(reference, *, resolved_path: Path | None = None) -> dict:
 
 
 _BACKGROUND_ACTION_MODE = "foreground"
-_DIAGNOSTIC_LOGGING_INSTALLED = False
 _ACTIVE_ROOT: ContextVar[Path | None] = ContextVar(
     "docassemble_simulator_runtime_root", default=None
 )
@@ -997,32 +996,36 @@ def install_python_module_runner() -> None:
 
 
 def install_diagnostic_logging() -> None:
-    """Route expected lazy-seek logs through operation diagnostics, not stderr."""
-    global _DIAGNOSTIC_LOGGING_INSTALLED
-    if _DIAGNOSTIC_LOGGING_INSTALLED:
-        return
+    """Suppress expected docassemble noise logs from stderr.
+
+    Routes expected lazy-seek logs away from stderr while structured seek
+    diagnostics are being collected, and suppresses idempotent duplicate
+    ``include:`` skip notices emitted during diamond YAML compilation.
+    Idempotent per ``da_logger.the_logmessage`` via the wrapper marker.
+    """
     try:
         from docassemble.base import logger as da_logger
     except ImportError:
         return
     previous = da_logger.the_logmessage
     if getattr(previous, "_dasimulator_diagnostic_dispatch", False):
-        _DIAGNOSTIC_LOGGING_INSTALLED = True
         return
 
     def dispatch(message):
         from docassemble_simulator._diagnostics import (
             is_collecting,
+            is_duplicate_include_log,
             is_lazy_seek_log,
         )
 
+        if is_duplicate_include_log(message):
+            return None
         if is_collecting() and is_lazy_seek_log(message):
             return None
         return previous(message)
 
     dispatch._dasimulator_diagnostic_dispatch = True
     da_logger.set_logmessage(dispatch)
-    _DIAGNOSTIC_LOGGING_INSTALLED = True
 
 
 def _authored_file_path(
@@ -1448,6 +1451,25 @@ _LEGACY_DEFAULT_FIELDS = (
 )
 
 
+def _ignore_legacy_server_update(**kwargs):
+    """Keep simulator server bindings when a webapp module imports on 1.9.x.
+
+    Installed packages (for example AssemblyLine's interview list endpoint)
+    may import ``docassemble.webapp.server`` / ``backend`` on legacy runtimes
+    during preload or interview execution. Those modules call
+    ``docassemble.base.functions.update_server(...)`` at import time to attach
+    Flask/SQLAlchemy handlers, which would overwrite the simulator's local
+    server bindings and fail outside a Flask application context.
+    """
+    logger.debug(
+        "ignoring legacy update_server(...) after simulator binding: %s",
+        sorted(kwargs),
+    )
+
+
+_ignore_legacy_server_update._dasimulator_server_guard = True
+
+
 def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> None:
     """Install simulator bindings on docassemble 1.9's server object."""
     from docassemble.base import functions
@@ -1529,6 +1551,13 @@ def _register_legacy_runtime_bindings(bindings: _SimulatorRuntimeBindings) -> No
     # 1.9 dispatches background_action() through server.bg_action; point that
     # seam at the shared foreground fallback (ADR-0003, no Celery emulation).
     server.bg_action = _foreground_background_action
+    # Prevent subsequent imports of docassemble.webapp.backend/server (for
+    # example during package preloading) from replacing simulator server
+    # bindings with Flask/SQLAlchemy callbacks.
+    if hasattr(functions, "update_server") and not getattr(
+        functions.update_server, "_dasimulator_server_guard", False
+    ):
+        functions.update_server = _ignore_legacy_server_update
 
 
 def _modern_hooks_available() -> bool:

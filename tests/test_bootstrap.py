@@ -148,6 +148,105 @@ class TestRuntimeBindings:
         assert via_options == via_kwargs
         assert via_options.startswith("file://")
 
+    def test_legacy_update_server_cannot_clobber_simulator_bindings(self, monkeypatch):
+        """Importing webapp.backend on 1.9.x must not overwrite simulator server seams."""
+        functions, _ = _stub_legacy_server_modules(monkeypatch)
+
+        def real_update_server(**kwargs):
+            for key, value in kwargs.items():
+                setattr(functions.server, key, value)
+
+        functions.update_server = real_update_server
+
+        register_hooks()
+        expected_save = functions.server.save_numbered_file
+        expected_finder = functions.server.file_finder
+        expected_bg = functions.server.bg_action
+
+        def flask_save_numbered_file(*args, **kwargs):
+            raise RuntimeError("Working outside of application context.")
+
+        functions.update_server(
+            save_numbered_file=flask_save_numbered_file,
+            file_finder=flask_save_numbered_file,
+            bg_action=flask_save_numbered_file,
+            write_record=flask_save_numbered_file,
+        )
+
+        assert functions.server.save_numbered_file is expected_save
+        assert functions.server.file_finder is expected_finder
+        assert functions.server.bg_action is expected_bg
+        assert not hasattr(functions.server, "write_record")
+
+
+class TestDiagnosticLogging:
+    def test_suppresses_duplicate_include_and_collected_lazy_seek_logs(
+        self, monkeypatch
+    ):
+        from docassemble_simulator._diagnostics import (
+            capture_diagnostics,
+            is_duplicate_include_log,
+        )
+        from docassemble_simulator._runtime import install_diagnostic_logging
+
+        da, base = _docassemble_package()
+        da_logger = types.ModuleType("docassemble.base.logger")
+        emitted: list[str] = []
+        da_logger.the_logmessage = emitted.append
+
+        def set_logmessage(func):
+            da_logger.the_logmessage = func
+
+        da_logger.set_logmessage = set_logmessage
+        base.logger = da_logger
+        _install_modules(
+            monkeypatch,
+            {
+                "docassemble": da,
+                "docassemble.base": base,
+                "docassemble.base.logger": da_logger,
+            },
+        )
+
+        assert is_duplicate_include_log(
+            "Interview: source docassemble.ALToolbox:translation_strings.yml "
+            "has already been included.  Skipping."
+        )
+        assert is_duplicate_include_log(
+            "Interview: source docassemble.pkg:data/questions/shared.yml "
+            "has already been included. Skipping."
+        )
+        assert not is_duplicate_include_log(
+            "Interview: error reading YAML file main.yml in the block on line 1"
+        )
+
+        install_diagnostic_logging()
+        install_diagnostic_logging()  # idempotent
+
+        # Idempotent duplicate-include skips are suppressed even outside capture_diagnostics
+        da_logger.the_logmessage(
+            "Interview: source docassemble.ALToolbox:translation_strings.yml "
+            "has already been included.  Skipping."
+        )
+        # Lazy-seek logs pass through outside capture_diagnostics, and are suppressed inside
+        da_logger.the_logmessage(
+            "NameError exception during document assembly: foo is not defined"
+        )
+        with capture_diagnostics():
+            da_logger.the_logmessage(
+                "NameError exception during document assembly: bar is not defined"
+            )
+            da_logger.the_logmessage(
+                "Interview: source docassemble.ALToolbox:translation_strings.yml "
+                "has already been included.  Skipping."
+            )
+            da_logger.the_logmessage("Interview: error reading YAML file broken.yml")
+
+        assert emitted == [
+            "NameError exception during document assembly: foo is not defined",
+            "Interview: error reading YAML file broken.yml",
+        ]
+
 
 class TestStatusField:
     def test_modern_shape_passes_through(self):

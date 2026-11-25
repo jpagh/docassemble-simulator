@@ -126,11 +126,23 @@ def is_lazy_seek_log(message: Any) -> bool:
     )
 
 
+def is_duplicate_include_log(message: Any) -> bool:
+    """Whether a docassemble log line is an idempotent duplicate-include skip."""
+    text = str(message)
+    return text.startswith("Interview: source ") and text.endswith(
+        (
+            " has already been included.  Skipping.",
+            " has already been included. Skipping.",
+        )
+    )
+
+
 __all__ = [
     "Diagnostic",
     "capture_diagnostics",
     "is_capture_enabled",
     "is_collecting",
+    "is_duplicate_include_log",
     "is_lazy_seek_log",
     "record_culprit",
     "record_diagnostic",
