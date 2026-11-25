@@ -25,14 +25,15 @@ Live probes across both runtime compatibility lanes (`da19` for docassemble 1.9.
   - rely on `_runtime.install_attachment_filename_fallback()` for DOCX-only enforcement (ADR-0001 / ADR-0006 / ADR-0011) and map `PDFConversionUnavailable` to `pdf-unavailable`;
   - copy the produced DOCX to `--output` with atomic replacement and publish one `PublishedAttachment` entry with `validate_docx_structure` diagnostics.
 - Expose attachment rendering through two surfaces on `RenderRequest`, `sim render`, and the persistent worker's `render` request:
-  - explicit `--attachment VAR` (or worker `attachment`), mutually exclusive with positional `TEMPLATE` and rejected with `--fixture`;
+  - explicit `--attachment VAR` (or worker `attachment`), mutually exclusive with positional `TEMPLATE` and rejected with `--fixture`; generic `x`-rooted operands (such as `x.original[0].petition`) are rejected as `input` errors with concrete session candidate hints when available (or a domain-neutral `<object>` path hint otherwise), rather than evaluating whatever stale `x` remains in the session;
   - automatic resolution when `render TEMPLATE` targets a saved session or snapshot: match static `docx template file` entries, discover assembled Attachment candidates in the ephemeral namespace, auto-render when unambiguous (or when a single concrete entry needs no generic/index binding), and return an `input` error listing `details.candidates` when ambiguous or requiring `--attachment`. Unmatched templates and fixture sources continue using the direct render path unchanged.
-- Support `--expect-missing` on attachment renders by matching both the literal operand and the resolved alias derived from the attachment's prepared `field code`/`fields` bindings. Report `paragraph: null` when docxtpl does not provide a line number, and attribute `template` to the DOCX basename (including subdocs when docassemble sets `filename`).
+- Support `--expect-missing` on attachment renders by matching both the literal operand and the resolved alias derived from the attachment's prepared `field code`/`fields` bindings. Leave `paragraph` as `None` on Python `RenderFailure.details` (omitted from CLI/worker JSON envelopes by `_clean`) when docxtpl does not provide a line number, and attribute `template` to the DOCX basename (including subdocs when docassemble sets `filename`).
 
 ### Accepted deviations from server assembly
 
 - **Single-entry assembly only.** Sibling attachments in the same declaring block are not finalized by a targeted render; siblings reuse any cached collections already in the session or remain unassembled.
 - **No asking semantics.** `Question.exec_setup` (`undefine`, `need`, `reconsider`) is skipped because attachment rendering does not ask questions or seek new screens. `prepare_attachment` still executes authored `code`, `fields`, `field code`, and `valid formats` expressions inside the ephemeral namespace.
+- **Concrete `--attachment` operands and disambiguated collision reporting.** Unlike a raw variable lookup that might evaluate a leftover session `x`, explicit `--attachment VAR` rejects generic `x`-rooted operands (such as `x.original[0].petition` or `x.original[i].petition`) as `input` errors, naming assembled concrete candidates when present or a domain-neutral `<object>` hint otherwise. When multiple compiled entries match an explicit target, `details.candidates` remains bare variable templates while `details.entries` and the error message qualify colliding declarations with `question[indexno]`.
 
 ## Consequences
 

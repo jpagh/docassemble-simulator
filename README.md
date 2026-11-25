@@ -766,6 +766,10 @@ entry — the simulator renders through docassemble's own attachment machinery
 evaluates attachment-scoped `field code:`, `fields:`, `redact:`, generic `x`,
 index variables (`[i]`…`[n]`), `include_docx_template`, and
 `current_context().attachment` without manual `--bind` reconstruction.
+`--attachment VAR` must name a concrete object path (for example,
+`documents['stage'].original[0].petition`); generic `x`-rooted operands such as
+`x.original[0].petition` are rejected as `input` errors rather than evaluating
+whatever stale `x` remains in the session.
 
 Automatic resolution rules for `render TEMPLATE` (saved-session and snapshot
 sources only; fixture and fresh `TEMPLATE` renders stay on the direct path):

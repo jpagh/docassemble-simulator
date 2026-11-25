@@ -136,6 +136,18 @@ attachments:
     field code:
       - S: raw(documents['stage_a'])
 ---
+attachments:
+  - name: Bound Override Document
+    filename: Bound_Override
+    variable name: bound_override_doc
+    docx template file: bound.docx
+    valid formats:
+      - docx
+    fields:
+      - greeting: "${ bound_greeting }"
+    field code:
+      - S: raw(bound_stage)
+---
 mandatory: True
 question: All documents prepared.
 """
@@ -360,6 +372,11 @@ def attachment_workspace(tmp_path, real_python):  # noqa: F811 - imported fixtur
         templates / "standalone.docx",
         ["Greeting: {{ greeting }}", "Stage: {{ S.title }}"],
     )
+    _write_docx(
+        real_python,
+        templates / "bound.docx",
+        ["Greeting: {{ greeting }}", "Stage: {{ S.title }}"],
+    )
     return tmp_path
 
 
@@ -432,6 +449,28 @@ def test_explicit_attachment_renders_twins_subdoc_redact_and_preserves_session(
     # valid formats included 'pdf', yet no PDF file was created in .simulator/files
     files_dir = attachment_workspace / ".simulator" / "files"
     assert not list(files_dir.glob("*.pdf")), case.label
+
+    # --bind applies to the ephemeral namespace before attachment assembly
+    bound_out = tmp_path / f"bound-{case.label}.docx"
+    bound = _run(
+        case.interpreter,
+        attachment_workspace,
+        "render",
+        "--interview",
+        interview,
+        "--attachment",
+        "bound_override_doc",
+        "--bind",
+        "bound_greeting='Hello from CLI bind'",
+        "--bind",
+        "bound_stage=documents['stage_b']",
+        "--output",
+        str(bound_out),
+    )
+    assert bound["ok"] is True, (case.label, bound)
+    bound_text = _docx_text(bound_out)
+    assert "Hello from CLI bind" in bound_text, case.label
+    assert "Variance Petition Beta" in bound_text, case.label
 
     # Saved session is byte-identical after ephemeral attachment renders
     assert _session_hashes(attachment_workspace) == before_hashes, case.label
@@ -517,6 +556,41 @@ def test_expect_missing_aliases_pdf_only_and_sibling_isolation(
     case = family_python
     interview = "docassemble.attrender:data/questions/main.yml"
     _run(case.interpreter, attachment_workspace, "start", "--interview", interview)
+
+    # Generic x.-rooted operand is rejected as an input error (exit 1) rather than
+    # silently evaluating a stale session `x` and failing with a misleading UndefinedError.
+    generic_missing = _run(
+        case.interpreter,
+        attachment_workspace,
+        "render",
+        "--interview",
+        interview,
+        "--attachment",
+        "x.original[0].missing_check",
+        expected_code=1,
+    )
+    assert generic_missing["ok"] is False, case.label
+    assert generic_missing["error"]["kind"] == "input", case.label
+    assert "generic placeholder 'x'" in generic_missing["error"]["message"], case.label
+    assert (
+        "<object>.original[0].missing_check" in generic_missing["error"]["message"]
+    ), case.label
+
+    generic_assembled = _run(
+        case.interpreter,
+        attachment_workspace,
+        "render",
+        "--interview",
+        interview,
+        "--attachment",
+        "x.original[0].petition",
+        expected_code=1,
+    )
+    assert generic_assembled["ok"] is False, case.label
+    assert generic_assembled["error"]["kind"] == "input", case.label
+    assert generic_assembled["error"]["details"]["candidates"] == [
+        "documents['stage_a'].original[0].petition"
+    ], case.label
 
     # Missing variable fails with render error and resolved sought_variable
     failed = _run(

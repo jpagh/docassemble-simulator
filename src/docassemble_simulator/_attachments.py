@@ -47,6 +47,22 @@ class AttachmentInputError(ValueError):
         self.details = dict(details) if details else {}
 
 
+class AttachmentAssemblyError(Exception):
+    """Failure during attachment preparation or finalization with captured context."""
+
+    def __init__(
+        self,
+        cause: BaseException,
+        *,
+        canonical_variable: str,
+        prepared_bindings: Mapping[str, Any] | None = None,
+    ):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.canonical_variable = canonical_variable
+        self.prepared_bindings = dict(prepared_bindings) if prepared_bindings else {}
+
+
 @dataclass(frozen=True)
 class AttachmentEntry:
     """One compiled ``attachments:`` list item on a docassemble ``Question``."""
@@ -212,8 +228,27 @@ def _is_valid_expression(expression: str) -> bool:
     return True
 
 
-def match_variable(entry: AttachmentEntry, variable: str) -> AttachmentTarget | None:
-    """Match a concrete variable spelling against one ``AttachmentEntry``."""
+def _root_identifier(expression: str) -> str | None:
+    """Return the root identifier of a Python attribute/subscript expression."""
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return None
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _is_generic_x_root(expression: str) -> bool:
+    """Whether ``expression`` is rooted at docassemble's generic ``x`` placeholder."""
+    return _root_identifier(expression) == "x"
+
+
+def _match_variable_raw(
+    entry: AttachmentEntry, variable: str
+) -> AttachmentTarget | None:
     cleaned = variable.strip()
     if not cleaned:
         return None
@@ -234,16 +269,99 @@ def match_variable(entry: AttachmentEntry, variable: str) -> AttachmentTarget | 
     )
 
 
+def match_variable(entry: AttachmentEntry, variable: str) -> AttachmentTarget | None:
+    """Match a concrete variable spelling against one ``AttachmentEntry``.
+
+    Rejects generic ``x``-rooted operands (such as ``x.original[0].petition``)
+    when ``entry.is_generic`` is true, because ``x`` is a generic-object
+    placeholder rather than a concrete session variable.
+    """
+    target = _match_variable_raw(entry, variable)
+    if target is None:
+        return None
+    if target.x_expression is not None and _is_generic_x_root(target.x_expression):
+        return None
+    return target
+
+
+def _partition_targets(
+    entries: Sequence[AttachmentEntry], variable: str
+) -> tuple[list[AttachmentTarget], list[AttachmentTarget]]:
+    """Partition matching targets into concrete matches and rejected ``x``-rooted ones."""
+    cleaned = variable.strip()
+    if not cleaned:
+        return [], []
+    concrete: list[AttachmentTarget] = []
+    generic_x: list[AttachmentTarget] = []
+    for entry in entries:
+        target = _match_variable_raw(entry, cleaned)
+        if target is None:
+            continue
+        if target.x_expression is not None and _is_generic_x_root(target.x_expression):
+            generic_x.append(target)
+        else:
+            concrete.append(target)
+    if not concrete and not generic_x:
+        normalized = _INDEX_PATTERN.sub("[0]", cleaned)
+        if normalized != cleaned:
+            for entry in entries:
+                if not entry.is_generic:
+                    continue
+                target = _match_variable_raw(entry, normalized)
+                if (
+                    target is not None
+                    and target.x_expression is not None
+                    and _is_generic_x_root(target.x_expression)
+                ):
+                    generic_x.append(target)
+    return concrete, generic_x
+
+
 def resolve_targets(
     entries: Sequence[AttachmentEntry], variable: str
 ) -> list[AttachmentTarget]:
-    """Return every ``AttachmentTarget`` whose template matches ``variable``."""
-    targets: list[AttachmentTarget] = []
-    for entry in entries:
-        target = match_variable(entry, variable)
-        if target is not None:
-            targets.append(target)
-    return targets
+    """Return every concrete ``AttachmentTarget`` whose template matches ``variable``."""
+    concrete, _ = _partition_targets(entries, variable)
+    return concrete
+
+
+def _generic_x_error(
+    variable: str,
+    generic_targets: Sequence[AttachmentTarget],
+    *,
+    namespace: Mapping[str, Any] | None = None,
+) -> AttachmentInputError:
+    cleaned = variable.strip()
+    matched_entries = [target.entry for target in generic_targets]
+    concrete_candidates = (
+        [var for var, _ in discover_candidates(namespace, matched_entries)]
+        if namespace is not None
+        else []
+    )
+    details: dict[str, Any] = {"attachment": cleaned}
+    if concrete_candidates:
+        details["candidates"] = concrete_candidates
+        if len(concrete_candidates) == 1:
+            hint = (
+                f"pass a concrete object path instead (e.g. {concrete_candidates[0]!r})"
+            )
+        else:
+            shown = concrete_candidates[:5]
+            listed = ", ".join(shown)
+            if len(concrete_candidates) > 5:
+                listed = f"{listed}, ..."
+            hint = f"pass a concrete object path instead (available: {listed})"
+    else:
+        first = generic_targets[0]
+        x_expr = first.x_expression or "x"
+        normalized = _INDEX_PATTERN.sub("[0]", cleaned)
+        suffix = normalized[len(x_expr) :] if normalized.startswith(x_expr) else ""
+        example = f"<object>{suffix}"
+        hint = f"pass a concrete object path instead (for example, {example})"
+    return AttachmentInputError(
+        f"attachment {cleaned!r} uses generic placeholder 'x'; {hint}",
+        details,
+    )
 
 
 def _last_segment(variable: str) -> str:
@@ -253,13 +371,56 @@ def _last_segment(variable: str) -> str:
     return cleaned
 
 
+def _ambiguous_explicit_error(
+    cleaned: str, matches: Sequence[AttachmentTarget]
+) -> AttachmentInputError:
+    counts: dict[str, int] = {}
+    for target in matches:
+        name = target.entry.variable_name
+        counts[name] = counts.get(name, 0) + 1
+    entries = sorted(
+        (
+            {
+                "variable_name": target.entry.variable_name,
+                "question": target.entry.question_name,
+                "indexno": target.entry.indexno,
+            }
+            for target in matches
+        ),
+        key=lambda item: (item["variable_name"], item["question"], item["indexno"]),
+    )
+    labels: list[str] = []
+    for item in entries:
+        name = item["variable_name"]
+        if counts[name] > 1:
+            qualifier = (
+                f"{item['question']}[{item['indexno']}]"
+                if item["question"]
+                else f"#{item['indexno']}"
+            )
+            labels.append(f"{name} ({qualifier})")
+        else:
+            labels.append(name)
+    candidates = sorted({target.entry.variable_name for target in matches})
+    listed = ", ".join(labels)
+    return AttachmentInputError(
+        f"{cleaned!r} matches {len(matches)} attachment entries: {listed}",
+        {"candidates": candidates, "entries": entries},
+    )
+
+
 def resolve_explicit_target(
-    entries: Sequence[AttachmentEntry], variable: str
+    entries: Sequence[AttachmentEntry],
+    variable: str,
+    *,
+    namespace: Mapping[str, Any] | None = None,
 ) -> AttachmentTarget:
     """Resolve an explicit ``--attachment VAR`` to exactly one target."""
     cleaned = variable.strip()
-    matches = resolve_targets(entries, cleaned)
+    matches, generic_x_matches = _partition_targets(entries, cleaned)
     if not matches:
+        if generic_x_matches:
+            raise _generic_x_error(cleaned, generic_x_matches, namespace=namespace)
         tail = _last_segment(cleaned)
         similar = sorted(
             {
@@ -276,11 +437,7 @@ def resolve_explicit_target(
             )
         raise AttachmentInputError(f"no attachment block declares {cleaned!r}")
     if len(matches) > 1:
-        templates = sorted({target.entry.variable_name for target in matches})
-        raise AttachmentInputError(
-            f"{cleaned!r} matches {len(matches)} attachment entries",
-            {"candidates": templates},
-        )
+        raise _ambiguous_explicit_error(cleaned, matches)
     return matches[0]
 
 
@@ -435,11 +592,44 @@ def resolve_automatic_target(
 
     entry_templates = sorted({entry.variable_name for entry in matching_entries})
     listed = ", ".join(entry_templates)
+    hint = (
+        "pass --attachment with a concrete object path "
+        "(replacing generic 'x' or index placeholders)"
+        if any(not entry.is_concrete for entry in matching_entries)
+        else "pass --attachment VAR"
+    )
     raise AttachmentInputError(
         f"{template} has no assembled attachment instance in this session "
-        f"(declared by {listed}); pass --attachment VAR",
+        f"(declared by {listed}); {hint}",
         {"template": template, "candidates": entry_templates},
     )
+
+
+def _substitute_indices(
+    text: str,
+    *mappings: Mapping[str, Any] | None,
+    int_only: bool = False,
+) -> str:
+    result = text
+    for idx_name in INDEX_NAMES:
+        found = False
+        idx_value: Any = None
+        for mapping in mappings:
+            if mapping is not None and idx_name in mapping:
+                idx_value = mapping[idx_name]
+                found = True
+                break
+        if not found:
+            continue
+        if int_only and (not isinstance(idx_value, int) or isinstance(idx_value, bool)):
+            continue
+        replacement = f"[{idx_value!r}]"
+        result = re.sub(
+            r"\[" + idx_name + r"\]",
+            lambda _match, rep=replacement: rep,
+            result,
+        )
+    return result
 
 
 def _fallback_canonical_name(
@@ -453,15 +643,7 @@ def _fallback_canonical_name(
         instance_name = _safe_instance_name(namespace["x"])
         if instance_name:
             var = re.sub(r"^x\b", lambda _match: instance_name, var)
-    for item in INDEX_NAMES:
-        if item in namespace:
-            replacement = f"[{namespace[item]!r}]"
-            var = re.sub(
-                r"\[" + item + r"\]",
-                lambda _match, rep=replacement: rep,
-                var,
-            )
-    return var
+    return _substitute_indices(var, namespace)
 
 
 def canonical_variable_name(
@@ -533,20 +715,7 @@ def resolve_expect_missing_alias(
         return None
     head, tail = match.group(1), match.group(2)
 
-    substituted_tail = tail
-    for idx_name in INDEX_NAMES:
-        idx_value = None
-        if bindings and idx_name in bindings:
-            idx_value = bindings[idx_name]
-        elif idx_name in namespace:
-            idx_value = namespace[idx_name]
-        if isinstance(idx_value, int):
-            replacement = f"[{idx_value!r}]"
-            substituted_tail = re.sub(
-                r"\[" + idx_name + r"\]",
-                lambda _m, rep=replacement: rep,
-                substituted_tail,
-            )
+    substituted_tail = _substitute_indices(tail, bindings, namespace, int_only=True)
 
     target_obj = None
     if bindings and head in bindings:
@@ -595,9 +764,6 @@ def _validate_docx_entry(target: AttachmentTarget) -> None:
 def assemble_attachment(
     namespace: dict[str, Any],
     target: AttachmentTarget,
-    *,
-    prepared_bindings: dict[str, Any] | None = None,
-    state: dict[str, Any] | None = None,
 ) -> AttachmentAssembly:
     """Assemble one attachment target in the already-entered runtime context."""
     _validate_docx_entry(target)
@@ -613,44 +779,54 @@ def assemble_attachment(
     for idx_name, idx_value in target.index_values:
         namespace[idx_name] = int(idx_value)
 
-    canonical = canonical_variable_name(
-        target.entry.variable_name,
-        namespace,
-        is_generic=target.entry.is_generic,
+    canonical = (
+        canonical_variable_name(
+            target.entry.variable_name,
+            namespace,
+            is_generic=target.entry.is_generic,
+        )
+        or target.variable
     )
-    if state is not None:
-        state["canonical"] = canonical
     _undefine_variables(namespace, target.variable, canonical)
 
     question = target.entry.question
-    prepared = question.prepare_attachment(target.entry.attachment, namespace)
-    if prepared_bindings is not None and isinstance(prepared, dict):
-        field_data = prepared.get("field_data")
-        if isinstance(field_data, dict):
-            prepared_bindings.clear()
-            prepared_bindings.update(field_data)
+    prepared_bindings: dict[str, Any] = {}
+    try:
+        prepared = question.prepare_attachment(target.entry.attachment, namespace)
+        if isinstance(prepared, dict):
+            field_data = prepared.get("field_data")
+            if isinstance(field_data, dict):
+                prepared_bindings = dict(field_data)
 
-    finalized = question.finalize_attachment(
-        target.entry.attachment, prepared, namespace
-    )
-    formats_to_use = finalized.get("formats_to_use") or ()
-    if "pdf" in formats_to_use:
-        raise RuntimeError(
-            "unexpected PDF format remained after attachment finalization"
+        finalized = question.finalize_attachment(
+            target.entry.attachment, prepared, namespace
         )
-    files_map = finalized.get("file") or {}
-    if "docx" not in files_map or files_map["docx"] is None:
-        raise AttachmentInputError(
-            f"attachment {canonical!r} did not produce a DOCX output"
-        )
+        formats_to_use = finalized.get("formats_to_use") or ()
+        if "pdf" in formats_to_use:
+            raise RuntimeError(
+                "unexpected PDF format remained after attachment finalization"
+            )
+        files_map = finalized.get("file") or {}
+        if "docx" not in files_map or files_map["docx"] is None:
+            raise AttachmentInputError(
+                f"attachment {canonical!r} did not produce a DOCX output"
+            )
 
-    collection = eval(canonical, namespace)
-    docx_file = getattr(collection, "docx", None)
-    if docx_file is None:
-        raise AttachmentInputError(
-            f"attachment {canonical!r} collection has no docx format"
-        )
-    docx_path = Path(docx_file.path()).resolve()
+        collection = eval(canonical, namespace)
+        docx_file = getattr(collection, "docx", None)
+        if docx_file is None:
+            raise AttachmentInputError(
+                f"attachment {canonical!r} collection has no docx format"
+            )
+        docx_path = Path(docx_file.path()).resolve()
+    except AttachmentInputError:
+        raise
+    except Exception as error:
+        raise AttachmentAssemblyError(
+            error,
+            canonical_variable=canonical,
+            prepared_bindings=prepared_bindings,
+        ) from error
     raw_filename = getattr(docx_file, "filename", None)
     if isinstance(raw_filename, str) and raw_filename.strip():
         filename = Path(raw_filename.strip()).name
@@ -671,6 +847,7 @@ def assemble_attachment(
 __all__ = [
     "INDEX_NAMES",
     "AttachmentAssembly",
+    "AttachmentAssemblyError",
     "AttachmentEntry",
     "AttachmentInputError",
     "AttachmentTarget",

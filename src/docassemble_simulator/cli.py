@@ -876,6 +876,20 @@ def _catalog_worker_outcome(envelope):
     )
 
 
+@dataclass(frozen=True)
+class _WorkerRenderFields:
+    """Decoded inputs for one persistent-worker ``render`` request."""
+
+    template: str | None
+    source: Any
+    assemble: bool
+    save_snapshot: Path | None
+    output: Path | None
+    expect_missing: str | None
+    bindings: tuple[tuple[str, str], ...]
+    attachment: str | None
+
+
 def _render_worker_request(args, worker, request):
     """Map one worker `render` request and render it with the worker's session.
 
@@ -889,29 +903,20 @@ def _render_worker_request(args, worker, request):
     from docassemble_simulator.worker import WorkerProtocolError
 
     try:
-        (
-            template,
-            source,
-            assemble,
-            save_snapshot,
-            output,
-            expect_missing,
-            bindings,
-            attachment,
-        ) = _worker_render_fields(request)
+        decoded = _worker_render_fields(request)
     except InputFailure as error:
         raise WorkerProtocolError(str(error)) from error
     render_request = _render_request(
-        template,
-        source,
-        assemble=assemble,
-        save_snapshot=save_snapshot,
-        output=output,
-        expect_missing=expect_missing,
+        decoded.template,
+        decoded.source,
+        assemble=decoded.assemble,
+        save_snapshot=decoded.save_snapshot,
+        output=decoded.output,
+        expect_missing=decoded.expect_missing,
         bindings=_configured_bindings(
-            getattr(args, "_simulator_config", {}), template, bindings
+            getattr(args, "_simulator_config", {}), decoded.template, decoded.bindings
         ),
-        attachment=attachment,
+        attachment=decoded.attachment,
     )
     outcome = InterviewRenderer(worker.root, worker.execution).render(render_request)
     # ``sim render --json`` drops absent fields (a null artifact when --output
@@ -919,35 +924,18 @@ def _render_worker_request(args, worker, request):
     return replace(outcome, result=_clean(outcome.result))
 
 
-def _worker_render_fields(request):
+def _worker_render_fields(request) -> _WorkerRenderFields:
     """Decode a worker `render` request into ``sim render`` inputs."""
     from docassemble_simulator.render import (
         FixtureSource,
         FreshSource,
         SavedSessionSource,
         SnapshotSource,
+        _validate_render_target,
     )
 
-    raw_template = _worker_field(request, "template")
-    if raw_template is not None:
-        if not isinstance(raw_template, str) or not raw_template.strip():
-            raise InputFailure("render template must be a non-empty string")
-        template = raw_template.strip()
-    else:
-        template = None
-
-    raw_attachment = _worker_field(request, "attachment")
-    if raw_attachment is not None:
-        if not isinstance(raw_attachment, str) or not raw_attachment.strip():
-            raise InputFailure("render attachment must be a non-empty string")
-        attachment = raw_attachment.strip()
-    else:
-        attachment = None
-
-    if template is not None and attachment is not None:
-        raise InputFailure("render accepts either template or attachment, not both")
-    if template is None and attachment is None:
-        raise InputFailure("render requires a template or attachment")
+    template = _worker_optional_nonempty_string(request, "template")
+    attachment = _worker_optional_nonempty_string(request, "attachment")
 
     source_name = request.get("source")
     if source_name is None:
@@ -956,12 +944,10 @@ def _worker_render_fields(request):
         raise InputFailure("render source must be a string")
     normalized = source_name.strip().lower().replace("_", "-")
     if normalized == "saved":
-        source = SavedSessionSource()
+        source: Any = SavedSessionSource()
     elif normalized == "fresh":
         source = FreshSource()
     elif normalized in {"fixture", "snapshot"}:
-        if normalized == "fixture" and attachment is not None:
-            raise InputFailure("fixture render source cannot be used with attachment")
         path = _worker_optional_path(request, "path")
         if path is None:
             raise InputFailure(f"render source {normalized} requires a path")
@@ -970,15 +956,29 @@ def _worker_render_fields(request):
         )
     else:
         raise InputFailure(f"unknown render source: {normalized}")
-    return (
-        template,
-        source,
-        not _worker_flag(request, "no_assemble", "no-assemble"),
-        _worker_optional_path(request, "save_snapshot", "save-snapshot"),
-        _worker_optional_path(request, "output"),
-        _worker_optional_string(request, "expect_missing", "expect-missing"),
-        _parse_bindings(_worker_binding_pairs(request.get("bindings"))),
-        attachment,
+
+    try:
+        template, attachment = _validate_render_target(
+            template,
+            attachment,
+            source,
+            template_label="template",
+            attachment_label="attachment",
+        )
+    except ValueError as error:
+        raise InputFailure(str(error)) from error
+
+    return _WorkerRenderFields(
+        template=template,
+        source=source,
+        assemble=not _worker_flag(request, "no_assemble", "no-assemble"),
+        save_snapshot=_worker_optional_path(request, "save_snapshot", "save-snapshot"),
+        output=_worker_optional_path(request, "output"),
+        expect_missing=_worker_optional_string(
+            request, "expect_missing", "expect-missing"
+        ),
+        bindings=tuple(_parse_bindings(_worker_binding_pairs(request.get("bindings")))),
+        attachment=attachment,
     )
 
 
@@ -1006,6 +1006,15 @@ def _worker_optional_string(request, *names):
     if not isinstance(value, str):
         raise InputFailure(f"render {names[0]} must be a string")
     return value
+
+
+def _worker_optional_nonempty_string(request, *names) -> str | None:
+    value = _worker_field(request, *names)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise InputFailure(f"render {names[0]} must be a non-empty string")
+    return value.strip()
 
 
 def _worker_optional_path(request, *names):

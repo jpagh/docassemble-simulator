@@ -172,10 +172,10 @@ entry's (first) static DOCX filename for explicit `--attachment`.
 {"ok": false, "command": "render",
  "error": {"kind": "render", "message": "'documents['petition'].notary_block_yn' is undefined",
            "details": {"template": "petition.docx", "error_type": "UndefinedError",
-                       "paragraph": null,
                        "sought_variable": "documents['petition'].notary_block_yn",
                        "expected_missing": "S.notary_block_yn"}}}
 ```
+(`paragraph` is `None` in Python `RenderFailure.details` and omitted from CLI/worker JSON envelopes when unavailable, matching direct-render errors.)
 
 ## 4. Resolution
 
@@ -188,10 +188,18 @@ entry's (first) static DOCX filename for explicit `--attachment`.
 2. Match `VAR` against each entry's template:
    - leading `x` is a placeholder only when `question.is_generic` (root expression
      group), and `[i]`…`[n]` are index placeholder groups (`-?\d+`);
-   - all other text (dotted names, quoted keys) must match literally.
+   - all other text (dotted names, quoted keys) must match literally;
+   - generic `x`-rooted operands (such as `x.original[0].petition` or
+     `x.original[i].petition`) are rejected as `input` errors rather than evaluating
+     a stale `x` in the session, listing assembled concrete candidates from the
+     namespace when available or a domain-neutral `<object>` path hint otherwise.
    Match results are `(entry, x_expression, index_values)`.
 3. 0 matches → `input` error: "no attachment block declares VAR", listing entry
-   templates that share the variable's last segment. >1 → `input` error listing them.
+   templates that share the variable's last segment (or the generic-`x` input error
+   above when `VAR` only matched a generic entry with an `x`-rooted operand).
+   >1 → `input` error with bare templates in `details.candidates`, structured
+   `details.entries` (`variable_name`, `question`, `indexno`), and colliding
+   declarations qualified by `question[indexno]` in the error message.
 4. Assemble (§5), then verify the produced collection has a `docx` format; if the entry
    is a `manual`/`manual code` or non-DOCX entry, `input` error before assembly.
 
@@ -298,7 +306,8 @@ def assemble(namespace, target) -> AttachmentAssembly:
 | `TemplateError` with `filename` | `render` | attributed to the subdoc when it resolves under a `data/templates` directory |
 | `PDFConversionUnavailable` | `pdf-unavailable` | `error_type`, target variable |
 | `DASourceError` (missing template file, bad option) | `render` | `error_type`, message |
-| unknown variable, ambiguity, fixture+attachment, both surfaces | `input` | `candidates`, `template` |
+| generic `x`-rooted `--attachment VAR` | `input` | `attachment`, `candidates` (when assembled instances exist) |
+| unknown variable, ambiguity, fixture+attachment, both surfaces | `input` | `candidates`, `entries` (explicit ambiguity), `template` |
 
 Expectation matching (in attachment mode):
 
@@ -344,11 +353,13 @@ Done when: ADR accepted in review; issue carries the acceptance criteria below.
   `resolve_targets`, `discover_candidates`, `assemble_attachment`,
   `canonical_variable_name`.
 - `_artifacts.py` helpers.
-- Unit tests (`tests/test_attachment_render.py`): matcher (generic root, `[i]`…`[n]`,
-  quoted keys, nested template paths, code-based templates excluded, ambiguity),
-  candidate discovery with fake objects (`elements` dict/list, `vars()`, cycles,
-  `attrList` empty), canonical-name substitution with a stub namespace, DOCX paragraph
-  counting from a generated zip.
+- Contract tests (`tests/test_attachment_render.py`, routed through
+  `InterviewRenderer.render` per ADR-0002): matcher (generic root, `[i]`…`[n]`,
+  quoted keys, generic-`x` rejection, nested template paths, code-based templates
+  excluded, ambiguity), candidate discovery with fake objects (`elements` dict/list,
+  `vars()`, cycles, `attrList` empty), canonical-name substitution, `--bind`
+  ordering, nested subdoc attribution, and DOCX paragraph counting / published
+  attachment assertions.
 
 Done when: `uv run pytest tests/test_attachment_render.py tests/test_render.py
 tests/test_render_contract.py` passes; no behaviour change for existing renders.
@@ -445,7 +456,8 @@ included with `Document Filed`, employer details redacted), plus
   server assembly, and only in the ephemeral namespace.
 - **Paragraph attribution.** `lineno` is absent on docxtpl template errors through this
   path; the `template` field carries the DOCX basename (including included subdocs when
-  docassemble sets `filename`). Keep `paragraph: null` rather than inventing one.
+  docassemble sets `filename`). Keep `paragraph` as `None` on `RenderFailure.details`
+  (omitted in CLI/worker JSON) rather than inventing one.
 - **Nested attribute errors** (`S.cos.filer`) report the first missing attribute
   (`documents[...].cos`), matching docassemble's `DAStrictUndefined` message; document
   the shape.

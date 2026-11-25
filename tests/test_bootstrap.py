@@ -701,6 +701,7 @@ class TestLocalAttachments:
         second = LocalFileRegistry(tmp_path / ".simulator" / "files")
         with capture_published_attachments() as published:
             uri = second.url_for(types.SimpleNamespace(number=number))
+            uri_again = second.url_for(types.SimpleNamespace(number=number))
 
         found = second.find(number)
         assert extension == "docx"
@@ -710,6 +711,7 @@ class TestLocalAttachments:
         assert found["filename"] == "Family Plan.docx"
         assert Path(found["path"]).read_bytes() == b"docx"
         assert uri == Path(found["path"]).resolve().as_uri()
+        assert uri_again == uri
         assert len(published) == 1
         assert published[0].filename == "Family Plan.docx"
         assert published[0].uri == uri

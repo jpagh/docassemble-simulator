@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 from docassemble_simulator._artifacts import publish_attachment
 from docassemble_simulator._attachments import (
+    AttachmentAssemblyError,
     AttachmentInputError,
     AttachmentTarget,
     assemble_attachment,
@@ -349,6 +350,37 @@ def _apply_bindings(
             ) from error
 
 
+def _validate_render_target(
+    template: str | None,
+    attachment: str | None,
+    source: RenderSource,
+    *,
+    template_label: str = "TEMPLATE",
+    attachment_label: str = "--attachment",
+) -> tuple[str | None, str | None]:
+    """Validate render target mutual exclusion and fixture compatibility."""
+    cleaned_template = (
+        template.strip() if isinstance(template, str) and template.strip() else None
+    )
+    cleaned_attachment = (
+        attachment.strip()
+        if isinstance(attachment, str) and attachment.strip()
+        else None
+    )
+    if cleaned_template is not None and cleaned_attachment is not None:
+        raise ValueError(
+            f"specify either {template_label} or {attachment_label}, not both"
+        )
+    if cleaned_template is None and cleaned_attachment is None:
+        raise ValueError(f"specify either {template_label} or {attachment_label}")
+    if isinstance(source, FixtureSource) and cleaned_attachment is not None:
+        raise ValueError(
+            f"fixture rendering cannot assemble attachments; omit {attachment_label} "
+            "or use a saved-session, snapshot, or fresh source"
+        )
+    return cleaned_template, cleaned_attachment
+
+
 class InterviewRenderer:
     """Own render validation, evaluation, expectations, and artifact effects."""
 
@@ -359,34 +391,14 @@ class InterviewRenderer:
     def render(self, request: RenderRequest):
         from docassemble_simulator.execution import _RenderPreparation
 
-        template = (
-            request.template.strip()
-            if isinstance(request.template, str) and request.template.strip()
-            else None
-        )
-        attachment = (
-            request.attachment.strip()
-            if isinstance(request.attachment, str) and request.attachment.strip()
-            else None
-        )
-        if template is not None and attachment is not None:
-            return _render_failure(
-                "input",
-                "specify either TEMPLATE or --attachment, not both",
+        try:
+            template, attachment = _validate_render_target(
+                request.template, request.attachment, request.source
             )
-        if template is None and attachment is None:
-            return _render_failure(
-                "input",
-                "specify either TEMPLATE or --attachment",
-            )
+        except ValueError as error:
+            return _render_failure("input", str(error))
 
         if isinstance(request.source, FixtureSource):
-            if attachment is not None:
-                return _render_failure(
-                    "input",
-                    "fixture rendering cannot assemble attachments; omit --attachment "
-                    "or use a saved-session, snapshot, or fresh source",
-                )
             if request.assemble:
                 return _render_failure("input", "fixture rendering cannot assemble")
             if not request.source.path.is_file():
@@ -436,7 +448,9 @@ class InterviewRenderer:
             if attachment is not None:
                 try:
                     entries = enumerate_entries(interview)
-                    target = resolve_explicit_target(entries, attachment)
+                    target = resolve_explicit_target(
+                        entries, attachment, namespace=namespace
+                    )
                 except AttachmentInputError as error:
                     return RenderOutcome(
                         False,
@@ -568,18 +582,11 @@ class InterviewRenderer:
         *,
         requested_template: str | None,
     ) -> RenderOutcome:
-        prepared_bindings: dict[str, Any] = {}
-        state: dict[str, Any] = {"canonical": target.variable}
         fallback_template = (
             requested_template or target.entry.first_template or target.variable
         )
         try:
-            assembly = assemble_attachment(
-                namespace,
-                target,
-                prepared_bindings=prepared_bindings,
-                state=state,
-            )
+            assembly = assemble_attachment(namespace, target)
             if request.expect_missing:
                 raise RenderExpectationError(
                     f"expected missing variable {request.expect_missing!r}, "
@@ -607,17 +614,7 @@ class InterviewRenderer:
                 error=RenderFailure(ErrorKind.INPUT, str(error), error.details),
             )
         except PDFConversionUnavailable as error:
-            return RenderOutcome(
-                False,
-                error=RenderFailure(
-                    ErrorKind.PDF_UNAVAILABLE,
-                    str(error),
-                    {
-                        "error_type": type(error).__name__,
-                        "attachment": state.get("canonical") or target.variable,
-                    },
-                ),
-            )
+            return _pdf_unavailable_outcome(error, target.variable)
         except (RenderExpectationError, OSError) as error:
             return RenderOutcome(
                 False,
@@ -630,17 +627,23 @@ class InterviewRenderer:
                     },
                 ),
             )
-        except Exception as error:  # noqa: BLE001 - attachment assembly may raise any template/runtime error
-            error_type = type(error).__name__
-            message = str(error).strip() or error_type
-            paragraph = _exception_line(error)
-            sought_variable = _extract_sought_variable(error)
+        except AttachmentAssemblyError as assembly_error:
+            cause = assembly_error.cause
+            canonical = assembly_error.canonical_variable
+            if isinstance(cause, PDFConversionUnavailable):
+                return _pdf_unavailable_outcome(cause, canonical)
+            error_type = type(cause).__name__
+            message = str(cause).strip() or error_type
+            paragraph = _exception_line(cause)
+            sought_variable = _extract_sought_variable(cause)
             attributed = _attachment_attributed_template(
-                self.root, error, fallback_template
+                self.root, cause, fallback_template
             )
             resolved_alias = (
                 resolve_expect_missing_alias(
-                    request.expect_missing, prepared_bindings, namespace
+                    request.expect_missing,
+                    assembly_error.prepared_bindings,
+                    namespace,
                 )
                 if request.expect_missing
                 else None
@@ -657,7 +660,7 @@ class InterviewRenderer:
                         fallback_template,
                         0,
                         None,
-                        attachment=state.get("canonical") or target.variable,
+                        attachment=canonical,
                     ),
                 )
             details: dict[str, Any] = {
@@ -681,6 +684,20 @@ def _render_failure(kind: ErrorKind | str, message: str) -> RenderOutcome:
     return RenderOutcome(False, error=RenderFailure(ErrorKind(kind), message, {}))
 
 
+def _pdf_unavailable_outcome(error: BaseException, attachment: str) -> RenderOutcome:
+    return RenderOutcome(
+        False,
+        error=RenderFailure(
+            ErrorKind.PDF_UNAVAILABLE,
+            str(error),
+            {
+                "error_type": type(error).__name__,
+                "attachment": attachment,
+            },
+        ),
+    )
+
+
 def _template_directories(root: Path) -> list[Path]:
     return [
         path.resolve()
@@ -689,16 +706,47 @@ def _template_directories(root: Path) -> list[Path]:
     ]
 
 
+def _resolve_package_template(
+    root: Path, reference: str, *, allow_relative: bool = True
+) -> Path | None:
+    """Resolve a template path or relative filename inside ``data/templates``."""
+    cleaned = reference.strip()
+    if not cleaned:
+        return None
+    template_dirs = _template_directories(root)
+    if not template_dirs:
+        return None
+    candidate = Path(cleaned).expanduser()
+    if candidate.is_file():
+        resolved = candidate.resolve()
+        if any(resolved.is_relative_to(directory) for directory in template_dirs):
+            return resolved
+        return None
+    if not allow_relative or candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    for directory in template_dirs:
+        direct = (directory / candidate).resolve()
+        if direct.is_relative_to(directory) and direct.is_file():
+            return direct
+    if len(candidate.parts) == 1 and candidate.name:
+        nested = [
+            match.resolve()
+            for directory in template_dirs
+            for match in directory.rglob(candidate.name)
+            if match.is_file() and match.resolve().is_relative_to(directory)
+        ]
+        if len(nested) == 1:
+            return nested[0]
+    return None
+
+
 def _attributed_template(root: Path, error: RenderError, requested: str) -> str:
     """Prefer an exception template only when it maps to a real package file."""
     if error.template is None:
         return requested
-    candidate = Path(error.template).expanduser()
-    if not candidate.is_file():
-        return requested
-    resolved = candidate.resolve()
-    if any(
-        resolved.is_relative_to(directory) for directory in _template_directories(root)
+    if (
+        _resolve_package_template(root, error.template, allow_relative=False)
+        is not None
     ):
         return error.template
     return requested
@@ -710,19 +758,15 @@ def _attachment_attributed_template(
     """Attribute an attachment render failure to a DOCX basename when reliable."""
     filename = _exception_template(error)
     if filename is not None:
-        candidate = Path(filename).expanduser()
-        template_dirs = _template_directories(root)
-        if candidate.is_file():
-            resolved = candidate.resolve()
-            if any(resolved.is_relative_to(directory) for directory in template_dirs):
-                return resolved.name
-        else:
-            # docassemble sets TemplateError.filename to comma-joined basenames.
+        # docassemble sets TemplateError.filename to either a path or
+        # comma-joined basenames.
+        resolved = _resolve_package_template(root, filename)
+        if resolved is None and "," in filename:
             first = filename.split(",", 1)[0].strip()
             if first:
-                for directory in template_dirs:
-                    if (directory / first).is_file():
-                        return Path(first).name
+                resolved = _resolve_package_template(root, first)
+        if resolved is not None:
+            return resolved.name
     return Path(fallback).name if fallback.endswith(".docx") else fallback
 
 

@@ -25,6 +25,37 @@ _ACTIVE_REGISTRY: ContextVar[LocalFileRegistry | None] = ContextVar(
 )
 
 
+_WORD_PARAGRAPH_TAG = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
+
+
+def _record_published_attachment(
+    path: Path,
+    filename: str,
+    extension: str,
+    mimetype: str,
+) -> PublishedAttachment:
+    normalized_ext = extension.lower()
+    diagnostics = (
+        tuple(validate_docx_structure(path)) if normalized_ext == "docx" else ()
+    )
+    structure = (
+        "n/a" if normalized_ext != "docx" else ("warning" if diagnostics else "ok")
+    )
+    attachment = PublishedAttachment(
+        filename,
+        extension,
+        mimetype,
+        path,
+        path.as_uri(),
+        diagnostics,
+        structure,
+    )
+    published = _PUBLISHED.get()
+    if published is not None and all(item.path != path for item in published):
+        published.append(attachment)
+    return attachment
+
+
 @contextmanager
 def capture_published_attachments():
     attachments: list[PublishedAttachment] = []
@@ -136,30 +167,13 @@ class LocalFileRegistry:
         path = Path(metadata["path"]).resolve()
         if not path.is_file():
             return None
-        uri = path.as_uri()
-        diagnostics = (
-            tuple(validate_docx_structure(path))
-            if str(metadata["extension"]).lower() == "docx"
-            else ()
-        )
-        structure = (
-            "n/a"
-            if str(metadata["extension"]).lower() != "docx"
-            else ("warning" if diagnostics else "ok")
-        )
-        attachment = PublishedAttachment(
+        attachment = _record_published_attachment(
+            path,
             str(metadata["filename"]),
             str(metadata["extension"]),
             str(metadata["mimetype"]),
-            path,
-            uri,
-            diagnostics,
-            structure,
         )
-        published = _PUBLISHED.get()
-        if published is not None and all(item.path != path for item in published):
-            published.append(attachment)
-        return uri
+        return attachment.uri
 
     def _read_index(self) -> dict[str, Any]:
         if not self.index_path.is_file():
@@ -217,7 +231,6 @@ class LocalFileRegistry:
 def validate_docx_structure(path: str | Path) -> list[Diagnostic]:
     """Report strict paragraph nesting without mutating the DOCX package."""
     diagnostics: list[Diagnostic] = []
-    paragraph_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
     try:
         with ZipFile(path) as archive:
             parts = [
@@ -232,8 +245,8 @@ def validate_docx_structure(path: str | Path) -> list[Diagnostic]:
                     continue
                 count = sum(
                     1
-                    for paragraph in root.iter(paragraph_tag)
-                    for descendant in paragraph.iter(paragraph_tag)
+                    for paragraph in root.iter(_WORD_PARAGRAPH_TAG)
+                    for descendant in paragraph.iter(_WORD_PARAGRAPH_TAG)
                     if descendant is not paragraph
                 )
                 if count:
@@ -255,13 +268,12 @@ def validate_docx_structure(path: str | Path) -> list[Diagnostic]:
 
 def docx_paragraph_count(path: str | Path) -> int:
     """Count WordprocessingML paragraphs in ``word/document.xml``."""
-    paragraph_tag = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
     try:
         with ZipFile(path) as archive:
             root = ET.fromstring(archive.read("word/document.xml"))
     except (BadZipFile, KeyError, OSError, ET.ParseError):
         return 0
-    return sum(1 for _ in root.iter(paragraph_tag))
+    return sum(1 for _ in root.iter(_WORD_PARAGRAPH_TAG))
 
 
 def publish_attachment(
@@ -273,24 +285,7 @@ def publish_attachment(
     suffix = Path(display_name).suffix or resolved.suffix
     extension = suffix.lstrip(".").lower()
     mimetype = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
-    uri = resolved.as_uri()
-    diagnostics = (
-        tuple(validate_docx_structure(resolved)) if extension == "docx" else ()
-    )
-    structure = "n/a" if extension != "docx" else ("warning" if diagnostics else "ok")
-    attachment = PublishedAttachment(
-        display_name,
-        extension,
-        mimetype,
-        resolved,
-        uri,
-        diagnostics,
-        structure,
-    )
-    published = _PUBLISHED.get()
-    if published is not None and all(item.path != resolved for item in published):
-        published.append(attachment)
-    return attachment
+    return _record_published_attachment(resolved, display_name, extension, mimetype)
 
 
 def activate_file_registry(directory: str | Path) -> LocalFileRegistry:
